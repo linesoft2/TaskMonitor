@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<winex:WindowEx
+    xmlns:winex="using:WinUIEx" Width="1024" Height="768" IsTitleBarVisible="True" IsAlwaysOnTop="True"
+    x:Class="LineMonitor.Views.BlankWindow1"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:LineMonitor.Views"
+    xmlns:vm="using:LineMonitor.ViewModels"
+    xmlns:model="using:LineMonitor.Models"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:winuiex="using:WinUIEx"
+    mc:Ignorable="d">
+    <winex:WindowEx.SystemBackdrop>
+        <winuiex:TransparentTintBackdrop />
+    </winex:WindowEx.SystemBackdrop>
+    <StackPanel x:Name="RootPanel" Orientation="Horizontal">
+        <GridView x:Name="Grid" ItemsSource="{Binding MyTotalDatas}" SizeChanged="Grid_SizeChanged">
+            <GridView.ItemTemplate>
+                <DataTemplate x:DataType="vm:MyTotalData">
+                    <StackPanel x:Name="InnerStack" Width="70">
+                        <TextBlock HorizontalTextAlignment="Center" Text="{Binding Title}"/>
+                        <TextBlock HorizontalTextAlignment="Center" Text="{Binding Value}"/>
+                    </StackPanel>
+                </DataTemplate>
+            </GridView.ItemTemplate>
+        </GridView>
+    </StackPanel>
+    
+</winex:WindowEx>

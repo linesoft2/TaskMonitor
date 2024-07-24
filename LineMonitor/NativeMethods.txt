@@ -1,0 +1,6 @@
+GlobalMemoryStatusEx
+SetParent
+GetWindowRect
+FindWindow
+MoveWindow
+FindWindowEx
