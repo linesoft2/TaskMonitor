@@ -1,4 +1,3 @@
-
 # TaskMonitor
 
 **中文** | English (TODO)
@@ -15,7 +14,10 @@
 
 下载入口：[CNB(大陆友好)](https://cnb.cool/linesoft2/TaskMonitor/-/releases) | [GitHub](https://github.com/linesoft2/TaskMonitor/releases)
 
-在下载并打开后，可以在**系统任务栏**的左侧 / 右侧（取决于任务栏设置）看到常驻的任务栏窗口，点击某个项目即可查看该项的详情和该项目的高占用进程。
+在下载并打开后，可以在**系统任务栏**的左侧 / 右侧（取决于任务栏设置）看到常驻的任务栏窗口（如下图所示），点击某个项目即可查看该项的详情和该项目的高占用进程。
+<p align="center">
+  <img src="assets/taskbar_window.png" alt="TaskMonitor">
+</p>
 
 ## 制作背景
 
