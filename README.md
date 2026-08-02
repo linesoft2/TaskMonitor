@@ -6,7 +6,7 @@
 从进程维度实时监测系统负载情况。
 
 <p align="center">
-  <img src="assets/header.png" alt="TaskMonitor">
+  <img src="assets/header.webp" alt="TaskMonitor">
 </p>
 
 ## 安装 & 使用
