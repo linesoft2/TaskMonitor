@@ -1,0 +1,72 @@
+# 打 v* tag 推送后自动发布：windows-latest 构建单文件 exe → GitHub Release → CNB Release（镜像）。
+# CNB_TOKEN secret 需要 repo-code 读写（推 tag）+ repo-contents 读写（创建 release / 上传附件）。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # GITHUB_TOKEN 创建 GitHub Release 所需
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 变更日志需要完整 tag 历史
+
+      # 发版 tag 必须与 csproj <Version> 一致（版本号唯一来源，SDK 据此生成
+      # AssemblyInformationalVersion —— 软件内"关于"版本号）——不一致直接失败，
+      # 绝不让"关于"版本号和发版标签脱节。
+      - name: Verify tag matches csproj Version
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          $m = Select-String -Path task_monitor.csproj -Pattern '<Version>([^<]+)</Version>'
+          if (-not $m) { throw '<Version> not found in task_monitor.csproj' }
+          $ver = $m.Matches[0].Groups[1].Value
+          if ($ver -ne $tag) { throw "tag $($env:GITHUB_REF_NAME) != csproj <Version> $ver —— 先发版前同步 task_monitor.csproj" }
+          Write-Host "version check OK: $ver"
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Changelog and asset
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $exe = "bin/Release/net48/task_monitor.exe"
+          if (-not (Test-Path $exe)) { throw "artifact missing: $exe" }
+
+          # 自上一个 tag 以来的提交列表作为 release notes（首个 tag 则为全部历史）
+          $prev = git tag --sort=-v:refname | Where-Object { $_ -ne $tag } | Select-Object -First 1
+          $range = if ($prev) { "$prev..$tag" } else { $tag }
+          $notes = (git log --pretty='- %s' $range) -join "`n"
+
+          # 附件名带架构（当前仅 x64）
+          $asset = "task_monitor-$tag-x64.exe"
+          Copy-Item $exe $asset
+
+          "RELEASE_NOTES<<EOF" >> $env:GITHUB_ENV
+          $notes >> $env:GITHUB_ENV
+          "EOF" >> $env:GITHUB_ENV
+          "ASSET_NAME=$asset" >> $env:GITHUB_ENV
+          Write-Host "asset: $asset ($([math]::Round((Get-Item $asset).Length / 1MB, 2)) MB), prev tag: $prev"
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create $env:GITHUB_REF_NAME $env:ASSET_NAME --title $env:GITHUB_REF_NAME --notes $env:RELEASE_NOTES
+
+      - name: Publish Release to CNB
+        shell: pwsh
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          # CNB 的 release 挂在 tag 上 —— 先把 tag（连同缺失的祖先提交）推到 CNB 镜像
+          git push "https://cnb:$($env:CNB_TOKEN)@cnb.cool/linesoft2/TaskMonitor.git" "$tag"
+          tools/publish-cnb-release.ps1 -Tag $tag -Notes $env:RELEASE_NOTES

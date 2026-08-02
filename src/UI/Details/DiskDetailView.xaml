@@ -1,0 +1,232 @@
+<UserControl x:Class="task_monitor.DiskDetailView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:sys="clr-namespace:System;assembly=mscorlib"
+             xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
+             xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+             xmlns:local="clr-namespace:task_monitor"
+             xmlns:fluent="clr-namespace:FluentWpfCore.Controls;assembly=FluentWpfCore"
+             Background="Transparent">
+
+    <UserControl.Resources>
+        <local:NetRateConverter x:Key="NetRate" />
+        <local:DiskKindConverter x:Key="DiskKind" />
+    </UserControl.Resources>
+
+    <ikw:SimpleStackPanel Spacing="12">
+
+        <!-- Header: metric icon (same glyph as the settings nav item) + 磁盘 label +
+             pin slot (DetailWindow parks its pin toggle here, right of the title,
+             centered with it) + big live percent (the 显示方式 headline). -->
+        <Grid Margin="0,2,0,4">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <ui:FontIcon FontSize="24" VerticalAlignment="Center" Margin="0,3,8,0"
+                             Icon="{x:Static ui:FluentSystemIcons.HardDrive_20_Regular}" />
+                <TextBlock Text="磁盘" FontSize="22"
+                           VerticalAlignment="Center" />
+                <ContentControl x:Name="PinSlotHost" VerticalAlignment="Center" Margin="4,0,0,0" />
+            </StackPanel>
+            <TextBlock x:Name="DiskHeaderPercentText"
+                       FontSize="22"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </Grid>
+
+        <!-- Headline disk utilization history (per the 显示方式 setting) area chart -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4" Height="124">
+            <local:UsageHistoryChart x:Name="DiskHistoryChart" Background="Transparent" />
+        </Border>
+
+        <!-- One pivot header per physical disk: iNKORE's Pivot style for TabControl —
+             plain text headers with an accent underline pipe on the selected one,
+             transparent at every layer (the keyless default is a TabView lookalike
+             whose selected tab renders as a white card — jarring on the acrylic; the
+             explicit Style is what kills that card, not a Background). Stock Pivot
+             metrics are app-scale (font 24, item height 48, 12px content inset), so the
+             resource overrides compact it to popup scale: 13px headers flush-left with
+             the rows below, 24px between headers, no content inset, 30px strip height.
+             Tab content updates via INotifyPropertyChanged on DiskInfo, so the
+             ItemsSource only rebinds when the disk SET changes (hot-plug) and the
+             selected tab survives every 1s tick. -->
+        <TabControl x:Name="DiskTabs" Background="Transparent" BorderThickness="0"
+                    Style="{DynamicResource TabControlPivotStyle}">
+            <TabControl.Resources>
+                <sys:Double x:Key="PivotHeaderItemFontSize">13</sys:Double>
+                <Thickness x:Key="PivotHeaderItemMargin">0,0,24,0</Thickness>
+                <Thickness x:Key="PivotItemMargin">0,2,0,0</Thickness>
+            </TabControl.Resources>
+            <TabControl.ItemContainerStyle>
+                <Style TargetType="TabItem" BasedOn="{StaticResource TabItemPivotStyle}">
+                    <Setter Property="Height" Value="30" />
+                </Style>
+            </TabControl.ItemContainerStyle>
+            <TabControl.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding TabTitle}" />
+                </DataTemplate>
+            </TabControl.ItemTemplate>
+            <TabControl.ContentTemplate>
+                <DataTemplate>
+                    <!-- NOTE: net48's Run.Text is NOT a dependency property (bindable only
+                         on .NET Core 3.0+), so label:value rows are two TextBlocks, not
+                         Runs — a binding on a Run crashes InitializeComponent. -->
+                    <ikw:SimpleStackPanel Spacing="8" Margin="0,10,0,2">
+                        <!-- Row 1 (full width): 名称 model string -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="名称：" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12"
+                                       TextTrimming="CharacterEllipsis" />
+                        </Grid>
+                        <!-- Row 2: 类型 | 利用率 -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                <TextBlock Text="类型：" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding Kind, Converter={StaticResource DiskKind}}" FontSize="12" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <TextBlock Text="利用率：" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding UtilPercent, StringFormat={}{0:F0}%}" FontSize="12" />
+                            </StackPanel>
+                        </Grid>
+                        <!-- Row 3: 读取速度 | 写入速度 -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                <TextBlock Text="读取速度：" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding ReadBytesPerSec, Converter={StaticResource NetRate}}" FontSize="12" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <TextBlock Text="写入速度：" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding WriteBytesPerSec, Converter={StaticResource NetRate}}" FontSize="12" />
+                            </StackPanel>
+                        </Grid>
+                        <!-- Row 4: 平均响应时间 -->
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="平均响应时间：" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{Binding ResponseMs, StringFormat={}{0:F1} ms}" FontSize="12" />
+                        </StackPanel>
+                    </ikw:SimpleStackPanel>
+                </DataTemplate>
+            </TabControl.ContentTemplate>
+        </TabControl>
+
+        <!-- Per-process I/O list (ReadTransferCount/WriteTransferCount deltas from the one
+             process walk — total I/O bytes, dominated by disk). Ranked by read+write bytes/s.
+             Values are real-time rates, not percentages. -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4">
+            <ikw:SimpleStackPanel Spacing="6">
+                <!-- Header row: title left; 读取 then 写入 right-aligned, matching the row
+                     columns below. -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="72" />
+                        <ColumnDefinition Width="14" />
+                        <ColumnDefinition Width="72" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="高占用进程" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="1" Text="读取" FontSize="12" TextAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="3" Text="写入" FontSize="12" TextAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                <!-- Fixed height so the window (SizeToContent=Height) stays stable across
+                     ticks; fits the top-8 rows without scrolling. TouchDragScrollViewer:
+                     滚轮/触控板平滑物理 + 触屏延迟捕获拖拽 (原因见 SettingsWindow 同处注释);
+                     Style 显式指回 iNKORE 隐式样式 (隐式样式不匹配派生类). -->
+                <local:TouchDragScrollViewer VerticalScrollBarVisibility="Auto" Height="216"
+                                             Style="{DynamicResource {x:Type ScrollViewer}}"
+                                             IsEnableSmoothManipulating="False" PanningMode="None"
+                                             local:ScrollCacheDuringTouch.Enabled="True">
+                    <local:TouchDragScrollViewer.Physics>
+                        <local:SnappyScrollPhysics />
+                    </local:TouchDragScrollViewer.Physics>
+                    <ItemsControl x:Name="DiskProcessList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="72" />
+                                        <ColumnDefinition Width="14" />
+                                        <ColumnDefinition Width="72" />
+                                    </Grid.ColumnDefinitions>
+                                    <Image Grid.Column="0" Source="{Binding Icon}"
+                                           Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           RenderOptions.BitmapScalingMode="HighQuality" SnapsToDevicePixels="True" />
+                                    <!-- FollowTagPanel: the accent tag chip (服务/服务组/×N) hugs
+                                         the name's end and is measured first, so a long name
+                                         ellipsizes while the chip stays fully visible. -->
+                                    <local:FollowTagPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Name}" FontSize="12"
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <Border Margin="6,0,0,0" Padding="4,0.5"
+                                                CornerRadius="3" VerticalAlignment="Center"
+                                                Background="Transparent"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                Visibility="{Binding TagVisibility}">
+                                            <TextBlock Text="{Binding TagText}" FontSize="10"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        </Border>
+                                    </local:FollowTagPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding DiskReadBytesPerSec, Converter={StaticResource NetRate}}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right" />
+                                    <TextBlock Grid.Column="4" Text="{Binding DiskWriteBytesPerSec, Converter={StaticResource NetRate}}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </local:TouchDragScrollViewer>
+            </ikw:SimpleStackPanel>
+        </Border>
+
+        <!-- Custom WPF tooltip for the history chart -->
+        <Popup x:Name="HistoryTip"
+               PlacementTarget="{Binding ElementName=DiskHistoryChart}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border x:Name="HistoryTipBorder"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,4">
+                <TextBlock x:Name="HistoryTipText" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Border>
+        </Popup>
+        <!-- Hover tooltip for a process row: file description over its image path. Driven by
+             ProcessListTip (MouseMove hit-test on DiskProcessList), not a row ToolTip, so it
+             survives the per-tick list rebind that would otherwise cancel it. -->
+        <Popup x:Name="ProcessTip"
+               PlacementTarget="{Binding ElementName=DiskProcessList}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border Background="{Binding Background, ElementName=HistoryTipBorder}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,5" MaxWidth="380">
+                <StackPanel>
+                    <TextBlock x:Name="ProcessTipDesc" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock x:Name="ProcessTipPath" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+        </Popup>
+    </ikw:SimpleStackPanel>
+</UserControl>

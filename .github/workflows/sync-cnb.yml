@@ -1,0 +1,27 @@
+# GitHub → CNB 代码镜像：main 分支和 v* tag 的每次推送都同步到 CNB 仓库。
+# 认证用 CNB 访问令牌（用户名固定 cnb），存于仓库 Secret CNB_TOKEN（需 repo-code 读写）。
+name: Sync to CNB
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git-sync 需要完整历史
+
+      - name: Sync to CNB
+        uses: docker://tencentcom/git-sync
+        env:
+          PLUGIN_TARGET_URL: "https://cnb.cool/linesoft2/TaskMonitor.git"
+          PLUGIN_AUTH_TYPE: "https"
+          PLUGIN_USERNAME: "cnb"
+          PLUGIN_PASSWORD: ${{ secrets.CNB_TOKEN }}
+          # CNB 侧是纯镜像、从无独有提交，force 保持与 GitHub 完全一致
+          PLUGIN_FORCE: "true"
+          PLUGIN_PUSH_TAGS: "true"

@@ -1,0 +1,224 @@
+<UserControl x:Class="task_monitor.GpuDetailView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:sys="clr-namespace:System;assembly=mscorlib"
+             xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
+             xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+             xmlns:local="clr-namespace:task_monitor"
+             xmlns:fluent="clr-namespace:FluentWpfCore.Controls;assembly=FluentWpfCore"
+             Background="Transparent">
+
+    <ikw:SimpleStackPanel Spacing="12">
+
+        <!-- Header: metric icon (same glyph as the settings nav item) + GPU label +
+             pin slot (DetailWindow parks its pin toggle here, right of the title,
+             centered with it) + big live percent (the 显示方式 headline). -->
+        <Grid Margin="0,2,0,4">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <ui:FontIcon FontSize="24" VerticalAlignment="Center" Margin="0,0,8,0"
+                             Icon="{x:Static ui:FluentSystemIcons.Video_20_Regular}" />
+                <TextBlock Text="GPU" FontSize="22"
+                           VerticalAlignment="Center" />
+                <ContentControl x:Name="PinSlotHost" VerticalAlignment="Center" Margin="4,0,0,0" />
+            </StackPanel>
+            <TextBlock x:Name="GpuHeaderPercentText"
+                       FontSize="22"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </Grid>
+
+        <!-- Headline GPU utilization history (per the 显示方式 setting) area chart -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4" Height="124">
+            <local:UsageHistoryChart x:Name="GpuHistoryChart" Background="Transparent" />
+        </Border>
+
+        <!-- Shown only when no GPU adapter exists at all (headless box / dxcore.dll missing). -->
+        <Border x:Name="NoGpuPlaceholder" Background="Transparent" BorderThickness="0"
+                Padding="0,40,0,8" Visibility="Collapsed">
+            <TextBlock Text="未检测到 GPU"
+                       FontSize="13" HorizontalAlignment="Center"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+        </Border>
+
+        <!-- One pivot header per GPU adapter (same compact Pivot resource overrides as the
+             disk view — the keyless default renders the selected tab as an opaque card on
+             acrylic). Tab content updates via INotifyPropertyChanged on GpuInfo, so the
+             ItemsSource only rebinds when the adapter SET changes and the selected tab
+             survives every 1s tick. -->
+        <TabControl x:Name="GpuTabs" Background="Transparent" BorderThickness="0"
+                    Style="{DynamicResource TabControlPivotStyle}">
+            <TabControl.Resources>
+                <sys:Double x:Key="PivotHeaderItemFontSize">13</sys:Double>
+                <Thickness x:Key="PivotHeaderItemMargin">0,0,24,0</Thickness>
+                <Thickness x:Key="PivotItemMargin">0,2,0,0</Thickness>
+            </TabControl.Resources>
+            <TabControl.ItemContainerStyle>
+                <Style TargetType="TabItem" BasedOn="{StaticResource TabItemPivotStyle}">
+                    <Setter Property="Height" Value="30" />
+                </Style>
+            </TabControl.ItemContainerStyle>
+            <TabControl.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding TabTitle}" />
+                </DataTemplate>
+            </TabControl.ItemTemplate>
+            <TabControl.ContentTemplate>
+                <DataTemplate>
+                    <!-- NOTE: net48's Run.Text is NOT a dependency property (bindable only
+                         on .NET Core 3.0+), so label:value rows are two TextBlocks, not
+                         Runs — a binding on a Run crashes InitializeComponent. -->
+                    <ikw:SimpleStackPanel Spacing="8" Margin="0,10,0,2">
+                        <!-- Row 1 (full width): 名称 adapter description -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="名称：" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12"
+                                       TextTrimming="CharacterEllipsis" />
+                        </Grid>
+                        <!-- Row 2: 利用率 | 温度 -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                <TextBlock Text="利用率：" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding UtilPercent, StringFormat={}{0:F0}%}" FontSize="12" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <TextBlock Text="温度：" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding TemperatureText}" FontSize="12" />
+                            </StackPanel>
+                        </Grid>
+                        <!-- Row 3: 负载类型 (dominant engine this tick, e.g. "3D"; dash while idle) -->
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="负载类型：" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{Binding TopEngineText}" FontSize="12" />
+                        </StackPanel>
+                        <!-- Row 4: 专用 GPU 内存 (resident / cap, Taskmgr's rounded total) -->
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="专用 GPU 内存：" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{Binding DedicatedText}" FontSize="12" />
+                        </StackPanel>
+                        <!-- Row 5: 共享 GPU 内存 (resident / SharedSystemMemory) -->
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="共享 GPU 内存：" FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{Binding SharedText}" FontSize="12" />
+                        </StackPanel>
+                    </ikw:SimpleStackPanel>
+                </DataTemplate>
+            </TabControl.ContentTemplate>
+        </TabControl>
+
+        <!-- Per-process GPU list (PDH \GPU Engine(*)\Utilization Percentage — Task Manager's
+             Processes-page GPU column; see ProcessGpuSampler). Ranked by GPU% (max over the
+             process's engines), with the dominant engine name — Task Manager's 引擎 column. -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4">
+            <ikw:SimpleStackPanel Spacing="6">
+                <!-- Header row: title left; 引擎 then 用量 right-aligned, matching the row
+                     columns below. -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="96" />
+                        <ColumnDefinition Width="56" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="高占用进程" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="1" Text="负载类型" FontSize="12" TextAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="2" Text="用量" FontSize="12" TextAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                <!-- Fixed height so the window (SizeToContent=Height) stays stable across
+                     ticks; fits the top-8 rows without scrolling. TouchDragScrollViewer:
+                     滚轮/触控板平滑物理 + 触屏延迟捕获拖拽 (原因见 SettingsWindow 同处注释);
+                     Style 显式指回 iNKORE 隐式样式 (隐式样式不匹配派生类). -->
+                <local:TouchDragScrollViewer VerticalScrollBarVisibility="Auto" Height="216"
+                                             Style="{DynamicResource {x:Type ScrollViewer}}"
+                                             IsEnableSmoothManipulating="False" PanningMode="None"
+                                             local:ScrollCacheDuringTouch.Enabled="True">
+                    <local:TouchDragScrollViewer.Physics>
+                        <local:SnappyScrollPhysics />
+                    </local:TouchDragScrollViewer.Physics>
+                    <ItemsControl x:Name="GpuProcessList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="96" />
+                                        <ColumnDefinition Width="56" />
+                                    </Grid.ColumnDefinitions>
+                                    <Image Grid.Column="0" Source="{Binding Icon}"
+                                           Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           RenderOptions.BitmapScalingMode="HighQuality" SnapsToDevicePixels="True" />
+                                    <!-- FollowTagPanel: the accent tag chip (服务/服务组/×N) hugs
+                                         the name's end and is measured first, so a long name
+                                         ellipsizes while the chip stays fully visible. -->
+                                    <local:FollowTagPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Name}" FontSize="12"
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <Border Margin="6,0,0,0" Padding="4,0.5"
+                                                CornerRadius="3" VerticalAlignment="Center"
+                                                Background="Transparent"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                Visibility="{Binding TagVisibility}">
+                                            <TextBlock Text="{Binding TagText}" FontSize="10"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        </Border>
+                                    </local:FollowTagPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding GpuEngineName}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right"
+                                               TextTrimming="CharacterEllipsis"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Grid.Column="3" Text="{Binding GpuPercent, StringFormat={}{0:F1}%}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </local:TouchDragScrollViewer>
+            </ikw:SimpleStackPanel>
+        </Border>
+
+        <!-- Custom WPF tooltip for the history chart -->
+        <Popup x:Name="HistoryTip"
+               PlacementTarget="{Binding ElementName=GpuHistoryChart}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border x:Name="HistoryTipBorder"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,4">
+                <TextBlock x:Name="HistoryTipText" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Border>
+        </Popup>
+        <!-- Hover tooltip for a process row: file description over its image path. Driven by
+             ProcessListTip (MouseMove hit-test on GpuProcessList), not a row ToolTip, so it
+             survives the per-tick list rebind that would otherwise cancel it. -->
+        <Popup x:Name="ProcessTip"
+               PlacementTarget="{Binding ElementName=GpuProcessList}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border Background="{Binding Background, ElementName=HistoryTipBorder}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,5" MaxWidth="380">
+                <StackPanel>
+                    <TextBlock x:Name="ProcessTipDesc" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock x:Name="ProcessTipPath" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+        </Popup>
+    </ikw:SimpleStackPanel>
+</UserControl>

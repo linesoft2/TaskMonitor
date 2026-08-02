@@ -1,0 +1,34 @@
+<Window x:Class="task_monitor.LegacyOsWarningDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+        Title="TaskMonitor"
+        Width="460"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ui:WindowHelper.UseModernWindowStyle="True">
+    <!-- One-time legacy-OS (pre-Win11) compatibility warning. Shown elevated, after the
+         elevation gate + single-instance mutex; purely informational — the single button
+         just closes it (✕ / Esc count the same via IsCancel). -->
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="检测到当前系统版本低于 Windows 11。本工具当前仅针对 Windows 11 进行适配和维护，在旧版系统上存在较多已知兼容性问题，后续将逐步优化，请知悉。"
+                   TextWrapping="Wrap"
+                   Style="{DynamicResource BodyTextBlockStyle}" />
+
+        <Button Grid.Row="1"
+                Content="我知道了"
+                MinWidth="88"
+                HorizontalAlignment="Right"
+                Margin="0,20,0,0"
+                Style="{DynamicResource AccentButtonStyle}"
+                IsDefault="True"
+                IsCancel="True" />
+    </Grid>
+</Window>

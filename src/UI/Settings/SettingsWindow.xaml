@@ -1,0 +1,419 @@
+<Window x:Class="task_monitor.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+        xmlns:fluent="clr-namespace:FluentWpfCore.Controls;assembly=FluentWpfCore"
+        xmlns:local="clr-namespace:task_monitor"
+        xmlns:sys="clr-namespace:System;assembly=mscorlib"
+        mc:Ignorable="d"
+        Title="设置"
+        Width="680" Height="720"
+        MinWidth="560" MinHeight="480"
+        WindowStartupLocation="CenterScreen"
+        Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+        ui:WindowHelper.UseModernWindowStyle="True"
+        ui:WindowHelper.SystemBackdropType="Mica"
+        ui:TitleBar.ExtendViewIntoTitleBar="True"
+        ui:TitleBar.Height="32">
+
+    <Window.Resources>
+        <!-- 类别 section header above each card group (Win11 Settings single-page layout).
+             The first header overrides the top margin back down (no group above it). -->
+        <Style x:Key="SectionHeaderStyle"
+               BasedOn="{StaticResource BodyStrongTextBlockStyle}"
+               TargetType="TextBlock">
+            <Setter Property="Margin" Value="1,28,0,6" />
+        </Style>
+    </Window.Resources>
+
+    <!-- Window.Foreground (set above): unset TextBlocks/FontIcons inherit the theme color
+         (WPF's built-in default is hard Black); explicit local values still win. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Caption band (extended title-bar area): transparent so the Mica shows
+             through and iNKORE's TitleBar hit-tests it as the drag region; the
+             TextBlock itself is hit-test-invisible. Holds only the small caption
+             title, Win11-Settings style. -->
+        <Border Grid.Row="0" Background="Transparent">
+            <TextBlock Text="设置"
+                       Style="{DynamicResource CaptionTextBlockStyle}"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       VerticalAlignment="Center"
+                       Margin="16,0,0,0"
+                       IsHitTestVisible="False" />
+        </Border>
+
+        <!-- ONE scroll page: every setting grouped by 类别 TextBlock headers. Cards are
+             iNKORE SettingsCard; groups with sub-items are SettingsExpander (a toggle in
+             its content area does not toggle the expansion). 4px between cards.
+             TouchDragScrollViewer (SmoothScrollViewer 子类): 滚轮/触控板走
+             RenderTransform 平滑物理 (v3, blog.twlmgatito.com/posts/wpf-fluent-scrollviewer-v3);
+             触屏拖拽走自实现的延迟捕获 (TouchDragScrollViewer.cs 头注有完整设计) ——
+             不用库的 manipulation (TouchDown 即捕获触摸点, tap 不再晋升点击, 开关全失灵)
+             也不用原生 PanningMode (布局驱动, 每个触摸 move 都整页布局, 弱 GPU 掉帧)。
+             Style 必须显式指回 iNKORE 的 ScrollViewer 隐式样式: WPF 无 key 样式只精确
+             匹配 TargetType, 派生控件吃不到它 → 回退成 Aero 经典条
+             (滚动条不自动隐藏的根源, dump 实测 Style==null); DynamicResource 跟随深浅色切换。 -->
+        <local:TouchDragScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                                     Style="{DynamicResource {x:Type ScrollViewer}}"
+                                     IsEnableSmoothManipulating="False" PanningMode="None"
+                                     local:ScrollCacheDuringTouch.Enabled="True">
+            <local:TouchDragScrollViewer.Physics>
+                <local:SnappyScrollPhysics />
+            </local:TouchDragScrollViewer.Physics>
+            <StackPanel Margin="44,8,44,32">
+
+                <!-- ============================== 通用 ============================== -->
+                <TextBlock Style="{StaticResource SectionHeaderStyle}" Margin="1,4,0,6" Text="通用" />
+
+                <ui:SettingsCard Header="开机自启"
+                                 Margin="0,0,0,4">
+                    <ui:SettingsCard.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Rocket_20_Regular}" />
+                    </ui:SettingsCard.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="AutoStartSwitch" Toggled="AutoStartSwitch_Toggled" />
+                </ui:SettingsCard>
+
+                <ui:SettingsCard Header="采样间隔"
+                                 Margin="0,0,0,4">
+                    <ui:SettingsCard.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Timer_20_Regular}" />
+                    </ui:SettingsCard.HeaderIcon>
+                    <ComboBox x:Name="IntervalCombo" MinWidth="140" SelectionChanged="IntervalCombo_SelectionChanged">
+                        <ComboBoxItem Content="0.5 秒" />
+                        <ComboBoxItem Content="1 秒（默认）" />
+                        <ComboBoxItem Content="2 秒" />
+                    </ComboBox>
+                </ui:SettingsCard>
+
+                <!-- 检查更新: takes effect on the NEXT startup (the check runs once per
+                     launch); off also disables the 更新源 picker inside. -->
+                <ui:SettingsExpander Header="检查更新"
+                                     Description="启动时检测是否有新版本。"
+                                     Margin="0,0,0,4">
+                    <ui:SettingsExpander.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.ArrowSync_20_Regular}" />
+                    </ui:SettingsExpander.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="UpdateCheckSwitch" Toggled="UpdateCheckSwitch_Toggled" />
+                    <ui:SettingsExpander.Items>
+                        <ui:SettingsCard Header="更新源">
+                            <ComboBox x:Name="UpdateSourceCombo" MinWidth="140" SelectionChanged="UpdateSourceCombo_SelectionChanged">
+                                <ComboBoxItem Content="CNB" />
+                                <ComboBoxItem Content="GitHub" />
+                            </ComboBox>
+                        </ui:SettingsCard>
+                    </ui:SettingsExpander.Items>
+                </ui:SettingsExpander>
+
+                <!-- ============================== 外观 ============================== -->
+                <TextBlock Style="{StaticResource SectionHeaderStyle}" Text="外观" />
+
+                <ui:SettingsCard Header="主题"
+                                 Margin="0,0,0,4">
+                    <ui:SettingsCard.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Color_20_Regular}" />
+                    </ui:SettingsCard.HeaderIcon>
+                    <ComboBox x:Name="ThemeCombo" MinWidth="140" SelectionChanged="ThemeCombo_SelectionChanged">
+                        <ComboBoxItem Content="跟随系统" />
+                        <ComboBoxItem Content="浅色" />
+                        <ComboBoxItem Content="深色" />
+                    </ComboBox>
+                </ui:SettingsCard>
+
+                <!-- 靠左显示: the switch lives in the expander's content area; its only
+                     sub-setting (靠左位置) is an item inside, enabled only while on. -->
+                <ui:SettingsExpander x:Name="OnLeftExpander" Header="靠左显示"
+                                     Description="显示在任务栏左侧（任务栏左对齐时自动回退到右侧）。"
+                                     Margin="0,0,0,4">
+                    <ui:SettingsExpander.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.PanelLeft_20_Regular}" />
+                    </ui:SettingsExpander.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="OnLeftSwitch" Toggled="OnLeftSwitch_Toggled" />
+                    <ui:SettingsExpander.Items>
+                        <ui:SettingsCard x:Name="AnchorCard" Header="靠左位置">
+                            <ComboBox x:Name="AnchorCombo" MinWidth="140" SelectionChanged="AnchorCombo_SelectionChanged">
+                                <ComboBoxItem Content="任务栏最左端" />
+                                <ComboBoxItem Content="贴近开始按钮" />
+                            </ComboBox>
+                        </ui:SettingsCard>
+                    </ui:SettingsExpander.Items>
+                </ui:SettingsExpander>
+
+                <!-- ============================== 采样 ============================== -->
+                <!-- One card per metric; the toggle enables/disables that metric's
+                     sampling entirely (off = the metric is hidden from the taskbar
+                     overlay, the later metrics shift forward to fill its slot).
+                     Tag = the overlay hit slot (0-4), read by the shared
+                     MetricSwitch_Toggled handler. Metrics with sub-settings
+                     (磁盘/GPU/网络) are SettingsExpander; CPU/内存 have none, so a
+                     plain card. -->
+                <TextBlock Style="{StaticResource SectionHeaderStyle}" Text="采样项目" />
+
+                <!-- Section-wide option for the five detail views' process lists — first
+                     in the section (not a per-metric switch, so a plain card). -->
+                <ui:SettingsCard Header="合并相同程序"
+                                 Description="在进程列表中合并相同程序所创建的进程。"
+                                 Margin="0,0,0,4">
+                    <ui:SettingsCard.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Merge_20_Regular}" />
+                    </ui:SettingsCard.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="MergeSwitch" Toggled="MergeSwitch_Toggled" />
+                </ui:SettingsCard>
+
+                <ui:SettingsCard Header="CPU" Margin="0,0,0,4">
+                    <ui:SettingsCard.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.DeveloperBoard_20_Regular}" />
+                    </ui:SettingsCard.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="CpuSwitch" Tag="0" Toggled="MetricSwitch_Toggled" />
+                </ui:SettingsCard>
+
+                <ui:SettingsCard Header="内存" Margin="0,0,0,4">
+                    <ui:SettingsCard.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Memory_16_Regular}" />
+                    </ui:SettingsCard.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="RamSwitch" Tag="1" Toggled="MetricSwitch_Toggled" />
+                </ui:SettingsCard>
+
+                <ui:SettingsExpander Header="磁盘" Margin="0,0,0,4">
+                    <ui:SettingsExpander.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.HardDrive_20_Regular}" />
+                    </ui:SettingsExpander.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="DiskSwitch" Tag="2" Toggled="MetricSwitch_Toggled" />
+                    <ui:SettingsExpander.Items>
+                        <!-- 显示方式: what the headline (overlay slot + detail chart) shows.
+                             特定磁盘 enables the disk picker below it (same pattern as
+                             靠左显示 → 靠左位置). -->
+                        <ui:SettingsCard Header="显示方式">
+                            <ComboBox x:Name="DiskDisplayCombo" MinWidth="140" SelectionChanged="DiskDisplayCombo_SelectionChanged">
+                                <ComboBoxItem Content="所有磁盘平均（默认）" />
+                                <ComboBoxItem Content="最高利用率" />
+                                <ComboBoxItem Content="特定磁盘" />
+                            </ComboBox>
+                        </ui:SettingsCard>
+                        <ui:SettingsCard x:Name="DiskPickCard" Header="特定磁盘">
+                            <ComboBox x:Name="DiskPickCombo" MinWidth="220" SelectionChanged="DiskPickCombo_SelectionChanged" />
+                        </ui:SettingsCard>
+                    </ui:SettingsExpander.Items>
+                </ui:SettingsExpander>
+
+                <ui:SettingsExpander Header="GPU" Margin="0,0,0,4">
+                    <ui:SettingsExpander.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Video_20_Regular}" />
+                    </ui:SettingsExpander.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="GpuSwitch" Tag="3" Toggled="MetricSwitch_Toggled" />
+                    <ui:SettingsExpander.Items>
+                        <!-- Same 显示方式 pair as 磁盘's, but the GPU default is 最高利用率
+                             (Task Manager's sidebar rule). -->
+                        <ui:SettingsCard Header="显示方式">
+                            <ComboBox x:Name="GpuDisplayCombo" MinWidth="140" SelectionChanged="GpuDisplayCombo_SelectionChanged">
+                                <ComboBoxItem Content="所有 GPU 平均" />
+                                <ComboBoxItem Content="最高利用率（默认）" />
+                                <ComboBoxItem Content="特定 GPU" />
+                            </ComboBox>
+                        </ui:SettingsCard>
+                        <ui:SettingsCard x:Name="GpuPickCard" Header="特定 GPU">
+                            <ComboBox x:Name="GpuPickCombo" MinWidth="220" SelectionChanged="GpuPickCombo_SelectionChanged" />
+                        </ui:SettingsCard>
+                    </ui:SettingsExpander.Items>
+                </ui:SettingsExpander>
+
+                <ui:SettingsExpander Header="网络" Margin="0,0,0,4">
+                    <ui:SettingsExpander.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Globe_20_Regular}" />
+                    </ui:SettingsExpander.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="NetSwitch" Tag="4" Toggled="MetricSwitch_Toggled" />
+                    <ui:SettingsExpander.Items>
+                        <!-- 适配器 pick: 自动 (the sampler's max-traffic rule) or one specific
+                             adapter (incl. virtual ones — an explicit pick is how the user
+                             watches a VPN; a missing pick falls back to 自动). Items are
+                             built in code from the adapter enumeration. -->
+                        <ui:SettingsCard Header="适配器">
+                            <ComboBox x:Name="NetAdapterCombo" MinWidth="260" SelectionChanged="NetAdapterCombo_SelectionChanged" />
+                        </ui:SettingsCard>
+                        <!-- 公网 IP lookup: the Network detail panel's 公网 IPv4/IPv6 cells
+                             AND the 公网延迟 ICMP probe (www.baidu.com). Off = NetInfoSampler
+                             sends nothing to the public internet (the cells show "—" / the
+                             v6 row collapses); the LAN-only 本地延迟 ping is unaffected.
+                             Reports immediately. -->
+                        <ui:SettingsCard Header="公网 IP"
+                                         Description="查询公网 IPv4 / IPv6 地址并探测公网延迟。">
+                            <ui:ToggleSwitch x:Name="PublicIpSwitch" OnContent="启用" OffContent="关闭"
+                                             Toggled="PublicIpSwitch_Toggled" />
+                        </ui:SettingsCard>
+                        <!-- Clash/Mihomo integration: the core's proxied per-process traffic
+                             joins the Network detail list as standalone "Clash"-tagged rows
+                             (ClashSampler). Switch reports immediately, text edits debounced
+                             (500ms); 测试连接 probes the CURRENT box contents via GET /version. -->
+                        <ui:SettingsCard Header="Clash / Mihomo"
+                                         Description="从代理内核同步实时网速至进程列表。">
+                            <StackPanel>
+                                <ui:ToggleSwitch x:Name="ClashSwitch" OnContent="启用" OffContent="关闭"
+                                                 Toggled="ClashSwitch_Toggled" />
+                                <!-- Fixed Width, NOT MinWidth: the card template's content column
+                                     is Auto, so a single-line TextBox measures to its full text
+                                     width — long input would grow the column and squeeze the
+                                     header/description (`*` column) into a one-char-per-line
+                                     strip. Same for the result TextBlock (horizontal StackPanel
+                                     measures with infinite width, so TextWrapping alone is a
+                                     no-op without MaxWidth). -->
+                                <TextBox x:Name="ClashAddressBox" Width="320" Margin="0,8,0,0"
+                                         ui:ControlHelper.PlaceholderText="控制器地址（留空默认 127.0.0.1:9090）"
+                                         TextChanged="ClashApiBox_TextChanged" />
+                                <TextBox x:Name="ClashSecretBox" Width="320" Margin="0,6,0,0"
+                                         ui:ControlHelper.PlaceholderText="API 密钥（可选）"
+                                         TextChanged="ClashApiBox_TextChanged" />
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Button x:Name="ClashTestButton" Content="测试连接"
+                                            Click="ClashTestButton_Click" />
+                                    <TextBlock x:Name="ClashTestResult" VerticalAlignment="Center"
+                                               Margin="10,0,0,0" FontSize="12" MaxWidth="240"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </StackPanel>
+                        </ui:SettingsCard>
+                    </ui:SettingsExpander.Items>
+                </ui:SettingsExpander>
+
+                <!-- ============================== 关于 ============================== -->
+                <TextBlock Style="{StaticResource SectionHeaderStyle}" Text="关于" />
+
+                <!-- The about card is an expander: app identity in the header, the
+                     external-link cards as items. The logo is logo.svg INLINED as XAML
+                     (gradients/clip and all, no raster); SVG stop/fill/stroke-opacity
+                     folds into ARGB hex. The SettingsCard template clamps HeaderIcon
+                     through a Viewbox to the SettingsCardHeaderIconMaxSize resource
+                     (20) — overridden here or the logo stays 20px. -->
+                <ui:SettingsExpander Header="TaskMonitor" Description="Copyright © 2026 双霖（LineSoft）">
+                    <ui:SettingsExpander.Resources>
+                        <sys:Double x:Key="SettingsCardHeaderIconMaxSize">48</sys:Double>
+                    </ui:SettingsExpander.Resources>
+                    <ui:SettingsExpander.HeaderIcon>
+                        <!-- logo.svg (viewBox 0 0 256 256): base gradient → clipped
+                             sheen/popup/chart/taskbar pill → inner edge. -->
+                        <Viewbox Width="48" Height="48" Stretch="Uniform">
+                            <Canvas Width="256" Height="256">
+                                <Rectangle Canvas.Left="8" Canvas.Top="8" Width="240" Height="240" RadiusX="56" RadiusY="56">
+                                    <Rectangle.Fill>
+                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                            <GradientStop Color="#63C1F9" Offset="0" />
+                                            <GradientStop Color="#2AA1F2" Offset="0.52" />
+                                            <GradientStop Color="#1282E2" Offset="1" />
+                                        </LinearGradientBrush>
+                                    </Rectangle.Fill>
+                                </Rectangle>
+                                <Canvas Width="256" Height="256">
+                                    <Canvas.Clip>
+                                        <RectangleGeometry Rect="8,8,240,240" RadiusX="56" RadiusY="56" />
+                                    </Canvas.Clip>
+                                    <!-- acrylic sheen on the top half -->
+                                    <Rectangle Canvas.Left="8" Canvas.Top="8" Width="240" Height="150">
+                                        <Rectangle.Fill>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                <GradientStop Color="#3DFFFFFF" Offset="0" />
+                                                <GradientStop Color="#00FFFFFF" Offset="0.55" />
+                                            </LinearGradientBrush>
+                                        </Rectangle.Fill>
+                                    </Rectangle>
+                                    <!-- acrylic detail window + its caption -->
+                                    <Rectangle Canvas.Left="60" Canvas.Top="44" Width="136" Height="150" RadiusX="14" RadiusY="14"
+                                               Fill="#14FFFFFF" Stroke="#40FFFFFF" StrokeThickness="1.5" />
+                                    <Rectangle Canvas.Left="74" Canvas.Top="56" Width="26" Height="5" RadiusX="2.5" RadiusY="2.5"
+                                               Fill="#66FFFFFF" />
+                                    <!-- usage-history chart inside the popup -->
+                                    <Path Data="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88 L184 178 L72 178 Z">
+                                        <Path.Fill>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                <GradientStop Color="#33FFFFFF" Offset="0" />
+                                                <GradientStop Color="#05FFFFFF" Offset="1" />
+                                            </LinearGradientBrush>
+                                        </Path.Fill>
+                                    </Path>
+                                    <Path Data="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88"
+                                          Stroke="#E6FFFFFF" StrokeThickness="6.5"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                    <!-- live sample dot -->
+                                    <Ellipse Canvas.Left="175" Canvas.Top="79" Width="18" Height="18" Fill="#4D35E08C" />
+                                    <Ellipse Canvas.Left="179" Canvas.Top="83" Width="10" Height="10" Fill="#35E08C" />
+                                    <!-- taskbar strip: soft shadow + frosted pill -->
+                                    <Rectangle Canvas.Left="38" Canvas.Top="150" Width="180" Height="56" RadiusX="28" RadiusY="28"
+                                               Fill="#380B3E6B" />
+                                    <Rectangle Canvas.Left="38" Canvas.Top="146" Width="180" Height="56" RadiusX="28" RadiusY="28"
+                                               Stroke="#47FFFFFF" StrokeThickness="1">
+                                        <Rectangle.Fill>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                <GradientStop Color="#9EFFFFFF" Offset="0" />
+                                                <GradientStop Color="#7AFFFFFF" Offset="1" />
+                                            </LinearGradientBrush>
+                                        </Rectangle.Fill>
+                                    </Rectangle>
+                                    <!-- group 1: CPU / 内存 -->
+                                    <Rectangle Canvas.Left="56" Canvas.Top="163" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                    <Rectangle Canvas.Left="71" Canvas.Top="163" Width="24" Height="8" RadiusX="4" RadiusY="4" Fill="#1282E2" />
+                                    <Rectangle Canvas.Left="56" Canvas.Top="177" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                    <Rectangle Canvas.Left="71" Canvas.Top="177" Width="16" Height="8" RadiusX="4" RadiusY="4" Fill="#5EADF4" />
+                                    <!-- group 2: 磁盘 / GPU -->
+                                    <Rectangle Canvas.Left="114" Canvas.Top="163" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                    <Rectangle Canvas.Left="129" Canvas.Top="163" Width="20" Height="8" RadiusX="4" RadiusY="4" Fill="#1282E2" />
+                                    <Rectangle Canvas.Left="114" Canvas.Top="177" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                    <Rectangle Canvas.Left="129" Canvas.Top="177" Width="26" Height="8" RadiusX="4" RadiusY="4" Fill="#9B8CF2" />
+                                    <!-- group 3: 网络 ↑ / ↓ -->
+                                    <Path Data="M192 173 V161 M186.5 166.5 L192 161 L197.5 166.5"
+                                          Stroke="#23B57F" StrokeThickness="6" StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                    <Path Data="M192 175 V187 M186.5 181.5 L192 187 L197.5 181.5"
+                                          Stroke="#F0A02E" StrokeThickness="6" StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                </Canvas>
+                                <!-- Fluent inner edge -->
+                                <Rectangle Canvas.Left="9" Canvas.Top="9" Width="238" Height="238" RadiusX="55" RadiusY="55"
+                                           Stroke="#47FFFFFF" StrokeThickness="1.5" />
+                            </Canvas>
+                        </Viewbox>
+                    </ui:SettingsExpander.HeaderIcon>
+                    <TextBlock x:Name="VersionText"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <ui:SettingsExpander.Items>
+                        <!-- External-link cards. The URLs are placeholders for now (empty
+                             in the code-behind — clicks no-op until they're filled in).
+                             The GitHub icon is the official GitHub mark path (its
+                             fill-rule=evenodd is WPF's default), tinted by the theme. -->
+                        <ui:SettingsCard Header="GitHub"
+                                         IsClickEnabled="True"
+                                         Click="GitHubCard_Click">
+                            <!-- The expander overrides SettingsCardHeaderIconMaxSize to 48
+                                 for its own header logo; resources inherit DOWN the tree,
+                                 so restore the 20 default here or the mark renders 48px. -->
+                            <ui:SettingsCard.Resources>
+                                <sys:Double x:Key="SettingsCardHeaderIconMaxSize">20</sys:Double>
+                            </ui:SettingsCard.Resources>
+                            <ui:SettingsCard.HeaderIcon>
+                                <Path Stretch="Uniform"
+                                      Fill="{DynamicResource TextFillColorPrimaryBrush}"
+                                      Data="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+                            </ui:SettingsCard.HeaderIcon>
+                            <ui:SettingsCard.ActionIcon>
+                                <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.OpenInNewWindow}" />
+                            </ui:SettingsCard.ActionIcon>
+                        </ui:SettingsCard>
+
+                        <ui:SettingsCard Header="参考 / 致谢 / 开源许可"
+                                         IsClickEnabled="True"
+                                         Click="AcknowledgementsCard_Click">
+                            <ui:SettingsCard.ActionIcon>
+                                <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.OpenInNewWindow}" />
+                            </ui:SettingsCard.ActionIcon>
+                        </ui:SettingsCard>
+                    </ui:SettingsExpander.Items>
+                </ui:SettingsExpander>
+
+            </StackPanel>
+        </local:TouchDragScrollViewer>
+    </Grid>
+</Window>

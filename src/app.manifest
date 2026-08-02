@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="task_monitor" />
+
+  <!-- asInvoker on purpose: elevation is self-managed, not manifest-forced. The first
+       launch must be able to show the consent dialog WITHOUT a UAC prompt; once the user
+       allows (persisted to settings.yaml next to the exe), the app relaunches itself
+       elevated via the "runas" verb (App.RunElevationGate). Every unelevated path ends
+       in Shutdown — the process effectively always runs elevated, as before.
+       (Admin is required because the SRUM per-process network API, srumapi.dll, only
+       returns per-instance rows when elevated.) UIAccess=false (we don't draw at a
+       higher privilege than the user). -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <!-- Windows 10 / 11 (the only OS this widget targets). -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!-- Declare system-DPI-aware explicitly: once a manifest is supplied it fully
+       replaces WPF's default, and a manifest with no DPI entry would bitmap-stretch
+       the taskbar overlay's sharp D2D text. `true` (system DPI aware) matches WPF
+       net48's no-manifest default, so the overlay's own GetDpiForWindow/D3D scaling
+       keeps working unchanged. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>

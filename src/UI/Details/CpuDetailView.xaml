@@ -1,0 +1,172 @@
+<UserControl x:Class="task_monitor.CpuDetailView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
+             xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+             xmlns:local="clr-namespace:task_monitor"
+             xmlns:fluent="clr-namespace:FluentWpfCore.Controls;assembly=FluentWpfCore"
+             Background="Transparent">
+    <ikw:SimpleStackPanel Spacing="12">
+
+        <!-- Header: metric icon (same glyph as the settings nav item) + CPU label +
+             pin slot (DetailWindow parks its pin toggle here, right of the title,
+             centered with it) + big live percent. -->
+        <Grid Margin="0,2,0,4">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <ui:FontIcon FontSize="24" VerticalAlignment="Center" Margin="0,0,8,0"
+                             Icon="{x:Static ui:FluentSystemIcons.DeveloperBoard_20_Regular}" />
+                <TextBlock Text="CPU" FontSize="22"
+                           VerticalAlignment="Center" />
+                <ContentControl x:Name="PinSlotHost" VerticalAlignment="Center" Margin="4,0,0,0" />
+            </StackPanel>
+            <TextBlock x:Name="CpuHeaderPercentText"
+                       FontSize="22"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </Grid>
+
+        <!-- Overall CPU history area chart -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4" Height="124">
+            <local:UsageHistoryChart x:Name="CpuHistoryChart" Background="Transparent" />
+        </Border>
+
+        <!-- Per-core bars -->
+        <Border x:Name="PerCoreCard"
+                Background="Transparent" BorderThickness="0" Padding="0,4" Height="80">
+            <local:CpuCoresChart x:Name="CpuCoresChart" Background="Transparent" />
+        </Border>
+
+        <!-- System summary: speed / processes / threads / handles / uptime (three per row) -->
+        <Grid Margin="0,2,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Row 0 -->
+            <TextBlock Grid.Row="0" Grid.Column="0" FontSize="12" Margin="0,0,0,8">
+                <Run Text="速度：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="SpeedValueRun" Text="—" />
+            </TextBlock>
+            <TextBlock Grid.Row="0" Grid.Column="1" FontSize="12" Margin="0,0,0,8">
+                <Run Text="进程：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="ProcessValueRun" Text="—" />
+            </TextBlock>
+            <TextBlock Grid.Row="0" Grid.Column="2" FontSize="12" Margin="0,0,0,8">
+                <Run Text="线程：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="ThreadValueRun" Text="—" />
+            </TextBlock>
+
+            <!-- Row 1: 句柄 + uptime (spans the remaining two columns — its value can be long) -->
+            <TextBlock Grid.Row="1" Grid.Column="0" FontSize="12">
+                <Run Text="句柄：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="HandleValueRun" Text="—" />
+            </TextBlock>
+            <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" FontSize="12">
+                <Run Text="运行时间：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="UptimeValueRun" Text="—" />
+            </TextBlock>
+        </Grid>
+
+        <!-- Per-process CPU list (cycle-based, whole-machine share — same source as Task Manager) -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4">
+            <ikw:SimpleStackPanel Spacing="6">
+                <Grid>
+                    <TextBlock Text="高占用进程" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="用量" FontSize="12" HorizontalAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                <!-- Fixed height so the window (SizeToContent=Height) stays stable across
+                     ticks; fits the top-8 rows without scrolling. TouchDragScrollViewer:
+                     滚轮/触控板平滑物理 + 触屏延迟捕获拖拽 (原因见 SettingsWindow 同处注释);
+                     Style 显式指回 iNKORE 隐式样式 (隐式样式不匹配派生类). -->
+                <local:TouchDragScrollViewer VerticalScrollBarVisibility="Auto" Height="216"
+                                             Style="{DynamicResource {x:Type ScrollViewer}}"
+                                             IsEnableSmoothManipulating="False" PanningMode="None"
+                                             local:ScrollCacheDuringTouch.Enabled="True">
+                    <local:TouchDragScrollViewer.Physics>
+                        <local:SnappyScrollPhysics />
+                    </local:TouchDragScrollViewer.Physics>
+                    <ItemsControl x:Name="ProcessList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="56" />
+                                    </Grid.ColumnDefinitions>
+                                    <Image Grid.Column="0" Source="{Binding Icon}"
+                                           Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           RenderOptions.BitmapScalingMode="HighQuality" SnapsToDevicePixels="True" />
+                                    <!-- FollowTagPanel: the accent tag chip (服务/服务组/×N) hugs
+                                         the name's end and is measured first, so a long name
+                                         ellipsizes while the chip stays fully visible. -->
+                                    <local:FollowTagPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Name}" FontSize="12"
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <Border Margin="6,0,0,0" Padding="4,0.5"
+                                                CornerRadius="3" VerticalAlignment="Center"
+                                                Background="Transparent"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                Visibility="{Binding TagVisibility}">
+                                            <TextBlock Text="{Binding TagText}" FontSize="10"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        </Border>
+                                    </local:FollowTagPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding CpuPercent, StringFormat={}{0:F1}%}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </local:TouchDragScrollViewer>
+            </ikw:SimpleStackPanel>
+        </Border>
+
+        <!-- Custom WPF tooltips (replace LiveCharts' built-in Skia tooltip) -->
+        <Popup x:Name="HistoryTip"
+               PlacementTarget="{Binding ElementName=CpuHistoryChart}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border x:Name="HistoryTipBorder"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,4">
+                <TextBlock x:Name="HistoryTipText" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Border>
+        </Popup>
+        <Popup x:Name="CoresTip"
+               PlacementTarget="{Binding ElementName=CpuCoresChart}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border x:Name="CoresTipBorder"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,4">
+                <TextBlock x:Name="CoresTipText" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Border>
+        </Popup>
+        <!-- Hover tooltip for a process row: file description over its image path. Driven by
+             ProcessListTip (MouseMove hit-test on ProcessList), not a row ToolTip, so it
+             survives the per-tick list rebind that would otherwise cancel it. -->
+        <Popup x:Name="ProcessTip"
+               PlacementTarget="{Binding ElementName=ProcessList}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border Background="{Binding Background, ElementName=HistoryTipBorder}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,5" MaxWidth="380">
+                <StackPanel>
+                    <TextBlock x:Name="ProcessTipDesc" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock x:Name="ProcessTipPath" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+        </Popup>
+    </ikw:SimpleStackPanel>
+</UserControl>

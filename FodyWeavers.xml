@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fody weaver config. Costura embeds every copied-to-output managed assembly into
+     task_monitor.exe as a compressed resource and hooks AssemblyResolve to load them
+     from there at runtime — turning the 7-file output (exe + 6 DLLs) into one deployable
+     exe. Empty element = embed everything, compress it, and include the matching pdbs.
+     The loose DLLs are still copied to bin/ by the build; Costura adds the embedded copy
+     on top, and the exe is what you ship. No native DLLs in this app, so there's no
+     <Unmanaged32/64> section needed. -->
+<Weavers xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="FodyWeavers.xsd">
+  <Costura />
+</Weavers>

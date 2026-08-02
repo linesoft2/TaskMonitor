@@ -1,0 +1,96 @@
+<Window x:Class="task_monitor.DetailWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:fluent="https://github.com/TwilightLemon/FluentWpfCore"
+        xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+        mc:Ignorable="d"
+        Background="Transparent"
+        Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+        WindowStyle="None"
+        fluent:WindowMaterial.WindowCorner="Round"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        SizeToContent="Height"
+        Width="360"
+        Title="Detail"
+        Deactivated="Window_Deactivated"
+        Closing="Window_Closing">
+
+    <fluent:WindowMaterial.Material>
+        <fluent:WindowMaterial x:Name="windowMaterial"
+                               MaterialMode="Acrylic"
+                               UseWindowComposition="True"
+                               CompositonColor="#CCF3F3F3"
+                               IsDarkMode="False" />
+    </fluent:WindowMaterial.Material>
+
+    <!-- Shell: the metric-specific IDetailView chosen by the clicked column, with a
+         Mica title-bar band (pinned only) above it. The pin toggle is declared here
+         (the shell owns the single instance) but parked in the view's header PinSlot,
+         right of the title — it never moves on screen: pinning grows the band above
+         and shifts the window up by the same amount. -->
+    <Border x:Name="RootBorder">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Title-bar band (pinned only): Mica-like fill + hairline divider, so
+                 the bar reads as its own surface over the acrylic body. Left: caption
+                 title; right: caption ✕. The band itself is a drag surface (the
+                 TextBlock isn't interactive, so the press still falls through). -->
+            <Border x:Name="TitleBarBand" Grid.Row="0"
+                    Visibility="Collapsed"
+                    Background="{DynamicResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}"
+                    BorderThickness="0,0,0,1" CornerRadius="8,8,0,0"
+                    Height="32">
+                <Grid>
+                    <TextBlock Text="TaskMonitor"
+                               Style="{DynamicResource CaptionTextBlockStyle}"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                               VerticalAlignment="Center"
+                               Margin="12,0,0,0" />
+                    <!-- iNKORE's caption button (its TitleBarClose look: 46 wide, red
+                         hover). Its Command bubbles to the CommandBinding registered in
+                         the code-behind ctor — WPF's Window does NOT handle SystemCommands
+                         by itself (no binding → CanExecute false → button disabled). -->
+                    <ui:TitleBarButton x:Name="CloseButton"
+                                       HorizontalAlignment="Right"
+                                       Command="{x:Static SystemCommands.CloseWindowCommand}"
+                                       IsActive="True"
+                                       Height="32"
+                                       HoverBackground="#E81123" HoverForeground="White"
+                                       PressedBackground="#F1707A" PressedForeground="White"
+                                       ToolTip="关闭">
+                        <ui:FontIcon FontSize="13"
+                                     Icon="{x:Static ui:FluentSystemIcons.Dismiss_16_Regular}" />
+                    </ui:TitleBarButton>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Row="1">
+                <Border Padding="20,16,20,4">
+                    <ContentControl x:Name="ContentHost"
+                                    HorizontalContentAlignment="Stretch"
+                                    VerticalContentAlignment="Top"
+                                    Focusable="False" />
+                </Border>
+
+                <!-- Pin toggle: owned by the shell (one instance → SetPinned's icon/tooltip
+                     swap and these handlers never move) but shown inside the hosted view —
+                     ShowColumn parks it in the view's header PinSlot, right of the title. -->
+                <ToggleButton x:Name="PinButton"
+                              Style="{StaticResource ChromeButtonStyle}"
+                              ToolTip="固定"
+                              Checked="PinButton_Checked" Unchecked="PinButton_Unchecked">
+                    <ui:FontIcon x:Name="PinIcon" FontSize="14"
+                                 Icon="{x:Static ui:FluentSystemIcons.Pin_16_Regular}" />
+                </ToggleButton>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>

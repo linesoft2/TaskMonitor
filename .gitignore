@@ -1,0 +1,28 @@
+# Build output
+bin/
+obj/
+
+# IDE / editor
+.vs/
+.vscode/
+.claude/
+*.user
+*.suo
+
+# Local reverse-engineering tooling config (Ghidra MCP)
+.mcp_d.json
+
+# Microsoft Taskmgr symbols for reverse engineering (~21 MB, not redistributable)
+symbols/
+
+# Windows shell cruft
+Thumbs.db
+Desktop.ini
+
+# Runtime artifacts (created next to the exe — normally inside bin/, guarded here
+# in case the exe is ever run from the repo root)
+logs/
+settings.yaml
+settings.yaml.tmp
+settings.yaml.bad
+shutdown.sentinel

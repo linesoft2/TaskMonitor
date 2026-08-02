@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>task_monitor</RootNamespace>
+    <AssemblyName>task_monitor</AssemblyName>
+    <UseWPF>true</UseWPF>
+    <!-- Assembly identity + version info. Version is the SINGLE source of truth: the SDK
+         generates AssemblyVersion / AssemblyFileVersion / AssemblyInformationalVersion from
+         it (VersionInfo.Current reads the latter at runtime; release.yml checks the tag
+         against this property). src\Properties\AssemblyInfo.cs keeps only what the SDK does
+         NOT generate (the WPF ThemeInfo attribute, ComVisible). -->
+    <Version>2026.8.2.1</Version>
+    <!-- The SDK stamps InformationalVersion with the commit hash unless this is off —
+         关于页/更新检测需要纯净的 "1.0.0"。 -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!-- Win32 FileDescription 来自 AssemblyTitle 属性（不是 NuGet 的 <Title>）。 -->
+    <AssemblyTitle>TaskMonitor</AssemblyTitle>
+    <Product>TaskMonitor</Product>
+    <Copyright>Copyright © 2026 双霖 (LineSoft)</Copyright>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <LangVersion>latest</LangVersion>
+    <Platforms>AnyCPU</Platforms>
+    <!-- Elevation is self-managed (first-run consent dialog + runas self-relaunch in
+         App.RunElevationGate), so the manifest declares asInvoker — see src\app.manifest.
+         dpiAware=true is declared in the manifest itself (it replaces WPF's default). -->
+    <ApplicationManifest>src\app.manifest</ApplicationManifest>
+    <!-- exe icon: assets\logo.ico (multi-size frames rendered from assets\logo.svg). -->
+    <ApplicationIcon>assets\logo.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- iNKORE.UI.WPF.Modern (iUWM): modern Fluent styles, controls, Mica/Acrylic backdrops, theming. -->
+    <PackageReference Include="DirectN" Version="1.18.0" />
+    <PackageReference Include="iNKORE.UI.WPF" Version="1.2.8" />
+    <PackageReference Include="iNKORE.UI.WPF.Modern" Version="0.10.2.1" />
+    <!-- FluentWpfCore: persistent Acrylic via the legacy Accent API (stays when unfocused) + Fluent ContextMenu styling
+         + SmoothScrollViewer (touchpad/touch smooth scrolling — settings page and the five detail process lists). -->
+    <PackageReference Include="FluentWpfCore" Version="1.0.5" />
+    <!-- YamlDotNet: settings.yaml persistence (run-directory settings store, AppSettings). -->
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Single-file packaging (Costura.Fody): weaves at build time to embed every
+         copied-to-output managed assembly into task_monitor.exe as compressed resources,
+         hooking AppDomain.AssemblyResolve so they load straight out of the exe at runtime.
+         This is the mature net48 single-file path (net48 has no built-in single-file
+         publish, unlike net5+). It works for THIS WPF app where ILRepack (which merges
+         managed assemblies) would break the cross-assembly pack:// URIs — App.xaml's
+         pack://application:,,,/FluentWpfCore;component/... and the ones iNKORE uses
+         internally. Costura keeps the assemblies as REAL files (just extracted to a temp
+         cache), so those URIs resolve normally; ILRepack would leave no FluentWpfCore
+         assembly for them to load. Both packages are build-only weavers, so
+         PrivateAssets=all keeps them out of any deps manifest. See FodyWeavers.xml. -->
+    <PackageReference Include="Fody" Version="6.8.0" PrivateAssets="all" />
+    <PackageReference Include="Costura.Fody" Version="5.7.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- App.xaml lives under src/; promote it from the default Page glob to ApplicationDefinition
+         (the WPF SDK only auto-detects an App.xaml sitting next to the csproj). -->
+    <Page Remove="src\App.xaml" />
+    <ApplicationDefinition Include="src\App.xaml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.Drawing: only for Icon.ExtractAssociatedIcon (per-process icons in the CPU detail list). -->
+    <Reference Include="System.Drawing" />
+    <!-- System.Runtime.Serialization: DataContractJsonSerializer for the Clash/Mihomo
+         /connections payload (ClashSampler) — a GAC framework assembly, so Costura
+         (which only embeds copied package DLLs) is unaffected. -->
+    <Reference Include="System.Runtime.Serialization" />
+  </ItemGroup>
+
+</Project>

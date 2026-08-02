@@ -1,0 +1,290 @@
+<UserControl x:Class="task_monitor.NetDetailView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
+             xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+             xmlns:local="clr-namespace:task_monitor"
+             xmlns:fluent="clr-namespace:FluentWpfCore.Controls;assembly=FluentWpfCore"
+             Background="Transparent">
+    <UserControl.Resources>
+        <local:NetRateConverter x:Key="NetRate" />
+    </UserControl.Resources>
+
+    <ikw:SimpleStackPanel Spacing="12">
+
+        <!-- Header: metric icon (same glyph as the settings nav item) + 网络 + pin slot
+             (DetailWindow parks its pin toggle here, right of the title, centered with
+             it) + the public-IP eye toggle (masks/reveals both public IPs; lives in the
+             header because the 公网 IPv4 cell has no room for it — label+IP
+             already fill the column) + live up/down rates stacked top-right (↑ upload over
+             ↓ download, mirroring the chart's up-above / down-below layout). Each line
+             tinted to its color. -->
+        <Grid Margin="0,2,0,4">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <ui:FontIcon FontSize="24" VerticalAlignment="Center" Margin="0,3,8,0"
+                             Icon="{x:Static ui:FluentSystemIcons.Globe_20_Regular}" />
+                <TextBlock Text="网络" FontSize="22"
+                           VerticalAlignment="Center" />
+                <ContentControl x:Name="PinSlotHost" VerticalAlignment="Center" Margin="4,0,0,0" />
+                <!-- Public-IP privacy eye (a ToggleButton with the shared ChromeButtonStyle —
+                     same 28×28 hit area, hover fill and arrow cursor as the pin toggle beside
+                     it; the pinned window's drag filter skips ButtonBase): masks/reveals BOTH
+                     public IPs (v4 + v6) with dots; the state is static, so it survives the
+                     fresh view created per popup open. IsChecked (kept in sync by
+                     UpdatePublicIpEye) lights the fill while masked. -->
+                <ToggleButton x:Name="PublicIpEyeButton" Margin="2,0,0,0"
+                              Style="{StaticResource ChromeButtonStyle}"
+                              VerticalAlignment="Center"
+                              Checked="PublicIpEye_Toggled" Unchecked="PublicIpEye_Toggled">
+                    <ui:FontIcon x:Name="PublicIpEyeIcon" FontSize="14"
+                                 Icon="{x:Static ui:FluentSystemIcons.Eye_16_Regular}" />
+                </ToggleButton>
+            </StackPanel>
+            <ikw:SimpleStackPanel HorizontalAlignment="Right" VerticalAlignment="Center">
+                <TextBlock x:Name="NetUpLine" FontSize="14" />
+                <TextBlock x:Name="NetDownLine" FontSize="14" />
+            </ikw:SimpleStackPanel>
+        </Grid>
+
+        <!-- Bidirectional throughput chart: ↑ upload grows up from the centerline (upper half),
+             ↓ download mirrors down (lower half). Two colors, each half auto-scaled to its own
+             peak (annotated at the top/bottom edge). 60s history. -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4" Height="124">
+            <local:NetThroughputChart x:Name="NetChart" Background="Transparent" />
+        </Border>
+
+        <!-- Connection info band (NetInfoSampler — refreshed ~1 Hz on its own background
+             thread, pushed in via the per-second snapshot). Every datum is its own labeled
+             cell (标签：值 — secondary label + primary value, like the CPU footer):
+             row 0 = 连接 type with the SSID in parens ("WLAN (LineSoft-Main-2)") | 速率
+             link rate, row 1 = 标准 | 频段·channel width (Wi-Fi only cells), row 2 = local
+             & public IPv4 as click-to-copy HyperlinkButtons (the header's eye toggle masks
+             both public IPs with dots), row 3 = 公网 IPv6 (full-width,
+             click-to-copy — spans both columns because even a compressed v6 literal busts
+             one; collapses entirely when there's no v6 connectivity, like the Wi-Fi
+             cells), row 4 = local (gateway) & public latency. 速率's label is indented (transparent "频段：" run) to align
+             with 频段's VALUE — the labels are deliberately staggered. Absent values
+             collapse their cell — that's what gives wired its compact band (row 1 gone)
+             with no holes. A long SSID ellipsizes the 连接 cell only once it gets close to
+             速率 (the cell spans both columns; code caps its MaxWidth per layout pass) —
+             its tooltip carries the full text + adapter description. -->
+        <Grid x:Name="BandGrid" Margin="0,2,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- HorizontalAlignment MUST be Left: the default Stretch + the MaxWidth cap
+                 below would CENTER the box inside the 2-column span, shifting the text
+                 right into the 速率 cell's area (garbled overlap). -->
+            <TextBlock x:Name="ConnCell" Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
+                       HorizontalAlignment="Left"
+                       FontSize="12" Margin="0,0,0,8" TextTrimming="CharacterEllipsis">
+                <Run Text="连接：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="ConnValueRun" Text="—" />
+            </TextBlock>
+            <!-- 连接 spans BOTH columns (declared first ⇒ the 速率 cell paints on top): code
+                 caps its MaxWidth every layout pass to (速率's label x − 8px gap), so a long
+                 SSID only ellipsizes when it actually gets close to 速率 — not at the
+                 mid-column split, which would waste the indent's width.
+                 速率's LABEL aligns with 频段's VALUE (the labels are deliberately
+                 staggered): a transparent "频段： " run indents 速率： by exactly one
+                 label+space width — same text, same font ⇒ pixel-identical advance, no
+                 hardcoded px. The indent run sits BACK-TO-BACK with the label run: XAML
+                 collapses inter-Run whitespace into a RENDERED space, so an emptied indent
+                 run would still leave that space behind and shift the label ~4px (the wired
+                 case). The run is emptied when the 频段 cell below is collapsed (wired) —
+                 速率 then sits flush at the column start. -->
+            <TextBlock x:Name="RateCell" Grid.Row="0" Grid.Column="1" FontSize="12" Margin="0,0,0,8"
+                       TextTrimming="CharacterEllipsis"><Run x:Name="RateIndentRun" Foreground="Transparent" /><Run Text="速率：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="RateValueRun" Text="—" />
+            </TextBlock>
+
+            <TextBlock x:Name="StdCell" Grid.Row="1" Grid.Column="0" FontSize="12" Margin="0,0,0,8"
+                       TextTrimming="CharacterEllipsis">
+                <Run Text="标准：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="StdValueRun" Text="—" />
+            </TextBlock>
+            <TextBlock x:Name="BandCell" Grid.Row="1" Grid.Column="1" FontSize="12" Margin="0,0,0,8"
+                       TextTrimming="CharacterEllipsis">
+                <Run Text="频段：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="BandValueRun" Text="—" />
+            </TextBlock>
+
+            <StackPanel Grid.Row="2" Grid.Column="0" Orientation="Horizontal" Margin="0,0,0,8">
+                <!-- The label adapts in code: LocalIp falls back to a global v6 address
+                     when there's no v4, so it reads 本机 IPv6： in that case. -->
+                <TextBlock x:Name="LocalIpLabel" Text="本机 IPv4：" FontSize="12" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <!-- HyperlinkButton (a ButtonBase) so a pinned window's drag filter skips it;
+                     RaiseHyperlinkClicks=False — it copies to the clipboard, never navigates.
+                     Foreground is bound to the UserControl's INHERITED Foreground — exactly
+                     what every unset TextBlock here renders with. (TextFillColorPrimaryBrush
+                     is only ~90% opaque, so over acrylic it reads washed-out next to the
+                     opaque inherited text — a visible mismatch, not theming.)
+                     The content is a permanent inner TextBlock (not a Content string) so the
+                     click-flash can swap its TEXT without destroying it — the v6 button's
+                     TextTrimming lives on that TextBlock. -->
+                <ui:HyperlinkButton x:Name="LocalIpButton" FontSize="12" Padding="0"
+                                    VerticalAlignment="Center" RaiseHyperlinkClicks="False"
+                                    Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                    Click="IpButton_Click">
+                    <TextBlock Text="—" />
+                </ui:HyperlinkButton>
+            </StackPanel>
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
+                <TextBlock Text="公网 IPv4：" FontSize="12" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <ui:HyperlinkButton x:Name="PublicIpButton" FontSize="12" Padding="0"
+                                    VerticalAlignment="Center" RaiseHyperlinkClicks="False"
+                                    Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                    Click="IpButton_Click">
+                    <TextBlock Text="—" />
+                </ui:HyperlinkButton>
+            </StackPanel>
+
+            <!-- Full-width v6 row ABOVE the latency row (a compressed literal is still ~30
+                 chars — busts one column). A Grid, not a StackPanel: the * column hands the
+                 button a FINITE width so the inner TextBlock's CharacterEllipsis can kick in
+                 (a horizontal StackPanel offers infinite width and nothing ever trims). The row's bottom margin is the gap to
+                 the latency row: when the cell collapses (no v6 connectivity) the margin goes
+                 with it, leaving the IPv4 row's own margin as the only gap, as before. -->
+            <Grid x:Name="PublicIpV6Cell" Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
+                  Margin="0,0,0,8" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="公网 IPv6：" FontSize="12" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <ui:HyperlinkButton x:Name="PublicIpV6Button" Grid.Column="1" FontSize="12" Padding="0"
+                                    HorizontalAlignment="Left" VerticalAlignment="Center"
+                                    RaiseHyperlinkClicks="False"
+                                    Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                    Click="IpButton_Click">
+                    <TextBlock Text="—" TextTrimming="CharacterEllipsis" />
+                </ui:HyperlinkButton>
+            </Grid>
+
+            <TextBlock Grid.Row="4" Grid.Column="0" FontSize="12"
+                       ToolTip="到默认网关的 ICMP 往返延迟">
+                <Run Text="本地延迟：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="GatewayRttRun" Text="—" />
+            </TextBlock>
+            <TextBlock Grid.Row="4" Grid.Column="1" FontSize="12"
+                       ToolTip="到公共 DNS 的 ICMP 往返延迟">
+                <Run Text="公网延迟：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="PublicRttRun" Text="—" />
+            </TextBlock>
+        </Grid>
+
+        <!-- Per-process network list (SRUM real-time API — same source as Task Manager's
+             网络 column, but up/down kept separate). Ranked by total up+down bytes/s. -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4">
+            <ikw:SimpleStackPanel Spacing="6">
+                <!-- Header row: title left; ↑上传 then ↓下载 right-aligned (upload left of
+                     download), matching the row columns below. -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="72" />
+                        <ColumnDefinition Width="14" />
+                        <ColumnDefinition Width="72" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="高占用进程" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="1" Text="↑上传" FontSize="12" TextAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="3" Text="↓下载" FontSize="12" TextAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                <!-- Fixed height so the window (SizeToContent=Height) stays stable across
+                     ticks; fits the top-8 rows without scrolling. TouchDragScrollViewer:
+                     滚轮/触控板平滑物理 + 触屏延迟捕获拖拽 (原因见 SettingsWindow 同处注释);
+                     Style 显式指回 iNKORE 隐式样式 (隐式样式不匹配派生类). -->
+                <local:TouchDragScrollViewer VerticalScrollBarVisibility="Auto" Height="216"
+                                             Style="{DynamicResource {x:Type ScrollViewer}}"
+                                             IsEnableSmoothManipulating="False" PanningMode="None"
+                                             local:ScrollCacheDuringTouch.Enabled="True">
+                    <local:TouchDragScrollViewer.Physics>
+                        <local:SnappyScrollPhysics />
+                    </local:TouchDragScrollViewer.Physics>
+                    <ItemsControl x:Name="NetList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="72" />
+                                        <ColumnDefinition Width="14" />
+                                        <ColumnDefinition Width="72" />
+                                    </Grid.ColumnDefinitions>
+                                    <Image Grid.Column="0" Source="{Binding Icon}"
+                                           Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           RenderOptions.BitmapScalingMode="HighQuality" SnapsToDevicePixels="True" />
+                                    <!-- FollowTagPanel: the accent tag chip (服务/服务组/×N) hugs
+                                         the name's end and is measured first, so a long name
+                                         ellipsizes while the chip stays fully visible. -->
+                                    <local:FollowTagPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Name}" FontSize="12"
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <Border Margin="6,0,0,0" Padding="4,0.5"
+                                                CornerRadius="3" VerticalAlignment="Center"
+                                                Background="Transparent"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                Visibility="{Binding TagVisibility}">
+                                            <TextBlock Text="{Binding TagText}" FontSize="10"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        </Border>
+                                    </local:FollowTagPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding NetUpBytesPerSec, Converter={StaticResource NetRate}}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right" />
+                                    <TextBlock Grid.Column="4" Text="{Binding NetDownBytesPerSec, Converter={StaticResource NetRate}}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </local:TouchDragScrollViewer>
+            </ikw:SimpleStackPanel>
+        </Border>
+
+        <!-- Custom WPF tooltip for the throughput chart -->
+        <Popup x:Name="HistoryTip"
+               PlacementTarget="{Binding ElementName=NetChart}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border x:Name="HistoryTipBorder"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,4">
+                <TextBlock x:Name="HistoryTipText" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Border>
+        </Popup>
+        <!-- Hover tooltip for a process row: file description over its image path. Driven by
+             ProcessListTip (MouseMove hit-test on NetList), not a row ToolTip, so it survives
+             the per-tick list rebind that would otherwise cancel it. -->
+        <Popup x:Name="ProcessTip"
+               PlacementTarget="{Binding ElementName=NetList}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border Background="{Binding Background, ElementName=HistoryTipBorder}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,5" MaxWidth="380">
+                <StackPanel>
+                    <TextBlock x:Name="ProcessTipDesc" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock x:Name="ProcessTipPath" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+        </Popup>
+    </ikw:SimpleStackPanel>
+</UserControl>

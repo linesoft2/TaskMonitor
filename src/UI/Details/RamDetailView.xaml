@@ -1,0 +1,189 @@
+<UserControl x:Class="task_monitor.RamDetailView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
+             xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+             xmlns:local="clr-namespace:task_monitor"
+             xmlns:fluent="clr-namespace:FluentWpfCore.Controls;assembly=FluentWpfCore"
+             Background="Transparent">
+
+    <UserControl.Resources>
+        <local:BytesToSizeConverter x:Key="BytesToSize" />
+    </UserControl.Resources>
+
+    <ikw:SimpleStackPanel Spacing="12">
+
+        <!-- Header: metric icon (same glyph as the settings nav item) + 内存 label +
+             pin slot (DetailWindow parks its pin toggle here, right of the title,
+             centered with it) + big live percent. -->
+        <Grid Margin="0,2,0,4">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <ui:FontIcon FontSize="24" VerticalAlignment="Center" Margin="0,3,8,0"
+                             Icon="{x:Static ui:FluentSystemIcons.Memory_16_Regular}" />
+                <TextBlock Text="内存" FontSize="22"
+                           VerticalAlignment="Center" />
+                <ContentControl x:Name="PinSlotHost" VerticalAlignment="Center" Margin="4,0,0,0" />
+            </StackPanel>
+            <TextBlock x:Name="RamHeaderPercentText"
+                       FontSize="22"
+                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </Grid>
+
+        <!-- Overall RAM history area chart -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4" Height="124">
+            <local:UsageHistoryChart x:Name="RamHistoryChart" Background="Transparent" />
+        </Border>
+
+        <!-- Memory composition bar: 使用中 | 已修改 | 备用 | 可用 (matches Task Manager's composition) -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,0">
+            <local:MemoryCompositionBar x:Name="CompositionBar" Height="10" />
+        </Border>
+
+        <!-- Task Manager memory breakdown (使用中/已压缩, 已提交, 可用, 已缓存, 分页/非分页缓冲池) -->
+        <ikw:SimpleStackPanel Spacing="8" Margin="0,2,0,0">
+
+            <!-- Row 1 (full width): 使用中(已压缩)  16.6 GB (1.0 GB) -->
+            <TextBlock FontSize="12">
+                <Run Text="使用中(已压缩)：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <Run x:Name="InUseValueRun" Text="—" />
+            </TextBlock>
+
+            <!-- Row 2: 可用 | 已提交  (left col matches a row-3 column so 已提交 aligns under 分页池) -->
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="2*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" FontSize="12">
+                    <Run Text="可用：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <Run x:Name="AvailableValueRun" Text="—" />
+                </TextBlock>
+                <TextBlock Grid.Column="1" FontSize="12">
+                    <Run Text="已提交：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <Run x:Name="CommittedValueRun" Text="—" />
+                </TextBlock>
+            </Grid>
+
+            <!-- Row 3: 已缓存 | 分页池 | 非分页池 -->
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" FontSize="12">
+                    <Run Text="已缓存：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <Run x:Name="CachedValueRun" Text="—" />
+                </TextBlock>
+                <TextBlock Grid.Column="1" FontSize="12">
+                    <Run Text="分页池：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <Run x:Name="PagedPoolValueRun" Text="—" />
+                </TextBlock>
+                <TextBlock Grid.Column="2" FontSize="12">
+                    <Run Text="非分页池：" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <Run x:Name="NonPagedPoolValueRun" Text="—" />
+                </TextBlock>
+            </Grid>
+        </ikw:SimpleStackPanel>
+
+        <!-- Per-process memory list (private working set — same source as Task Manager) -->
+        <Border Background="Transparent" BorderThickness="0" Padding="0,4">
+            <ikw:SimpleStackPanel Spacing="6">
+                <Grid>
+                    <TextBlock Text="高占用进程" FontSize="12"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="内存" FontSize="12" HorizontalAlignment="Right"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                <!-- Fixed height so the window (SizeToContent=Height) stays stable across
+                     ticks; fits the top-8 rows without scrolling. TouchDragScrollViewer:
+                     滚轮/触控板平滑物理 + 触屏延迟捕获拖拽 (原因见 SettingsWindow 同处注释);
+                     Style 显式指回 iNKORE 隐式样式 (隐式样式不匹配派生类). -->
+                <local:TouchDragScrollViewer VerticalScrollBarVisibility="Auto" Height="216"
+                                             Style="{DynamicResource {x:Type ScrollViewer}}"
+                                             IsEnableSmoothManipulating="False" PanningMode="None"
+                                             local:ScrollCacheDuringTouch.Enabled="True">
+                    <local:TouchDragScrollViewer.Physics>
+                        <local:SnappyScrollPhysics />
+                    </local:TouchDragScrollViewer.Physics>
+                    <ItemsControl x:Name="ProcessList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="72" />
+                                    </Grid.ColumnDefinitions>
+                                    <Image Grid.Column="0" Source="{Binding Icon}"
+                                           Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           RenderOptions.BitmapScalingMode="HighQuality" SnapsToDevicePixels="True" />
+                                    <!-- FollowTagPanel: the accent tag chip (服务/服务组/×N) hugs
+                                         the name's end and is measured first, so a long name
+                                         ellipsizes while the chip stays fully visible. -->
+                                    <local:FollowTagPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Name}" FontSize="12"
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <Border Margin="6,0,0,0" Padding="4,0.5"
+                                                CornerRadius="3" VerticalAlignment="Center"
+                                                Background="Transparent"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                Visibility="{Binding TagVisibility}">
+                                            <TextBlock Text="{Binding TagText}" FontSize="10"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        </Border>
+                                    </local:FollowTagPanel>
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding WorkingSetBytes, Converter={StaticResource BytesToSize}}"
+                                               FontSize="12" VerticalAlignment="Center" TextAlignment="Right" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </local:TouchDragScrollViewer>
+            </ikw:SimpleStackPanel>
+        </Border>
+
+        <!-- Custom WPF tooltip for the history chart -->
+        <Popup x:Name="HistoryTip"
+               PlacementTarget="{Binding ElementName=RamHistoryChart}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border x:Name="HistoryTipBorder"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,4">
+                <TextBlock x:Name="HistoryTipText" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Border>
+        </Popup>
+
+        <!-- Custom WPF tooltip for the composition bar -->
+        <Popup x:Name="CompositionTip"
+               PlacementTarget="{Binding ElementName=CompositionBar}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border Background="{Binding Background, ElementName=HistoryTipBorder}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,4">
+                <TextBlock x:Name="CompositionTipText" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Border>
+        </Popup>
+        <!-- Hover tooltip for a process row: file description over its image path. Driven by
+             ProcessListTip (MouseMove hit-test on ProcessList), not a row ToolTip, so it
+             survives the per-tick list rebind that would otherwise cancel it. -->
+        <Popup x:Name="ProcessTip"
+               PlacementTarget="{Binding ElementName=ProcessList}"
+               Placement="Relative" StaysOpen="True" AllowsTransparency="True">
+            <Border Background="{Binding Background, ElementName=HistoryTipBorder}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="8,5" MaxWidth="380">
+                <StackPanel>
+                    <TextBlock x:Name="ProcessTipDesc" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock x:Name="ProcessTipPath" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+        </Popup>
+    </ikw:SimpleStackPanel>
+</UserControl>

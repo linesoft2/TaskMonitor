@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <!-- bright Fluent azure, lit from the top-left -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#63C1F9"/>
+      <stop offset="0.52" stop-color="#2AA1F2"/>
+      <stop offset="1" stop-color="#1282E2"/>
+    </linearGradient>
+    <!-- acrylic sheen on the top half -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.24"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <!-- frosted-glass taskbar pill -->
+    <linearGradient id="pill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.62"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.48"/>
+    </linearGradient>
+    <!-- chart area fill fading down into the popup -->
+    <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.02"/>
+    </linearGradient>
+    <clipPath id="iconClip">
+      <rect x="8" y="8" width="240" height="240" rx="56"/>
+    </clipPath>
+  </defs>
+
+  <!-- base -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+
+  <g clip-path="url(#iconClip)">
+    <rect x="8" y="8" width="240" height="150" fill="url(#sheen)"/>
+
+    <!-- acrylic detail window -->
+    <rect x="60" y="44" width="136" height="150" rx="14"
+          fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.25" stroke-width="1.5"/>
+    <!-- its caption -->
+    <rect x="74" y="56" width="26" height="5" rx="2.5" fill="#FFFFFF" fill-opacity="0.4"/>
+
+    <!-- usage-history chart inside the popup -->
+    <path d="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88 L184 178 L72 178 Z"
+          fill="url(#chartFill)"/>
+    <path d="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88"
+          fill="none" stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="6.5" stroke-linecap="round"/>
+    <!-- live sample dot -->
+    <circle cx="184" cy="88" r="9" fill="#35E08C" fill-opacity="0.3"/>
+    <circle cx="184" cy="88" r="5" fill="#35E08C"/>
+
+    <!-- taskbar strip: soft shadow + frosted pill -->
+    <rect x="38" y="150" width="180" height="56" rx="28" fill="#0B3E6B" fill-opacity="0.22"/>
+    <rect x="38" y="146" width="180" height="56" rx="28"
+          fill="url(#pill)" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="1"/>
+
+    <!-- group 1: CPU / 内存 (label dash + value bar per row) -->
+    <rect x="56"  y="163" width="11" height="8" rx="4" fill="#1282E2" fill-opacity="0.45"/>
+    <rect x="71"  y="163" width="24" height="8" rx="4" fill="#1282E2"/>
+    <rect x="56"  y="177" width="11" height="8" rx="4" fill="#1282E2" fill-opacity="0.45"/>
+    <rect x="71"  y="177" width="16" height="8" rx="4" fill="#5EADF4"/>
+
+    <!-- group 2: 磁盘 / GPU -->
+    <rect x="114" y="163" width="11" height="8" rx="4" fill="#1282E2" fill-opacity="0.45"/>
+    <rect x="129" y="163" width="20" height="8" rx="4" fill="#1282E2"/>
+    <rect x="114" y="177" width="11" height="8" rx="4" fill="#1282E2" fill-opacity="0.45"/>
+    <rect x="129" y="177" width="26" height="8" rx="4" fill="#9B8CF2"/>
+
+    <!-- group 3: 网络 ↑ / ↓ -->
+    <path d="M192 173 V161 M186.5 166.5 L192 161 L197.5 166.5"
+          fill="none" stroke="#23B57F" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M192 175 V187 M186.5 181.5 L192 187 L197.5 181.5"
+          fill="none" stroke="#F0A02E" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Fluent inner edge -->
+  <rect x="9" y="9" width="238" height="238" rx="55" fill="none" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="1.5"/>
+</svg>
