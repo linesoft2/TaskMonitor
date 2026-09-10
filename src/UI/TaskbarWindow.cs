@@ -615,43 +615,59 @@ namespace task_monitor
             }
             OverlayHwnd = hwnd;
 
-            // === Step 4: D3D11 device (BGRA support for D2D interop) ===
-            var d3dDevice = D3D11Functions.D3D11CreateDevice(
-                null,
-                D3D_DRIVER_TYPE.D3D_DRIVER_TYPE_HARDWARE,
-                D3D11_CREATE_DEVICE_FLAG.D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                out _);
-            var dxgiDevice = d3dDevice.As<IDXGIDevice>();      // for D2D device + DComposition
-            var dxgiDevice1 = d3dDevice.As<IDXGIDevice1>();    // for swap chain
-
-            // === Step 5: DXGI swap chain for composition (physical pixels) ===
-            var factory = DXGIFunctions.CreateDXGIFactory2<IDXGIFactory2>();
-            var swapChain = factory.Object.CreateSwapChainForComposition<IDXGISwapChain1>(dxgiDevice1, new DXGI_SWAP_CHAIN_DESC1
+            // === Step 4: render state — the device pipeline is built INTO it ===
+            // The pipeline lives on RenderState, never in Start() locals: the message loop
+            // below never returns, so a local wrapper would stay rooted for the whole run
+            // (the 2026-07-30 flood — ResizeBackBuffer's remark) — and RecoverDevice must be
+            // able to dispose and rebuild it in place after a device loss.
+            var sampler = new SystemSampler();
+            // A fresh sampler defaults to all-metrics-on — apply the settings mask (a
+            // re-entered Start after an explorer restart must not silently re-enable
+            // metrics the user turned off).
+            sampler.SetEnabledMask(_samplingEnabledMask);
+            // Same re-apply for 合并相同程序 — a re-entered Start must not silently
+            // reset the user's merge toggle either.
+            sampler.SetMergeByPath(_mergeSamePathProcesses);
+            // Same re-apply for the disk 显示方式 (mode + specific-disk index).
+            sampler.SetDiskDisplay(_diskDisplayMode, _diskDisplayIndex);
+            // Same re-apply for the GPU 显示方式 and the pinned network adapter.
+            sampler.SetGpuDisplay(_gpuDisplayMode, _gpuDisplayIndex);
+            sampler.SetNetAdapter(_netAdapterId);
+            // Same re-apply for the Clash/Mihomo integration (switch + endpoint).
+            sampler.SetClashApi(_clashEnabled, _clashApiAddress, _clashApiSecret);
+            // Same re-apply for the 公网 IP lookup switch.
+            sampler.SetPublicIpLookup(_publicIpLookupEnabled);
+            _sampler = sampler;   // expose to UI-thread instance methods (RequestWifiDetails)
+            var state = new RenderState
             {
-                Width = (uint)physicalWidth,
-                Height = (uint)physicalHeight,
-                Format = DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM,
-                Stereo = false,
-                SampleDesc = new DXGI_SAMPLE_DESC { Count = 1, Quality = 0 },
-                BufferUsage = Constants.DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount = 2,
-                Scaling = DXGI_SCALING.DXGI_SCALING_STRETCH,
-                SwapEffect = DXGI_SWAP_EFFECT.DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-                AlphaMode = DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_PREMULTIPLIED,
-                Flags = 0,
-            });
+                TaskbarHwnd = taskbar,
+                Classical = classical,
+                Vertical = vertical,
+                BarHwnd = hBar,
+                MinHwnd = hMin,
+                LastMinLength = -1,          // no band measurement yet — the first reposition always applies
+                PhysicalWidth = physicalWidth,
+                PhysicalHeight = physicalHeight,
+                LogicalHeight = logicalHeight,
+                Dpi = dpi,
+                Hovered = -1,
+                TrackingMouse = false,
+                Sampler = sampler,
+                Snapshot = sampler.Sample(),
+            };
+            state.Selected = -1;
+            state.ToggleCallback = ToggleCallback;
+            state.RightClickRequested = RightClickRequested;
+            state.Owner = this;
+            state.Snapshot.SampleIntervalMs = _sampleIntervalMs;   // the views' tooltips read it
+            _latestShared = state.Snapshot;   // publish the initial snapshot
+            // Stash the state on the HWND BEFORE the pipeline exists: an init failure then
+            // still unwinds through WM_DESTROY, which releases whatever the half-built
+            // pipeline left behind (ReleaseDeviceResources).
+            _stateHandle = GCHandle.Alloc(state);
+            WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, GCHandle.ToIntPtr(_stateHandle));
 
-            // === Step 6: D2D1 pipeline: factory → device → context → bitmap target ===
-            var d2dFactory = D2D1Functions.D2D1CreateFactory1(D2D1_FACTORY_TYPE.D2D1_FACTORY_TYPE_SINGLE_THREADED);
-            var d2dDevice = d2dFactory.Object.CreateDevice<ID2D1Device>(dxgiDevice);
-            var ctx = d2dDevice.CreateDeviceContext<ID2D1DeviceContext>(D2D1_DEVICE_CONTEXT_OPTIONS.D2D1_DEVICE_CONTEXT_OPTIONS_NONE);
-            ctx.Object.SetDpi(dpi, dpi);
-
-            var surface = swapChain.GetBuffer<IDXGISurface>(0);
-            var bitmap = ctx.CreateBitmapFromDxgiSurface<ID2D1Bitmap1>(surface, BitmapProps(dpi));
-            ctx.SetTarget(bitmap);
-
-            // === Step 7: DirectWrite text formats (font size in DIPs) ===
+            // === Step 5: DirectWrite text formats (font size in DIPs) ===
             // Stacked-group rows are "label … value": label flush-LEFT, value flush-RIGHT, so
             // every value lines up on the group's right edge (one right-aligned numeric column,
             // easy to scan across rows) and every label on its left. All three formats are
@@ -675,92 +691,37 @@ namespace task_monitor
             netFormat.Object.SetTextAlignment(DWRITE_TEXT_ALIGNMENT.DWRITE_TEXT_ALIGNMENT_TRAILING);
             netFormat.Object.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             netFormat.Object.SetWordWrapping(DWRITE_WORD_WRAPPING.DWRITE_WORD_WRAPPING_NO_WRAP);
+            // Device-INDEPENDENT (they come from the DWrite factory, not the D3D device):
+            // created once here and kept across a device loss — RecoverDevice only rebuilds
+            // the pipeline, never the text formats.
+            state.LabelFormat = labelFormat;
+            state.ValueFormat = valueFormat;
+            state.NetFormat = netFormat;
 
-            // === Step 8: brushes (varying alpha; colour re-tinted by ApplyTaskbarTheme) ===
-            // LabelBrush is the dimmed companion of TextBrush (see step 7): labels recede,
-            // values pop. Created black-on-light here; ApplyTaskbarTheme re-tints them to
-            // the system taskbar theme before the first Draw and on every later theme flip.
-            var textBrush = ctx.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 1f });
-            var labelBrush = ctx.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.7f });
-            var highlightBrush = ctx.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.15f });
-            var hoverBrush = ctx.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.07f });
-            var separatorBrush = ctx.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.12f });
-
-            // === Step 9: DirectComposition → bind swap chain to the window ===
-            Functions.DCompositionCreateDevice(dxgiDevice, typeof(IDCompositionDevice).GUID, out IntPtr dcompPtr).ThrowOnError();
-            var dcomp = new ComObject<IDCompositionDevice>(
-                (IDCompositionDevice)Marshal.GetTypedObjectForIUnknown(dcompPtr, typeof(IDCompositionDevice)));
-            dcomp.Object.CreateTargetForHwnd(hwnd, true, out var target);
-            dcomp.Object.CreateVisual(out var visual);
-            visual.SetContent(swapChain.Object);
-            target.SetRoot(visual);
-            dcomp.Object.Commit();
-
-            // === Step 10: assemble render state, first frame, stash on HWND ===
-            var sampler = new SystemSampler();
-            // A fresh sampler defaults to all-metrics-on — apply the settings mask (a
-            // re-entered Start after an explorer restart must not silently re-enable
-            // metrics the user turned off).
-            sampler.SetEnabledMask(_samplingEnabledMask);
-            // Same re-apply for 合并相同程序 — a re-entered Start must not silently
-            // reset the user's merge toggle either.
-            sampler.SetMergeByPath(_mergeSamePathProcesses);
-            // Same re-apply for the disk 显示方式 (mode + specific-disk index).
-            sampler.SetDiskDisplay(_diskDisplayMode, _diskDisplayIndex);
-            // Same re-apply for the GPU 显示方式 and the pinned network adapter.
-            sampler.SetGpuDisplay(_gpuDisplayMode, _gpuDisplayIndex);
-            sampler.SetNetAdapter(_netAdapterId);
-            // Same re-apply for the Clash/Mihomo integration (switch + endpoint).
-            sampler.SetClashApi(_clashEnabled, _clashApiAddress, _clashApiSecret);
-            // Same re-apply for the 公网 IP lookup switch.
-            sampler.SetPublicIpLookup(_publicIpLookupEnabled);
-            _sampler = sampler;   // expose to UI-thread instance methods (RequestWifiDetails)
-            var state = new RenderState
+            // === Step 6: the device pipeline (D3D11 → DXGI swap chain → D2D1 → DComp) ===
+            // CreateDeviceResources is the SAME method the post-device-loss recovery runs
+            // (RecoverDevice) — one construction site, so the two can never drift.
+            // A failure here is not fatal and not reportable-as-crash material: a driver
+            // update/reset leaves the adapter unavailable for a while, so latch the loss and
+            // enter the message loop anyway — the tick rebuilds the pipeline the moment the
+            // device answers again. The window stays put; nothing but the drawing depends on
+            // the device.
+            try
             {
-                D2dContext = ctx,
-                SwapChain = swapChain,
-                DComp = dcomp,
-                // The back-buffer wrappers live on the state, NOT in Start() locals:
-                // Start()'s message loop never returns, so a local here would stay a GC
-                // root for the whole run (Debug JIT) and pin the old back buffer alive
-                // through every later ResizeBuffers — which DXGI then rejects with
-                // DXGI_ERROR_INVALID_CALL (ResizeBackBuffer disposes them first).
-                BackBufferSurface = surface,
-                BackBufferBitmap = bitmap,
-                LabelFormat = labelFormat,
-                ValueFormat = valueFormat,
-                NetFormat = netFormat,
-                TextBrush = textBrush,
-                LabelBrush = labelBrush,
-                HighlightBrush = highlightBrush,
-                HoverBrush = hoverBrush,
-                SeparatorBrush = separatorBrush,
-                TaskbarHwnd = taskbar,
-                Classical = classical,
-                Vertical = vertical,
-                BarHwnd = hBar,
-                MinHwnd = hMin,
-                LastMinLength = -1,          // no band measurement yet — the first reposition always applies
-                PhysicalWidth = physicalWidth,
-                PhysicalHeight = physicalHeight,
-                LogicalHeight = logicalHeight,
-                Dpi = dpi,
-                Hovered = -1,
-                TrackingMouse = false,
-                Sampler = sampler,
-                Snapshot = sampler.Sample(),
-            };
-            state.Selected = -1;
-            state.ToggleCallback = ToggleCallback;
-            state.RightClickRequested = RightClickRequested;
-            state.Owner = this;
-            state.Snapshot.SampleIntervalMs = _sampleIntervalMs;   // the views' tooltips read it
-            _latestShared = state.Snapshot;   // publish the initial snapshot
-            ApplyTaskbarTheme(state, IsTaskbarLightThemed());   // tint brushes before first frame
-            Draw(state);
+                CreateDeviceResources(state, hwnd, physicalWidth, physicalHeight, dpi);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("D3D/D2D/DComp 管线初始化失败——覆盖层暂不绘制，待设备可用后自动重建", ex);
+                OnDeviceLost(state, "启动初始化", default(HRESULT));
+            }
 
-            _stateHandle = GCHandle.Alloc(state);
-            WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, GCHandle.ToIntPtr(_stateHandle));
+            // === Step 7: first frame ===
+            if (!state.DeviceLost)
+            {
+                ApplyTaskbarTheme(state, IsTaskbarLightThemed());   // tint brushes before first frame
+                Draw(state);
+            }
 
             // === Step 11: embed into the taskbar + position relative to parent ===
             // Parent: the Win11 taskbar takes us directly; the classical one docks us in
@@ -823,6 +784,11 @@ namespace task_monitor
         // --------------------------------------------------------------------
         private static void Draw(RenderState s)
         {
+            // No usable device: the rebuild belongs to RecoverDevice (the tick calls it), and
+            // a dead context can only fail again — this is also what keeps the per-mouse-move
+            // Draw calls harmless while the device is down.
+            if (s.DeviceLost) return;
+
             var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Vertical);
             if (layout.Width <= 0f) return;   // every metric off — the overlay is a stub
 
@@ -833,8 +799,17 @@ namespace task_monitor
             if (layout.Vertical) DrawVertical(s, layout);
             else DrawHorizontal(s, layout);
 
-            ctx.EndDraw();
-            s.SwapChain.Present(0, 0);
+            // EndDraw/Present report a LOST DEVICE as an HRESULT — read it instead of letting
+            // DirectN's throwing helper turn it into a Win32Exception whose HResult is the
+            // useless E_FAIL (see OnDeviceLost). A device-loss code is a recoverable condition,
+            // not a crash; anything else still throws (the WndProc guard reports real bugs).
+            var endHr = ctx.Object.EndDraw(IntPtr.Zero, IntPtr.Zero);   // NULL tags
+            if (IsDeviceLost(s, endHr)) { OnDeviceLost(s, "EndDraw", endHr); return; }
+            endHr.ThrowOnError();
+
+            var presentHr = s.SwapChain.Object.Present(0, 0);   // DXGI_STATUS_OCCLUDED is success
+            if (IsDeviceLost(s, presentHr)) { OnDeviceLost(s, "Present", presentHr); return; }
+            presentHr.ThrowOnError();
         }
 
         // The two-row grid (the Win11 taskbar + horizontal classical taskbars).
@@ -981,6 +956,247 @@ namespace task_monitor
         }
 
         // --------------------------------------------------------------------
+        // Device loss: the D3D device can vanish under us at any moment — a GPU driver
+        // update/reset (the reported case), a TDR, a laptop GPU switch or a remote-session
+        // handover. The whole pipeline then has to be rebuilt, which is exactly what the
+        // D2D error message says ("recreate, rerender the entire frame and reattempt
+        // present").
+        //
+        // Two rules, both learned from the 2026-08-08 report (崩溃报告 #1..#25, one per tick,
+        // WndProc msg=0x113):
+        //   1. NEVER let it reach the crash channel. `ctx.EndDraw()` is DirectN's THROWING
+        //      helper: it raises a Win32Exception whose HResult is E_FAIL — the real code
+        //      (D2DERR_RECREATE_TARGET) is already lost by then, so a handler cannot tell a
+        //      driver update from a genuine bug. Read the HRESULT instead (Draw,
+        //      ResizeBackBuffer).
+        //   2. Rebuild in place. The overlay window, its taskbar embed, the sampler and the
+        //      geometry all stay; only the pipeline is recreated, so recovery costs one
+        //      frozen frame and needs no re-embed (the expensive/fragile part of the
+        //      explorer-restart path).
+        // --------------------------------------------------------------------
+
+        // The classic "recreate the target" codes. D2D can also answer something generic once
+        // BeginDraw has already failed on a removed device (WRONG_STATE), which is why the
+        // classification falls back to asking D3D directly (DeviceGone).
+        private const int D2DERR_RECREATE_TARGET = unchecked((int)0x8899000C);
+        private const int DXGI_ERROR_DEVICE_REMOVED = unchecked((int)0x887A0005);
+        private const int DXGI_ERROR_DEVICE_HUNG = unchecked((int)0x887A0006);
+        private const int DXGI_ERROR_DEVICE_RESET = unchecked((int)0x887A0007);
+        private const int DXGI_ERROR_DRIVER_INTERNAL_ERROR = unchecked((int)0x887A0020);
+
+        private static bool IsDeviceLost(RenderState s, HRESULT hr)
+        {
+            if (!hr.IsError) return false;
+            switch (hr.Value)
+            {
+                case D2DERR_RECREATE_TARGET:
+                case DXGI_ERROR_DEVICE_REMOVED:
+                case DXGI_ERROR_DEVICE_HUNG:
+                case DXGI_ERROR_DEVICE_RESET:
+                case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
+                    return true;
+                default:
+                    return DeviceGone(s);
+            }
+        }
+
+        // D3D's own verdict (S_OK = alive) — the catch-all for a loss reported under an
+        // unrecognized HRESULT, and the only check available when a failure arrives as an
+        // exception (DirectN's throwing helpers) rather than a return value.
+        private static bool DeviceGone(RenderState s)
+        {
+            try
+            {
+                var hr = s.D3dDevice?.Object?.GetDeviceRemovedReason();
+                return hr.HasValue && hr.Value.IsError;
+            }
+            catch { return false; }
+        }
+
+        // Latch the loss: drawing stops (Draw early-returns) until RecoverDevice succeeds.
+        // Logged once per loss — the latch is what makes a driver update ONE line instead of
+        // one per tick.
+        private static void OnDeviceLost(RenderState s, string stage, HRESULT hr)
+        {
+            if (s.DeviceLost) return;
+            s.DeviceLost = true;
+            s.DeviceLostTicks = 0;
+            string code = hr.Value != 0 ? $"{hr.Name} 0x{(uint)hr.Value:X8}" : "设备已移除";
+            Logger.Warn($"D3D 设备丢失（{stage}：{code}）——通常是显卡驱动更新/重置或 TDR；暂停绘制，待设备可用后自动重建管线（窗口与任务栏嵌入保持不变）");
+        }
+
+        // Build the whole device pipeline (D3D11 → DXGI swap chain → D2D1 → DComp) for the
+        // given physical size/DPI and point the context at the swap chain's back buffer.
+        // Called from Start() and from RecoverDevice — keep it the ONLY construction site.
+        // On entry the pipeline fields must be empty (ReleaseDeviceResources ran); a throw
+        // midway leaves them partially filled, and the next attempt cleans up first.
+        private static void CreateDeviceResources(RenderState s, IntPtr hwnd, int width, int height, uint dpi)
+        {
+            // DXGI can't create 0-sized buffers: with every metric's sampling off the layout
+            // collapses to a stub (0-width), which the window floors at 1px.
+            width = Math.Max(1, width);
+            height = Math.Max(1, height);
+
+            s.D3dDevice = D3D11Functions.D3D11CreateDevice(
+                null,
+                D3D_DRIVER_TYPE.D3D_DRIVER_TYPE_HARDWARE,
+                D3D11_CREATE_DEVICE_FLAG.D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                out _);
+            s.DxgiDevice = s.D3dDevice.As<IDXGIDevice>();      // for D2D device + DComposition
+            s.DxgiDevice1 = s.D3dDevice.As<IDXGIDevice1>();    // for swap chain
+
+            s.DxgiFactory = DXGIFunctions.CreateDXGIFactory2<IDXGIFactory2>();
+            s.SwapChain = s.DxgiFactory.Object.CreateSwapChainForComposition<IDXGISwapChain1>(s.DxgiDevice1, new DXGI_SWAP_CHAIN_DESC1
+            {
+                Width = (uint)width,
+                Height = (uint)height,
+                Format = DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM,
+                Stereo = false,
+                SampleDesc = new DXGI_SAMPLE_DESC { Count = 1, Quality = 0 },
+                BufferUsage = Constants.DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount = 2,
+                Scaling = DXGI_SCALING.DXGI_SCALING_STRETCH,
+                SwapEffect = DXGI_SWAP_EFFECT.DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                AlphaMode = DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_PREMULTIPLIED,
+                Flags = 0,
+            });
+
+            // D2D1: factory → device → context → bitmap target (the back buffer, wrapped).
+            s.D2dFactory = D2D1Functions.D2D1CreateFactory1(D2D1_FACTORY_TYPE.D2D1_FACTORY_TYPE_SINGLE_THREADED);
+            s.D2dDevice = s.D2dFactory.Object.CreateDevice<ID2D1Device>(s.DxgiDevice);
+            s.D2dContext = s.D2dDevice.CreateDeviceContext<ID2D1DeviceContext>(D2D1_DEVICE_CONTEXT_OPTIONS.D2D1_DEVICE_CONTEXT_OPTIONS_NONE);
+            s.D2dContext.Object.SetDpi(dpi, dpi);
+            // The back-buffer wrappers live on the state, NOT in locals: DXGI rejects a
+            // ResizeBuffers while ANY reference to a back buffer is alive, and a DirectN
+            // wrapper only releases on Dispose/finalization (ResizeBackBuffer's remark).
+            s.BackBufferSurface = s.SwapChain.GetBuffer<IDXGISurface>(0);
+            s.BackBufferBitmap = s.D2dContext.CreateBitmapFromDxgiSurface<ID2D1Bitmap1>(s.BackBufferSurface, BitmapProps(dpi));
+            s.D2dContext.SetTarget(s.BackBufferBitmap);
+
+            // Brushes (varying alpha; colour re-tinted by ApplyTaskbarTheme). LabelBrush is
+            // the dimmed companion of TextBrush: labels recede, values pop. Created
+            // black-on-light; the CALLER re-tints them (ApplyTaskbarTheme) before drawing.
+            s.TextBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 1f });
+            s.LabelBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.7f });
+            s.HighlightBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.15f });
+            s.HoverBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.07f });
+            s.SeparatorBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.12f });
+
+            // DirectComposition → bind the swap chain to the window. The target and the visual
+            // are kept so ReleaseDeviceResources can UNBIND them before a rebuilt pipeline
+            // binds its own target to the same HWND (the old ones are still alive as RCWs).
+            Functions.DCompositionCreateDevice(s.DxgiDevice, typeof(IDCompositionDevice).GUID, out IntPtr dcompPtr).ThrowOnError();
+            s.DComp = new ComObject<IDCompositionDevice>(
+                (IDCompositionDevice)Marshal.GetTypedObjectForIUnknown(dcompPtr, typeof(IDCompositionDevice)));
+            // Stored the moment they exist (not after the wiring below): a throw mid-wiring must
+            // still leave teardown able to unbind them.
+            s.DComp.Object.CreateTargetForHwnd(hwnd, true, out var target).ThrowOnError();
+            s.DCompTarget = target;
+            s.DComp.Object.CreateVisual(out var visual).ThrowOnError();
+            s.DCompVisual = visual;
+            visual.SetContent(s.SwapChain.Object).ThrowOnError();
+            target.SetRoot(visual).ThrowOnError();
+            s.DComp.Object.Commit().ThrowOnError();
+        }
+
+        // Tear the pipeline down — every step best-effort: a REMOVED device answers calls with
+        // an error HRESULT (or DirectN's throwing helper) and must not stop the teardown, and
+        // WM_DESTROY runs this on the way out too. Order matters: composition first (it holds
+        // the swap chain and the HWND binding), then the D2D target/brushes/context, then
+        // DXGI, and the D3D device last. Every field is nulled, which is also what makes the
+        // `?.` guards at the Commit/SetDpi call sites safe while the pipeline is down.
+        private static void ReleaseDeviceResources(RenderState s)
+        {
+            try { s.DCompVisual?.SetContent(null); } catch { }
+            try { s.DCompTarget?.SetRoot(null); } catch { }
+            try { s.DComp?.Object?.Commit(); } catch { }
+            // Release the target/visual RCWs NOW, not at GC time. DirectComposition keeps the
+            // HWND bound to its target until the target object is destroyed, and the rebuilt
+            // pipeline's CreateTargetForHwnd then fails with
+            // DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED (0x889B0011) — verified against a
+            // forced loss: nulling the fields (RCWs are only collectable, not released) is NOT
+            // enough. These two are separate objects handed out by the DComp device, so the
+            // final release cannot disturb anything else we hold.
+            ReleaseRcw(s.DCompTarget);
+            ReleaseRcw(s.DCompVisual);
+            s.DCompVisual = null;
+            s.DCompTarget = null;
+            s.DComp?.Dispose();
+            s.DComp = null;
+
+            try { s.D2dContext?.SetTarget(null); } catch { }
+            s.BackBufferBitmap?.Dispose();
+            s.BackBufferBitmap = null;
+            s.BackBufferSurface?.Dispose();
+            s.BackBufferSurface = null;
+            s.TextBrush?.Dispose();
+            s.TextBrush = null;
+            s.LabelBrush?.Dispose();
+            s.LabelBrush = null;
+            s.HighlightBrush?.Dispose();
+            s.HighlightBrush = null;
+            s.HoverBrush?.Dispose();
+            s.HoverBrush = null;
+            s.SeparatorBrush?.Dispose();
+            s.SeparatorBrush = null;
+            s.D2dContext?.Dispose();
+            s.D2dContext = null;
+            s.SwapChain?.Dispose();
+            s.SwapChain = null;
+            s.D2dDevice?.Dispose();
+            s.D2dDevice = null;
+            s.D2dFactory?.Dispose();
+            s.D2dFactory = null;
+            s.DxgiFactory?.Dispose();
+            s.DxgiFactory = null;
+            s.DxgiDevice1 = null;    // raw QI'd RCWs (DirectN generated no wrapper here):
+            s.DxgiDevice = null;     // dropping the last field reference is what releases them
+            s.D3dDevice?.Dispose();
+            s.D3dDevice = null;
+        }
+
+        // Deterministically drop a raw (un-wrapped) COM reference — DirectN generates no
+        // IDisposable wrapper for IDCompositionTarget/IDCompositionVisual, and for the
+        // composition target the release timing is semantically load-bearing (above).
+        private static void ReleaseRcw(object rcw)
+        {
+            try { if (rcw != null) Marshal.FinalReleaseComObject(rcw); }
+            catch { /* already released / not a COM object — nothing to do */ }
+        }
+
+        // Rebuild the pipeline after a device loss, in place. Called from the tick while
+        // DeviceLost is set; failure is NOT fatal and NOT crash material — a driver update
+        // leaves the adapter unavailable for a while (mid-install the machine may even sit on
+        // the basic display driver), so the caller just retries on the next tick. The swap
+        // chain is created from the CURRENT size/DPI fields, so a DPI or layout change that
+        // landed during the outage is applied by the rebuild itself (ResizeBackBuffer's
+        // early-return keeps those fields current while the device is down).
+        private static bool RecoverDevice(IntPtr hwnd, RenderState s)
+        {
+            try
+            {
+                ReleaseDeviceResources(s);
+                CreateDeviceResources(s, hwnd, s.PhysicalWidth, s.PhysicalHeight, s.Dpi);
+                s.DeviceLost = false;
+                s.DeviceLostTicks = 0;
+                ApplyTaskbarTheme(s, IsTaskbarLightThemed());   // fresh brushes are black-on-light
+                Draw(s);
+                if (s.DeviceLost) return false;   // the redraw lost it again (repeated TDR) — retry
+                Logger.Info("D3D 设备已重建——覆盖层恢复绘制（窗口与任务栏嵌入未变）");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                s.DeviceLostTicks++;
+                // Full detail on the first failure, then every 30th attempt: a driver swap can
+                // keep the device unavailable for a minute and a per-tick WARN would flood.
+                if (s.DeviceLostTicks == 1 || s.DeviceLostTicks % 30 == 0)
+                    Logger.Warn($"D3D 设备重建失败（第 {s.DeviceLostTicks} 次尝试，设备可能仍不可用）——下一 tick 继续重试", ex);
+                return false;
+            }
+        }
+
+        // --------------------------------------------------------------------
         // Recreate render target for a new DPI (WM_DPICHANGED / poll).
         // --------------------------------------------------------------------
 
@@ -994,19 +1210,38 @@ namespace task_monitor
         // only the context's reference, not the wrapper's.
         private static void ResizeBackBuffer(RenderState s, int width, int height, uint dpi)
         {
+            // Device down: nothing to resize. Deliberately a silent no-op rather than a bounce
+            // to the caller — the callers still record the new size/DPI fields, and
+            // RecoverDevice builds its swap chain from exactly those (a DPI or layout change
+            // during the outage is therefore not lost, just deferred).
+            if (s.DeviceLost) return;
+
             s.D2dContext.SetTarget(null);
             s.BackBufferBitmap?.Dispose();
             s.BackBufferSurface?.Dispose();
             s.BackBufferBitmap = null;
             s.BackBufferSurface = null;
 
-            s.SwapChain.ResizeBuffers(
+            // HRESULT, not the throwing extension: a device loss surfaces HERE too (the driver
+            // usually dies between two ticks, and a taskbar-height/DPI change is a resize).
+            var resizeHr = s.SwapChain.Object.ResizeBuffers(
                 2, (uint)width, (uint)height,
                 DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+            if (IsDeviceLost(s, resizeHr)) { OnDeviceLost(s, "ResizeBuffers", resizeHr); return; }
+            resizeHr.ThrowOnError();
 
-            s.BackBufferSurface = s.SwapChain.GetBuffer<IDXGISurface>(0);
-            s.BackBufferBitmap = s.D2dContext.CreateBitmapFromDxgiSurface<ID2D1Bitmap1>(s.BackBufferSurface, BitmapProps(dpi));
-            s.D2dContext.SetTarget(s.BackBufferBitmap);
+            try
+            {
+                s.BackBufferSurface = s.SwapChain.GetBuffer<IDXGISurface>(0);
+                s.BackBufferBitmap = s.D2dContext.CreateBitmapFromDxgiSurface<ID2D1Bitmap1>(s.BackBufferSurface, BitmapProps(dpi));
+                s.D2dContext.SetTarget(s.BackBufferBitmap);
+            }
+            catch (Exception) when (DeviceGone(s))
+            {
+                // GetBuffer/CreateBitmapFromDxgiSurface go through DirectN's throwing helpers,
+                // so the code is already lost — ask D3D instead (classification catch-all).
+                OnDeviceLost(s, "GetBuffer/CreateBitmapFromDxgiSurface", default(HRESULT));
+            }
         }
 
         private static void HandleDpiChange(IntPtr hwnd, uint newDpi, RenderState s)
@@ -1031,7 +1266,10 @@ namespace task_monitor
                 return;
             }
 
-            s.D2dContext.Object.SetDpi(newDpi, newDpi);
+            // Null-while-down safe (ReleaseDeviceResources nulls the context; a dead device
+            // answers SetDpi with an ignored error): the new DPI still lands in s.Dpi below and
+            // the rebuilt context picks it up through CreateDeviceResources.
+            s.D2dContext?.Object?.SetDpi(newDpi, newDpi);
             ResizeBackBuffer(s, newPhysicalWidth, newPhysicalHeight, newDpi);
 
             s.PhysicalWidth = newPhysicalWidth;
@@ -1041,7 +1279,7 @@ namespace task_monitor
 
             RepositionOverlay(hwnd, s, force: true);   // the anchor depends on our size
 
-            s.DComp.Object.Commit();
+            s.DComp?.Object?.Commit();   // null while the device is down (ReleaseDeviceResources)
             Draw(s);
         }
 
@@ -1077,7 +1315,7 @@ namespace task_monitor
             s.PhysicalHeight = newHeight;
             s.LogicalHeight = newHeight * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi;
             RepositionOverlay(hwnd, s, force: true);   // the anchor depends on our size
-            s.DComp.Object.Commit();
+            s.DComp?.Object?.Commit();   // null while the device is down (ReleaseDeviceResources)
         }
 
         // --------------------------------------------------------------------
@@ -1356,7 +1594,7 @@ namespace task_monitor
                     s.PhysicalWidth = newW;
                     s.PhysicalHeight = newH;
                     s.LogicalHeight = newH * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi;
-                    s.DComp.Object.Commit();
+                    s.DComp?.Object?.Commit();   // null while the device is down
                     Draw(s);
                 }
             }
@@ -1576,7 +1814,7 @@ namespace task_monitor
             s.LogicalHeight = s.PhysicalHeight * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi;
 
             RepositionOverlay(hwnd, s, force: true);
-            s.DComp.Object.Commit();
+            s.DComp?.Object?.Commit();   // null while the device is down
             Draw(s);
         }
 
@@ -1963,6 +2201,18 @@ namespace task_monitor
                             return IntPtr.Zero;
                         }
 
+                        // A LOST DEVICE owns this tick (显卡驱动更新/重置/TDR): rebuild the
+                        // pipeline first — DPI tracking, repositioning and the sample-draw all
+                        // funnel into Draw/ResizeBuffers, which a dead device can only reject.
+                        // While the rebuild keeps failing (the driver is still coming back)
+                        // only the sampler runs, so the detail popups keep ticking; the
+                        // overlay itself holds its last frame until the device returns.
+                        if (s.DeviceLost && !RecoverDevice(hwnd, s))
+                        {
+                            SamplePublishDraw(s);   // sampling + publish; Draw no-ops while lost
+                            return IntPtr.Zero;
+                        }
+
                         uint curDpi = WindowInterop.GetDpiForWindow(hwnd);
                         if (curDpi > 0 && curDpi != s.Dpi)
                             HandleDpiChange(hwnd, curDpi, s);
@@ -1998,11 +2248,11 @@ namespace task_monitor
                     {
                         var handle = GCHandle.FromIntPtr(ptr);
                         var s = handle.Target as RenderState;
-                        s?.DComp?.Dispose();          // release composition first
-                        s?.BackBufferBitmap?.Dispose();
-                        s?.BackBufferSurface?.Dispose();
-                        s?.D2dContext?.Dispose();
-                        s?.SwapChain?.Dispose();
+                        // The pipeline may be mid-rebuild (or half-built after a failed init):
+                        // ReleaseDeviceResources disposes whatever exists and tolerates a dead
+                        // device, and the handle is freed even if something in there throws.
+                        try { if (s != null) ReleaseDeviceResources(s); }
+                        catch (Exception ex) { Logger.Warn("覆盖层退出时释放 D3D/D2D/DComp 资源失败（进程即将退出，忽略）", ex); }
                         handle.Free();
                         WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, IntPtr.Zero);
                     }
@@ -2100,13 +2350,28 @@ namespace task_monitor
         /// <summary>Holds the DirectX resources and mutable UI state for one window.</summary>
         private sealed class RenderState
         {
+            // ---- device pipeline: created by CreateDeviceResources, torn down as a set by
+            // ReleaseDeviceResources. It lives here (never in Start() locals) so a device loss
+            // can rebuild it in place — and so nothing stays rooted by the never-returning
+            // message loop. Every field below is null while the pipeline is down.
+            public IComObject<ID3D11Device> D3dDevice;
+            public IDXGIDevice DxgiDevice;      // raw QI'd RCW — for the D2D device + DComposition
+            public IDXGIDevice1 DxgiDevice1;    // raw QI'd RCW — for the swap chain
+            public IComObject<IDXGIFactory2> DxgiFactory;
+            public IComObject<ID2D1Factory1> D2dFactory;
+            public IComObject<ID2D1Device> D2dDevice;
             public IComObject<ID2D1DeviceContext> D2dContext;
             public IComObject<IDXGISwapChain1> SwapChain;
             public ComObject<IDCompositionDevice> DComp;
+            public IDCompositionTarget DCompTarget;   // raw RCWs (DirectN exposes no wrapper): kept
+            public IDCompositionVisual DCompVisual;   // only to UNBIND them before a rebuild binds
+                                                      // its own target to the same HWND
             // The D2D target's back buffer, wrapped. Replaced on every resize; the old
             // wrappers must be DISPOSED before ResizeBuffers (see ResizeBackBuffer).
             public IComObject<IDXGISurface> BackBufferSurface;
             public IComObject<ID2D1Bitmap1> BackBufferBitmap;
+            // DirectWrite formats: device-INDEPENDENT, created once per Start() and kept across
+            // a device loss (CreateDeviceResources never touches them).
             public IComObject<IDWriteTextFormat> LabelFormat;
             public IComObject<IDWriteTextFormat> ValueFormat;
             public IComObject<IDWriteTextFormat> NetFormat;   // left-aligned, for the net column
@@ -2115,6 +2380,11 @@ namespace task_monitor
             public IComObject<ID2D1Brush> HighlightBrush;
             public IComObject<ID2D1Brush> HoverBrush;
             public IComObject<ID2D1Brush> SeparatorBrush;
+            // The D3D device is gone (driver update/reset/TDR): drawing is suspended and the
+            // tick's RecoverDevice rebuilds the pipeline. Set by OnDeviceLost, cleared on a
+            // successful rebuild; DeviceLostTicks counts failed attempts for log throttling.
+            public bool DeviceLost;
+            public int DeviceLostTicks;
             public IntPtr TaskbarHwnd;
             // ---- classical taskbar family (Win10 / restored-classic taskbar on Win11) ----
             public bool Classical;              // false = the Win11 taskbar path

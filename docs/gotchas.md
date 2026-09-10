@@ -483,3 +483,63 @@ version** — a newer version still prompts. Three buttons: 立即更新 (opens 
 
 A `{Binding}` on a `Run` throws `XamlParseException` at startup. Named Runs are set in code;
 DataTemplates use two TextBlocks.
+
+## 35. A lost D3D device is a RECOVERABLE condition, not a crash
+
+*`src/UI/TaskbarWindow.cs`: `Draw`, `IsDeviceLost`/`DeviceGone`/`OnDeviceLost`,
+`CreateDeviceResources`/`ReleaseDeviceResources`/`RecoverDevice`, `ResizeBackBuffer`*
+
+The report (2026-08-08, 崩溃报告 #1..#25 — one per tick, `WndProc msg=0x113`): a GPU driver
+update removed the device under the running overlay, every tick's `Draw` threw
+`Win32Exception … 存在可以恢复的演示错误 (D2DERR_RECREATE_TARGET)` at `EndDraw`, and the
+WndProc guard funnelled each one into `CrashReporter` — a crash dialog per second for a
+condition D2D itself calls recoverable.
+
+Two separate defects, both fixed here:
+
+1. **The code was unreadable by the time it was an exception.** `ctx.EndDraw()` is DirectN's
+   *throwing* extension: it raises a `Win32Exception` whose HResult is E_FAIL (`0x80004005`) —
+   the actual `D2DERR_RECREATE_TARGET` is gone, so no handler can separate a driver update
+   from a real bug. `Draw` and `ResizeBackBuffer` now call the raw interface
+   (`ctx.Object.EndDraw(IntPtr.Zero, IntPtr.Zero)`, `s.SwapChain.Object.Present(0, 0)`,
+   `…ResizeBuffers(…)`), classify the HRESULT themselves, and only `ThrowOnError()` on
+   anything that is *not* a device loss (a genuine `DXGI_ERROR_INVALID_CALL` still reaches the
+   crash log — that path is what found the 2026-07-30 resize bug). Classification is the known
+   D2D/DXGI codes plus a catch-all `ID3D11Device::GetDeviceRemovedReason()` probe
+   (`DeviceGone`) — D2D answers `D2DERR_WRONG_STATE` once `BeginDraw` has already failed on a
+   removed device, and a failure that arrives as an exception has no HRESULT left at all.
+
+2. **Nothing could rebuild the pipeline.** Every device resource lived in `Start()` locals or
+   on `RenderState` with no construction path other than `Start()` — and `Start()` only runs
+   again after the *window* dies (explorer restart), so a lost device meant a dead overlay
+   until the user restarted the app. The pipeline now lives entirely on `RenderState` and is
+   built by `CreateDeviceResources(s, hwnd, w, h, dpi)` — the **only** construction site,
+   called by `Start()` and by `RecoverDevice`. A loss latches `RenderState.DeviceLost`
+   (`OnDeviceLost`, logged once), `Draw` early-returns, and the 1s tick calls `RecoverDevice`:
+   release → recreate → re-tint brushes → redraw. Window, taskbar embed, sampler and geometry
+   all survive, so recovery is one frozen frame instead of the explorer-restart dance. Failure
+   is expected while the driver is still coming back (the machine may sit on the basic display
+   driver mid-install): the latch stays set and the next tick retries, logging the full stack
+   on attempt 1 and then every 30th attempt. `Start()`'s own creation is wrapped the same way —
+   a failed init enters the message loop with the loss latched rather than throwing the window
+   away.
+
+Non-obvious pieces, each verified against a forced loss (a temporary test hook, since a driver
+update can't be staged):
+
+- **`IDCompositionTarget`/`IDCompositionVisual` must be released deterministically** —
+  `Marshal.FinalReleaseComObject` in `ReleaseDeviceResources` (`ReleaseRcw`). DirectComposition
+  keeps the HWND bound to its target until the target OBJECT dies, and since DirectN generates
+  no `IDisposable` wrapper for either interface, nulling the field only makes the RCW
+  *collectable*: the rebuild then fails with `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED`. The
+  first in-place recovery attempt hit exactly this.
+- **`ResizeBackBuffer` early-returns while `DeviceLost`** but its callers still record the new
+  size/DPI — `RecoverDevice` builds the swap chain from those fields, so a DPI or layout change
+  during the outage is deferred, not lost. `HandleDpiChange`'s `SetDpi` and the four
+  `s.DComp.Object.Commit()` sites are `?.`-guarded because `ReleaseDeviceResources` nulls every
+  pipeline field (which is also what makes them safe mid-rebuild).
+- **The DirectWrite formats are device-INDEPENDENT** (they come from the DWrite factory) and
+  are deliberately NOT part of the pipeline: `CreateDeviceResources` never touches them.
+- **`WM_DESTROY` tears down through the same `ReleaseDeviceResources`**, so a window destroyed
+  mid-rebuild (explorer restart) or after a failed init releases whatever exists; the state is
+  stashed on the HWND *before* the pipeline is built precisely so that path is reachable.

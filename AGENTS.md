@@ -180,6 +180,7 @@ Each rule's canonical statement is a comment at the code site named in the doc.
 32. **DISPOSE back-buffer wrappers before `ResizeBuffers`** — wrappers live on `RenderState`, never in locals.
 33. **更新检测** — csproj `<Version>` is the only version source; CNB source reads the WEB 307 redirect (OpenAPI is anonymously 401); "不再提醒" skips only that version.
 34. **net48's `Run.Text` is not a dependency property** — a `{Binding}` on a `Run` throws `XamlParseException` at startup; set named Runs in code, use two TextBlocks in DataTemplates.
+35. **A lost D3D device (驱动更新/重置/TDR) is recoverable, never a crash** — only the raw `ctx.Object.EndDraw`/`SwapChain.Object.Present`/`ResizeBuffers` HRESULTs can tell (DirectN's throwing helpers lose the code as E_FAIL): latch `RenderState.DeviceLost`, let the tick's `RecoverDevice` rebuild the pipeline in place, and release the DComp target/visual with `Marshal.FinalReleaseComObject` (else `DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED`).
 
 ## Useful external references
 
