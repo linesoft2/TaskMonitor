@@ -569,7 +569,7 @@ namespace task_monitor
             physicalWidth = Math.Max(1, physicalWidth);
             physicalHeight = Math.Max(1, physicalHeight);
             float logicalHeight = physicalHeight * (float)USER_DEFAULT_SCREEN_DPI / dpi;
-            Logger.Info($"任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical} DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms");
+            Logger.Info($"任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical} DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms{AnchorDiag()}");
 
             // Creation coords are screen-absolute (the window starts top-level; the exact
             // dock is applied relative to the parent after SetParent in step 11). The
@@ -1113,12 +1113,13 @@ namespace task_monitor
                     // Far-left corner; reserve 160px for the Widgets button when it is
                     // shown (TrafficMonitor's taskbar_left_space_win11), else we'd
                     // render underneath it.
-                    xrel = spacing + (IsWidgetsButtonShown() ? DpiScaleInt(160, dpi) : 0);
+                    xrel = spacing + (IsWidgetsButtonShown() ? WidgetsReserve(dpi) : 0);
                 }
                 // Start not found / no room on the left → fall through to the right side.
                 if (xrel >= 0 && xrel + windowWidth <= taskbarWidth)
                     return (taskbarLeft + xrel, xrel);
             }
+            onLeft = false;   // resolved to the right-hand anchor below
 
             int xs;
             int xr;
@@ -1134,14 +1135,25 @@ namespace task_monitor
                 xs = taskbarRect.right - windowWidth - fallback;
                 xr = taskbarWidth - windowWidth - fallback;
             }
-            // TrafficMonitor's avoid_overlap_with_widgets: on a LEFT-aligned Win11
-            // taskbar with the Widgets button shown, keep the 160px reserve here too.
-            if (IsWidgetsButtonShown() && !IsTaskbarCenterAligned())
+            // TrafficMonitor's avoid_overlap_with_widgets: a LEFT-aligned Win11 taskbar
+            // with the Widgets button shown lays its icon group out from the far left,
+            // so the 160px reserve keeps us clear of the widgets button there. The
+            // !onLeft guard matters: when the caller asked for the left side but the
+            // Start button is missing / there is no room, the code above lands on this
+            // right-hand anchor instead — and the reserve has no business being applied
+            // there (it just shoves the overlay leftwards, off the screen on a narrow
+            // taskbar; a real log had the overlay land at x=-1199 that way).
+            if (IsWidgetsButtonShown() && !onLeft && !IsTaskbarCenterAligned())
             {
-                int reserve = DpiScaleInt(160, dpi);
+                int reserve = WidgetsReserve(dpi);
                 xs -= reserve;
                 xr -= reserve;
             }
+            // The tray-based anchor can land outside the taskbar (narrow taskbar, tray
+            // read failure, the reserve above) and an off-screen overlay renders
+            // nothing — keep it inside, degraded rather than invisible.
+            xr = Math.Max(0, Math.Min(xr, taskbarWidth - windowWidth));
+            xs = Math.Max(0, Math.Min(xs, taskbarRect.right - windowWidth));
             return (xs, xr);
         }
 
@@ -1149,8 +1161,107 @@ namespace task_monitor
         // missing-value defaults: TaskbarAl absent = centre-aligned, TaskbarDa absent =
         // Widgets button shown. Read per CalcPosition call (startup / DPI change / 1s
         // poll) — a Registry.GetValue is sub-millisecond.
+        // The widgets check carries one extra guard on top of the value, and it is NOT
+        // optional (TrafficMonitor's IsTaskbarWidgetsBtnShown): without the Windows Web
+        // Experience Pack the widgets button cannot exist at all, so the "absent = shown"
+        // default must not apply. Windows only writes TaskbarDa once the user has touched
+        // 任务栏设置 → 小组件, so on a machine where it was never set the value is absent
+        // AND the pack may well not be installed — reading the default alone reserves
+        // 160px for a button that can never appear. That is the reported symptom
+        // （未开启小组件却空出小组件的位置）; upstream fixed the same thing in
+        // TrafficMonitor issue #1958.
         private static bool IsTaskbarCenterAligned() => ReadExplorerAdvancedDword("TaskbarAl", 1) != 0;
-        private static bool IsWidgetsButtonShown() => ReadExplorerAdvancedDword("TaskbarDa", 1) != 0;
+        private static bool IsWidgetsButtonShown() =>
+            IsWebExperiencePackDetected() && ReadExplorerAdvancedDword("TaskbarDa", 1) != 0;
+
+        private static int WidgetsReserve(uint dpi) => DpiScaleInt(160, dpi);
+
+        // Widgets-reserve diagnostics for the startup log (AnchorDiag) — resolved once and
+        // remembered, so that line states the same value CalcPosition acts on instead of
+        // re-deriving it. A plain bool, not Lazy<T>: the startup log asks from the taskbar
+        // thread while the UI thread may hold the accessors, and the lock also protects the
+        // reason string. See EvaluateWidgetsReserve.
+        private static readonly object _widgetsReserveSync = new object();
+        private static bool _widgetsReserveShown;
+        private static bool _widgetsReserveEvaluated;
+        private static string _widgetsReserveReason = "";
+        private static bool? _webExperiencePackDetected;
+
+        private static string AnchorDiag()
+        {
+            bool shown = EvaluateWidgetsReserve();
+            string align = IsTaskbarCenterAligned() ? "居中" : "靠左";
+            if (!shown)
+                return $"，任务栏对齐={align}，小组件预留=无（{_widgetsReserveReason}）";
+            uint dpi = WindowInterop.GetDpiForWindow(WindowInterop.FindWindowW("Shell_TrayWnd", null));
+            return $"，任务栏对齐={align}，小组件预留={WidgetsReserve(dpi)}px";
+        }
+
+        private static bool EvaluateWidgetsReserve()
+        {
+            lock (_widgetsReserveSync)
+            {
+                if (!_widgetsReserveEvaluated)
+                {
+                    bool pack = IsWebExperiencePackDetected();
+                    _widgetsReserveShown = pack && ReadExplorerAdvancedDword("TaskbarDa", 1) != 0;
+                    _widgetsReserveReason = !pack
+                        ? "未安装 Web Experience 包"        // the widgets button cannot exist here
+                        : _widgetsReserveShown ? "TaskbarDa≠0" : "TaskbarDa=0";
+                    _widgetsReserveEvaluated = true;
+                }
+                return _widgetsReserveShown;
+            }
+        }
+
+        // "Is the Windows Web Experience Pack installed for the current user?" —
+        // TrafficMonitor's WindowsWebExperienceDetector::IsDetected, which asks the WinRT
+        // PackageManager for the package family name + the Microsoft Windows publisher
+        // subject. net48 has no WinRT projection, so the same question goes to the user's
+        // AppX package repository, which is what PackageManager itself reads: one subkey
+        // per package registered for this user, named <full package name>. Asked once, and
+        // only from EvaluateWidgetsReserve.
+        //
+        // The path is the CLASSES route, not Software\Microsoft\Windows\...\AppModel:
+        // HKCU\Software\Classes\Local Settings is a junction and the repository is
+        // reachable ONLY through it — the direct Software\Microsoft\... spelling of the
+        // same path opens as null (verified on 26200). A null key just means "no pack".
+        //
+        // Conservative on failure: a package this user cannot see counts as absent, and
+        // absent means NO reserve — i.e. exactly today's behaviour when TaskbarDa is 0.
+        private static bool IsWebExperiencePackDetected()
+        {
+            lock (_widgetsReserveSync)
+            {
+                if (_webExperiencePackDetected == null)
+                {
+                    const string PackagePrefix = "MicrosoftWindows.Client.WebExperience_";
+                    bool detected = false;
+                    try
+                    {
+                        using (var repo = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                            @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages"))
+                        {
+                            detected = HasSubKeyWithPrefix(repo, PackagePrefix);
+                        }
+                    }
+                    catch { detected = false; }
+                    _webExperiencePackDetected = detected;
+                }
+                return _webExperiencePackDetected.Value;
+            }
+        }
+
+        private static bool HasSubKeyWithPrefix(Microsoft.Win32.RegistryKey key, string prefix)
+        {
+            if (key == null) return false;      // no repository at all (not Windows 11?)
+            string[] names;
+            try { names = key.GetSubKeyNames(); } catch { return false; }
+            if (names == null) return false;
+            foreach (string name in names)
+                if (name != null && name.StartsWith(prefix, StringComparison.Ordinal)) return true;
+            return false;
+        }
 
         private static int ReadExplorerAdvancedDword(string valueName, int defaultValue)
         {
