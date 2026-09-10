@@ -62,6 +62,7 @@
 - [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) ([License](https://github.com/zhongyang219/TrafficMonitor/blob/master/LICENSE))
 - Windows 任务管理器
 - [iNKORE.UI.WPF.Modern](https://github.com/iNKORE-NET/UI.WPF.Modern) ([License](https://github.com/iNKORE-NET/UI.WPF.Modern/blob/main/LICENSE.md))
+- [DirectN](https://github.com/smourier/DirectN) ([License](https://github.com/smourier/DirectN/blob/master/LICENSE))
 - [FluentWpfCore](https://github.com/TwilightLemon/FluentWpfCore) ([License](https://github.com/TwilightLemon/FluentWpfCore/blob/master/LICENSE.txt))
 - [YamlDotNet](https://github.com/aaubry/YamlDotNet) ([License](https://github.com/aaubry/YamlDotNet/blob/master/LICENSE.txt))
 
