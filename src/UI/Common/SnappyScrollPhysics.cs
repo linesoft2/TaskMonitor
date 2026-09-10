@@ -6,16 +6,15 @@ namespace task_monitor
     /// <summary>
     /// 库默认手感的滚动物理，替换 FluentWpfCore 1.0.5 的 DefaultScrollPhysics。
     /// 同为"目标距离指数趋近"模型，速率常量与库默认严格等价（推导见下方常量注释）。
-    /// 与库的三处分歧全是 bugfix，不改手感：
-    /// 1) 稳定态：库在精确模式下 IsStable 永假，SmoothScrollViewer 的渲染循环只能等
-    ///    撞边界才退出 —— 页面中部触控板滚动后内容 IsHitTestVisible=false 卡住，
-    ///    点击/hover 全失灵。这里精确模式改为"剩余 < 0.5px 且输入静默 > 80ms"才 stable：
+    /// 与库的两处分歧全是 bugfix，不改手感：
+    /// 1) 稳定态：库的 <see cref="IScrollPhysics.IsStable"/> 在精确模式下永假 —— 渲染
+    ///    循环退不出、页面卡死，症状与失效权衡见 <see cref="TouchDragScrollViewer"/>
+    ///    的类注释（那边是受害方，单一起源）。这里的修法：精确模式改为
+    ///    "剩余 &lt; StopDistance 且输入静默 &gt; PreciseIdleSeconds"才 stable ——
     ///    流式 delta 持续到达时不会在帧间误停（误停 = StopRendering 里
     ///    ScrollToVerticalOffset + transform 复位的顿挫 + hit-test 闪烁），
-    ///    手势/惯性结束后 80ms 收尾恢复 hit-test。
-    /// 2) 越界累积：滚到底/顶后继续滚，视觉被宿主 clamp 但剩余距离在界外越堆越多，
-    ///    反向滚要先"还清"才动（库同病）—— Update 每帧把目标钳进 [0, MaxOffset]，
-    ///    越界部分当场丢弃（MaxOffset 由 TouchDragScrollViewer 推送 ScrollableHeight）。
+    ///    手势/惯性结束后静默窗口到期即恢复 hit-test。
+    /// 2) 越界累积：见 <see cref="Update"/> 的钳制注释。
     /// </summary>
     public class SnappyScrollPhysics : IScrollPhysics
     {
@@ -64,6 +63,7 @@ namespace task_monitor
             // 继续滚，视觉被宿主 clamp 住了但 _remaining 还在界外越堆越多，往回滚要先
             // "还清"整段页面才动（滚轮/触控板同感，2026-08-02 反馈；库默认物理同病）。
             // currentOffset 是宿主已 clamp 的视觉 offset，每帧都会回传，钳制即时生效。
+            // MaxOffset 由 TouchDragScrollViewer.OnScrollChanged 推送 ScrollableHeight。
             double target = currentOffset + _remaining;
             if (target < 0)
                 _remaining = -currentOffset;

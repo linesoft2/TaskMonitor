@@ -11,6 +11,10 @@ namespace task_monitor
 {
     /// <summary>
     /// SmoothScrollViewer + 自实现的"延迟捕获"触屏拖拽（替代原生 PanningMode）。
+    /// **本类的三处注释是整套滚动栈的单一起源**（TouchDragScrollViewer /
+    /// SnappyScrollPhysics / ScrollCacheDuringTouch 三个文件不再各自复述）：
+    /// 为什么不要 PanningMode、为什么不要库的 manipulation、拖拽手势怎么发起、
+    /// 以及 physics 渲染期间的 hit-test 失效权衡。
     /// 为什么不要 PanningMode：它是布局驱动 —— 每个触摸 move（触屏 90~120Hz）都
     /// ScrollToVerticalOffset → 整页布局，弱 GPU 触屏机实测掉帧（BitmapCache 消掉
     /// 每帧重绘后仍卡，2026-08-02 日志证实 cache engaged 但卡顿依旧）。

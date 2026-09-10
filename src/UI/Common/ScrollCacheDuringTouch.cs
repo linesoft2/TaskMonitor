@@ -9,18 +9,19 @@ namespace task_monitor
 {
     /// <summary>
     /// 触屏拖拽滚动期间，把滚动内容临时切到 <see cref="BitmapCache"/> 的附加行为。
-    /// 原生 PanningMode 是布局驱动：手指每动一帧都 ScrollToVerticalOffset → 布局 +
-    /// 整页重绘，Mica/亚克力 + 整页卡片在弱 GPU 触屏设备上必掉帧（"有点卡"）。
+    /// 要解决的是什么、为什么不用原生 PanningMode、拖拽手势怎么发起 —— 见
+    /// <see cref="TouchDragScrollViewer"/> 的类注释（单一起源，此处不重复）。
     /// 缓存后每帧只是位图位移 blit，渲染开销归零（与 SmoothScrollViewer 的
     /// RenderTransform 物理滚动也天然叠加：transform 滑动缓存位图）。
-    /// 不能常驻缓存 —— hover/展开/切换动画会每帧整页重栅格化，反而更卡。所以是窗口式：
+    /// —— 缓存这里只管一件事：什么时候上 BitmapCache。不能常驻 —— hover/展开/切换
+    /// 动画会每帧整页重栅格化，反而更卡。所以是窗口式：
     ///   TouchDown 记起点 → TouchMove 越过拖拽阈值(8 DIP, ≈PanningMode 自身阈值)才上缓存
     ///   （轻点不付任何栅格化代价）→ TouchUp 后由 ScrollChanged 给惯性续命，
     ///   静默 600ms 判定滚动落定 → 恢复原 CacheMode。
-    /// 触摸事件只观察不处理（不 Capture、不 e.Handled），tap→鼠标晋升不受影响。
-    /// 注意订阅必须用 handledEventsToo —— TouchDragScrollViewer 的触屏拖拽会把
-    /// move/up 标 handled（类处理器先于实例处理器执行），不加这个标志就拿不到事件，
-    /// 缓存永不生效。
+    /// 触摸事件只观察不处理（不 Capture、不 e.Handled），tap→鼠标晋升不受影响
+    /// （这条推论依赖 TouchDragScrollViewer 的延迟捕获，理由同上）。
+    /// 订阅必须带 handledEventsToo —— TouchDragScrollViewer 的拖拽会把 move/up 标
+    /// handled（类处理器先于实例处理器执行），不加这个标志就拿不到事件，缓存永不生效。
     /// </summary>
     public static class ScrollCacheDuringTouch
     {
@@ -66,8 +67,7 @@ namespace task_monitor
                 };
                 sv.SetValue(StateProperty, st);
                 sv.TouchDown += OnTouchDown;
-                // handledEventsToo: TouchDragScrollViewer 拖拽时把 move/up 标 handled，
-                // 类处理器先于实例处理器 —— 不加就拿不到事件，缓存永不生效
+                // handledEventsToo 的理由见类注释
                 sv.AddHandler(UIElement.TouchMoveEvent, s_touchMove, handledEventsToo: true);
                 sv.AddHandler(UIElement.TouchUpEvent, s_touchUp, handledEventsToo: true);
                 sv.LostTouchCapture += OnTouchUp; // 捕获结束后松手走这里，等价收尾

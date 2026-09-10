@@ -87,7 +87,8 @@ namespace task_monitor
         /// <summary>
         /// Per-metric sampling switches (设置 → 采样, one toggle per metric). null = enabled
         /// (the default — only the disabled state is ever written). A disabled metric's
-        /// samplers are skipped entirely (<see cref="SystemSampler.SetEnabledMask"/>), its
+        /// samplers are skipped entirely (<see cref="TaskbarWindow.SetMetricSamplingMask"/>
+        /// → <see cref="SystemSampler.SetEnabledMask"/>), its
         /// overlay slot is hidden (the remaining slots reflow to fill the space) and its
         /// column press is suppressed. App converts these to/from the SystemSampler mask
         /// (bit order = the overlay hit slots).
@@ -101,8 +102,9 @@ namespace task_monitor
         /// <summary>
         /// 合并相同程序 (设置 → 采样项目): null = on (the default — same-exe-path rows in
         /// the five per-process detail lists merge into one, values summed, the member count
-        /// shown as "name (N)"; only the disabled state is ever written). Merging happens
-        /// BEFORE the top-8 cut (<see cref="ProcessListMerger"/>; svchost.exe 不合并).
+        /// shown as a "×N" tag chip next to the name; only the disabled state is ever
+        /// written). Merging happens BEFORE the top-8 cut (<see cref="ProcessListMerger"/>;
+        /// svchost.exe 不合并).
         /// Pushed live via <see cref="TaskbarWindow.SetMergeSamePathProcesses"/>.
         /// </summary>
         public bool? MergeSamePathProcesses { get; set; }
