@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace task_monitor
 {
@@ -241,6 +242,41 @@ namespace task_monitor
         /// to every fresh sampler, like the mask.</summary>
         public void SetPublicIpLookup(bool enabled) => _publicIpLookupEnabled = enabled;
 
+        /// <summary>
+        /// Release the sampler's NATIVE registrations — currently the SRUM real-time session
+        /// (<see cref="ProcessNetSampler.Shutdown"/>), whose callback pointer must not outlive a
+        /// collected delegate (the reported 卡死 crash). Called when the overlay window is torn
+        /// down and rebuilt, i.e. before this sampler becomes garbage. Safe to call once.
+        /// </summary>
+        public void Shutdown() => _procNet.Shutdown();
+
+        // ---------- slow-step diagnostics (the reported 「卡死几秒后自己恢复」) ----------
+        // The whole tick runs on the taskbar thread, and while one of these calls blocks the
+        // widget cannot repaint: it just holds its last frame and ignores clicks until the
+        // call returns. Nothing in the log said WHICH call, so every step is timed here and
+        // only a step over the threshold logs — the per-tick path stays silent (gotcha §5),
+        // while the next occurrence names the blocking call and its duration.
+        private const int SlowStepMs = 150;
+
+        private static T Timed<T>(string what, Func<T> step)
+        {
+            CrashTrace.NoteStep(what);   // names the crashing step if the tick faults (see CrashTrace)
+            long t0 = Stopwatch.GetTimestamp();
+            T result = step();
+            long ms = (Stopwatch.GetTimestamp() - t0) * 1000L / Stopwatch.Frequency;
+            if (ms >= SlowStepMs) Logger.Warn($"采样慢步骤：{what} 用时 {ms}ms");
+            return result;
+        }
+
+        private static void Timed(string what, Action step)
+        {
+            CrashTrace.NoteStep(what);
+            long t0 = Stopwatch.GetTimestamp();
+            step();
+            long ms = (Stopwatch.GetTimestamp() - t0) * 1000L / Stopwatch.Frequency;
+            if (ms >= SlowStepMs) Logger.Warn($"采样慢步骤：{what} 用时 {ms}ms");
+        }
+
         public SystemSnapshot Sample()
         {
             int mask = _enabledMask;         // one volatile read, consistent for the tick
@@ -268,20 +304,20 @@ namespace task_monitor
             // svchost → 服务 naming: refresh the PID→services map once per tick (one
             // EnumServicesStatusExW RPC — same one-call-per-tick budget as the process
             // walk below) whenever at least one metric is on.
-            if (mask != 0) _serviceHosts.Refresh();
+            if (mask != 0) Timed("服务名刷新(EnumServicesStatusExW)", () => _serviceHosts.Refresh());
 
             // The shared per-process walk feeds the CPU/RAM/磁盘 top lists, the CPU footer
             // counts, RAM's "(compressed)" and the PID→name map for the net/GPU per-process
             // samplers — run it unless EVERYTHING is off (it is the most expensive sampler).
-            var proc = mask != 0 ? _procCpu.Sample(mergeByPath) : default(ProcessSample);
+            var proc = mask != 0 ? Timed("进程枚举(NtQuerySystemInformation)", () => _procCpu.Sample(mergeByPath)) : default(ProcessSample);
             var pidToName = proc.PidToName;
 
             var snapshot = new SystemSnapshot { NetInfo = NetInfo.Empty };
 
             if (cpuOn)
             {
-                var cpu = _cpu.Sample();
-                var summary = _summary.Sample();
+                var cpu = Timed("CPU(PDH)", () => _cpu.Sample());
+                var summary = Timed("系统摘要(注册表/NTQSI)", () => _summary.Sample());
                 if (!cpuPrime)
                 {
                     snapshot.CpuPercent = cpu.CpuPercent;
@@ -303,8 +339,8 @@ namespace task_monitor
 
             if (ramOn)
             {
-                var ram = _ram.Sample();
-                var memDetail = _memDetail.Sample();
+                var ram = Timed("内存(GlobalMemoryStatusEx)", () => _ram.Sample());
+                var memDetail = Timed("内存明细(NTQSI class-2/80)", () => _memDetail.Sample());
                 // Compressed bytes come from the "Memory Compression" process found during the
                 // process walk (not from a memory counter) — that is Task Manager's "(compressed)".
                 memDetail.CompressedBytes = proc.CompressedBytes;
@@ -321,7 +357,7 @@ namespace task_monitor
 
             if (netOn)
             {
-                var (netUp, netDown, netAdapter, netUpHist, netDownHist) = _net.Sample(_netAdapterId);
+                var (netUp, netDown, netAdapter, netUpHist, netDownHist) = Timed("网络速率(GetIfTable2)", () => _net.Sample(_netAdapterId));
                 // Hand the Clash/Mihomo endpoint to the controller poller (cheap volatile
                 // writes; its background thread retargets on change) — the integration off
                 // → null (the poll thread idles); an unset address → the conventional
@@ -335,7 +371,7 @@ namespace task_monitor
                 // The network sampler's SRUM records carry only a PID; hand it the walk's
                 // PID→ImageName map so it can name processes (incl. PPL-protected ones it can't
                 // OpenProcess) without enumerating processes itself.
-                var procNet = _procNet.Sample(pidToName, mergeByPath, _clash.Latest);
+                var procNet = Timed("进程网络(SRUM 实时 API)", () => _procNet.Sample(pidToName, mergeByPath, _clash.Latest));
                 // Hand the current adapter to the connection-info sampler — its background
                 // thread does the slow work; Sample() below is just a volatile read.
                 _netInfo.Adapter = _net.CurrentAdapter;
@@ -367,7 +403,10 @@ namespace task_monitor
 
             if (diskOn)
             {
-                var disk = _disk.Sample((MetricDisplayMode)_diskDisplayMode, _diskDisplayIndex);
+                // Timed: this is the step that touches every physical disk — including a USB
+                // one that may have gone to sleep (IOCTL_DISK_PERFORMANCE / the per-query
+                // CreateFile) — the top suspect for a several-second taskbar-thread stall.
+                var disk = Timed("磁盘(IOCTL_DISK_PERFORMANCE)", () => _disk.Sample((MetricDisplayMode)_diskDisplayMode, _diskDisplayIndex));
                 if (!diskPrime)
                 {
                     snapshot.DiskPercent = disk.HeadlinePercent;
@@ -379,9 +418,9 @@ namespace task_monitor
 
             if (gpuOn)
             {
-                var gpu = _gpu.Sample((MetricDisplayMode)_gpuDisplayMode, _gpuDisplayIndex);
+                var gpu = Timed("GPU(DXCore QueryState)", () => _gpu.Sample((MetricDisplayMode)_gpuDisplayMode, _gpuDisplayIndex));
                 // Per-process GPU% (PDH) — same PID→ImageName hand-off as the network sampler.
-                var procGpu = _procGpu.Sample(pidToName, mergeByPath);
+                var procGpu = Timed("进程 GPU(PDH)", () => _procGpu.Sample(pidToName, mergeByPath));
                 if (!gpuPrime)
                 {
                     snapshot.GpuAvailable = gpu.Available;

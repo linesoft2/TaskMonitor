@@ -131,6 +131,9 @@ of those sites, keep the log line truthful.**
 
 Full no-activate set, **including `SWP_NOACTIVATE` on every `SetWindowPos`**.
 
+**One deliberate exception** — 悬浮模式 with 置顶显示 OFF, which must be activatable for a click
+to raise it (§36). Every other form keeps the full set.
+
 ## 7. `SetWindowPos(HWND_TOPMOST)` silently no-ops when not foreground
 
 *`src/UI/DetailWindow.xaml.cs`: `ShowColumn`, `EnsureTopmost`*
@@ -140,11 +143,15 @@ bit and never trusts the return value.
 
 ## 8. Acrylic unfocused / the menu host
 
-*`src/App.xaml.cs`, `src/UI/DetailWindow.xaml.cs`*
+*`src/App.xaml.cs`, `src/UI/DetailWindow.xaml.cs`, `src/Interop/WindowBackdropInterop.cs`*
 
-FluentWpfCore's `UseWindowComposition=True` drives acrylic — do not P/Invoke DWM/Accent
-directly. The right-click menu's invisible host is `Activate()`d, closes on `Deactivated`,
-and gets `WS_EX_TOOLWINDOW` at `SourceInitialized` (without it the host shows in Alt+Tab).
+FluentWpfCore's `UseWindowComposition=True` drives acrylic on every **WPF** window — do not
+hand-roll DWM/Accent P/Invoke for one of those. The 悬浮模式 widget is the exception that
+proves the rule: it is a NATIVE DirectComposition window, so FluentWpfCore (a WPF attached
+property) cannot reach it — `WindowBackdropInterop` makes the identical accent call with the
+identical tint constants instead (§36). The right-click menu's invisible host is `Activate()`d,
+closes on `Deactivated`, and gets `WS_EX_TOOLWINDOW` at `SourceInitialized` (without it the host
+shows in Alt+Tab).
 
 ## 9. `NetSampler` never enumerates NICs per tick
 
@@ -214,6 +221,24 @@ recently-retained ones first, the rest at 0 B/s below — so with 合并相同�
 row's count is the number of RUNNING same-path instances, not just the traffic-active ones
 (Idle/System/Memory Compression excluded; SRUM-unavailable still degrades to empty).
 
+**A registration OUTLIVES the sampler it came from — unregister it on every rebuild** (the
+2026-09-22 卡死, and the single worst bug of that investigation). `SruRegisterRealTimeStats`
+hands srumapi a raw pointer to a managed delegate's marshalling stub, so the registration is a
+native reference the GC knows nothing about: the moment the sampler (and with it `_callback`)
+becomes unreachable, the next GC frees the stub and srumapi keeps calling it — `0xC0000005`
+with `读 0x8`, `Rax/Rcx = 0` (a null function pointer inside stub code), NO managed frame and
+therefore NO app-log entry, ~1 s later (the next SRU frame), while WER froze the process for
+20–30 s dumping it. It looked exactly like a 悬浮模式 flip crash, because a flip rebuilds the
+overlay → `new SystemSampler()` → a NEW registration, and the old one was never released; the
+same applies to an explorer restart or any `Start()` re-entry. `TrimMemory`'s forced
+`GC.Collect() + WaitForPendingFinalizers()` on every popup close is what made the collection
+happen *immediately* after the flip, which is how the user's repro (rapid 切换 detail 窗口)
+reproduced it. Fix in place: `ProcessNetSampler.Shutdown()` (unregister + retain the retired
+instance so an in-flight callback's stub stays valid) called from `SystemSampler.Shutdown()`
+from `WM_DESTROY`, before the state turns to garbage. Found with the `CrashTrace` VEH (the
+message ring said `WM_APP_SET_FLOAT_KEEPOUT`, the step marker said `绘制阶段`, the stack scan
+showed `srumapi.dll`, and the record's 距上次内存回收 was 875 ms) — see §37.
+
 ## 16. Wi-Fi `wlanapi` calls are on-demand, NOT per-tick
 
 *`src/Sampling/NetInfoSampler.cs`*
@@ -249,11 +274,23 @@ the control silently falls back to the Aero scrollbar.
 
 ## 20. Idle trim at event points only, never on a timer
 
-*`src/App.xaml.cs`: `ScheduleIdleTrim`*
+*`src/App.xaml.cs`: `ScheduleIdleTrim`, `src/Interop/SystemInfo.cs`: `TrimMemory`*
 
 `SystemInfo.TrimMemory` runs after the prewarm and when the last detail window closes,
 deferred to Background priority (the comments at the site explain why inline would be
 wrong).
+
+**Two things it must NOT do again** (the 2026-09-22 卡死 investigation): burst, and wait for
+finalizers. Rapid 切换 detail 窗口 closes one popup per switch, so the old code ran a forced
+full GC per close; it now refuses a second trim within `TrimMinIntervalMs` (30 s) — the log
+line states the limit and the actual gap. And it no longer calls
+`GC.WaitForPendingFinalizers()`: waiting meant every unreachable DirectN/COM wrapper was
+released ON THE SPOT while the taskbar thread was concurrently inside its own COM calls
+(`Draw`), which is precisely the window a use-after-free shows up in. Without the wait those
+wrappers are still released — by the finalizer thread, in its own time, exactly as during
+normal operation. (The real crash of that night was the leaked SRUM registration behind the
+same trigger — §15 — but this is the same "don't force finalization under a live drawer"
+rule.)
 
 ## 21. 开机自启动 = a Task Scheduler logon task, never the Run key
 
@@ -543,3 +580,318 @@ update can't be staged):
 - **`WM_DESTROY` tears down through the same `ReleaseDeviceResources`**, so a window destroyed
   mid-rebuild (explorer restart) or after a failed init releases whatever exists; the state is
   stashed on the HWND *before* the pipeline is built precisely so that path is reachable.
+
+## 36. 悬浮模式 — the same window, detached
+
+*`src/UI/TaskbarWindow.cs` (`SetFloatingMode`, `Start`'s `floating` branch, `ApplyFloating*`,
+`FloatingReposition`, the `WM_LBUTTON*` drag), `src/Interop/WindowBackdropInterop.cs`,
+`src/App.xaml.cs`, `src/UI/Settings/SettingsWindow.xaml(.cs)`*
+
+设置 → 外观 → 悬浮模式 turns the overlay into a free-floating desktop widget: **no
+`SetParent`**, the taskbar keeps no copy, and the same window class, layout, drawing,
+hit-testing and sampler are reused — only the background is added. Drag it anywhere (a drag is
+not a click: the press only opens a popup if it never left a 4-DIP threshold), and the new home
+goes to `settings.yaml` (`floatingX`/`floatingY`, screen px, written from the drag-end callback).
+
+**The widget's body is its own drawn CARD, and that is a measured decision.** It began as the
+DetailWindow's material: `WindowBackdropInterop.SetAcrylic` is the *same* accent call
+FluentWpfCore's `WindowMaterial(UseWindowComposition=True)` makes for the popup
+(`SetWindowCompositionAttribute` + `ACCENT_ENABLE_ACRYLICBLURBEHIND`) with the *same* tint
+constants, verified against the popup with a checkerboard probe + BitBlt statistics (both land
+on p50 224 / p90 226 while the raw pattern shows edge energy 22.2 → widget 4.8). The reported
+*"悬浮窗口四周的阴影"* ended it: the blur is drawn by DWM BEHIND the window and can only be
+SHAPED by DWM's corner-rounding opt-in (`DWMWA_WINDOW_CORNER_PREFERENCE = ROUND`) — and that
+opt-in is what makes the system draw this frameless popup as a *framed* window, border and
+**drop shadow** included. Three live probes settled it on 26200: `DWMWA_BORDER_COLOR =
+DWMWA_COLOR_NONE` takes the 1px outline but not the shadow (checked by eye); `DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED`
+plus `SWP_FRAMECHANGED` changes nothing at all; and the rounding preference itself, set to
+`DONOTROUND`, removes the shadow AND the rounding together. Rounding it ourselves is no way out
+either: `SetWindowRgn` with a rounded region (verified with `WindowFromPoint` — the corner
+pixels stop belonging to the widget) DOES clip the overlay's own D2D output (the hover fill came
+out rounded, and a 40px test radius made it obvious) but leaves the blurred backdrop square.
+So the widget paints the material's TINT itself — the same shared constants at the same 0xCC
+alpha, no blur — the frame stays off (`SetCardFrame`), and the corners come from the region
+(`SetRoundedRegion`, radius = the drawn radius + slack, change-gated per tick). The 1px outline
+that DWM painted as part of that frame and took away with it is now **drawn by the overlay
+itself** (`CardBorderWidthDip` in the card pass, alphas in `WindowBackdropInterop`) — a self-drawn
+edge cannot drag the shadow back in, which is the whole point of not asking DWM for a frame. The
+modern `DWMWA_SYSTEMBACKDROP_TYPE` path was already rejected on measurement — flat solid for a
+never-activated `WS_EX_NOREDIRECTIONBITMAP` window (numbers at the code site).
+
+Six things this had to get right, each found by verification rather than reasoning:
+
+1. **The form is creation-time state.** Parent, ex-style and backdrop are fixed when the HWND is
+   created, so a flip does not morph the window: `WM_APP_SET_FLOATING` restores the classical
+   band, destroys the window and lets App's recreate loop build the other form — with
+   `ConsumeQuickRestart()` cutting the backoff from 2s to 150ms (the remaining ~2s of a flip is
+   `Start()`'s pre-existing taskbar-family probe, unchanged).
+2. **`WS_EX_TOPMOST` is decided at creation.** It rides in `WS_EX_COMPOSITE_EX`, and *demoting*
+   on the first tick would show the widget above every window for up to a second — so
+   `置顶显示` off clears the bit in the ex-style before `CreateWindowExW`. *Promoting* later is
+   subject to the foreground lock (§7), hence `ApplyFloatingTopmost` verifies and the tick
+   re-asserts (idempotent: one `GetWindowLongPtr`).
+3. **The widget needs its own popup edge.** `GetTaskbarEdge` recognises the floating form by
+   `GA_ROOT == overlay` (note: `GetParent` returns 0 for the reparented popup form — `GA_PARENT`
+   is the one that follows the link) and then picks the roomier side, so the flyout opens below
+   a widget in the upper half and above one near the bottom, using DetailWindow's two existing
+   growth modes.
+4. **置顶显示 OFF must be ACTIVATABLE** — the one exception to the no-focus-steal rule (§6).
+   Windows keeps the FOREGROUND window at the top of the non-topmost band, so a click can only
+   bring the widget back above the app the user is working in by ACTIVATING it; with
+   `WS_EX_NOACTIVATE` (and `MA_NOACTIVATE`) it stayed buried for the rest of the session —
+   the reported *"取消置顶后窗口始终在最下面，即使点击窗口也不会覆盖在他之上的窗口"*. So that
+   form drops `WS_EX_NOACTIVATE` at creation and answers `MA_ACTIVATE`; an explicit
+   `HWND_TOP` was tried first and is **silently clamped** while another window holds the
+   foreground (measured with a cover window activated over half the widget: the covered half
+   kept belonging to the cover), and it turned out to be unnecessary — activation alone raises
+   it (re-measured with the raise disabled). The live 置顶显示 toggle moves both ex-style bits
+   (`ApplyFloatingTopmost`). Consequence to know about: a fully covered non-topmost widget can
+   not be clicked back at all (it has no taskbar button) — Win+D or an app restart brings it
+   back, and the settings card says so.
+5. **The widget draws edge-to-edge.** `DrawHorizontal` insets its content vertically
+   (`pad`) because a taskbar form's window IS the whole band — the pad is what keeps the
+   hover fill and the hairlines off the band's edges. The floating widget has no band: its
+   window edge is the content edge, and since the fill already ran edge-to-edge
+   *horizontally* (a group's left/right edges are the window's), the same pad read as the
+   reported *"左右边缘没有间隙，但是上下有明显的间隙（hover 的变色覆盖不到）"*. The pad is
+   therefore 0 in the floating form (the constant, and why the mid line is unaffected, are
+   at the code site); the row heights grow by that much, so 悬浮模式's rows are slightly
+   taller than the taskbar form's. Follow-up from the same report: **the fill is a plain
+   rect there** — with the fill flush to the edge, the 6 DIP radius carved visible arcs out
+   of it where it met the top/bottom edges. The widget's own corners still read as rounded,
+   because the rounded WINDOW REGION clips the fill at the window (the same radius the card
+   is drawn with), so the outer corners follow the widget instead of an arc. The taskbar
+   forms keep the radius: their fill floats inside the band, where the rounding is what
+   makes it read as a taskbar item.
+6. **The widget and its detail windows move as a pair — except when the widget dodges.** The
+   popup is placed against the widget (`GetTaskbarEdge` picks the roomier side) and is then CLAMPED into the monitor work
+   area — so on a screen too short to hold it beside the widget it lands *on* the widget, and
+   pinning grows it further (the band shifts the window up by its own height). The placement is
+   not retried; instead the widget steps aside. App publishes the open detail windows' HWNDs
+   (`SetFloatingKeepOut` → `WM_APP_SET_FLOAT_KEEPOUT`: open/close/pin/unpin and every
+   `SizeChanged`/`LocationChanged`, coalesced onto one Background-priority push — a synchronous
+   push on the close of a column TOGGLE would send the widget home for the few ms before the
+   replacement popup opens, a visible blink), while the RECTS are read on the taskbar thread, so
+   "same windows, one moved/resized" needs no separate notification and the tick re-derives
+   anyway. `ComputeFloatTarget` then picks the position every tick and every push, in this
+   order: **home**, if no open window covers it (the "关闭/取消固定后归位" half); otherwise
+   **stay exactly where it is**, if no window covers its current spot; otherwise **step
+   vertically clear** of the windows covering either spot (nearest side that fits the work area,
+   8 DIP of daylight, X untouched). The middle rule is load-bearing, and it took a report to
+   find: the popup is placed clear of the widget's **live** rect while the home stays put, so
+   deriving *every* open from the home alone re-reads a popup that still clips a few px off the
+   home (it was placed clear of the DISPLACED widget, not of the home) — the reported
+   *"反复切换 detail 后悬浮窗不停向一侧移动"*, one step per column switch until it hit the screen
+   edge. Equally load-bearing: a dodge is never written back as a home (that is `_floatingX/Y`,
+   moved only by a drag), which is what makes going back need no bookkeeping, and `Start`
+   records the spot it computes as the home (left at `-1`, the derivation would measure from the
+   LIVE position and ratchet the same way). A HELD button suspends the derivation — the drag
+   writes the live position straight from the cursor and only publishes the new home on release.
+
+   The other half of the pairing: while the user drags the WIDGET, the detail windows travel
+   with it. The taskbar thread reports every step of the drag (`FloatingDragged`, in the same
+   physical px the window itself was moved by — clamp included) and App hands it to every open
+   detail window (`DetailWindow.FollowFloatingDrag`), which moves by `GetWindowRect` + a raw
+   `SetWindowPos` in that same currency and clamps itself into its own work area. Two things
+   that must stay true: it is a DRAG-only report (a dodge is the one widget move that must not
+   carry them — that move exists to separate the two), and a pinned window's saved pre-pin spot
+   (`_prePin*`, restored on unpin) shifts by the same delta, or unpinning would land the flyout
+   back where the widget used to be. Because the widget's own clamp is unchanged, a formation
+   pushed against a screen edge deforms there (the follower sticks, the widget keeps going):
+   the keep-out then settles any overlap after the drop.
+
+**透明度 (设置 → 外观 → 悬浮模式 → 透明度)** is brush-alpha scaling in `ApplyTaskbarTheme`,
+NOT `WS_EX_LAYERED`/`SetLayeredWindowAttributes`: the widget is a DComp-bound flip-model
+swap chain, where DWM's layered-window alpha is not a supported combination, while scaling
+the alphas of the brushes the pass already owns is deterministic, free, and rides every
+existing re-tint path (live update message, the tick's theme flip, device recovery — all of
+them call `ApplyTaskbarTheme`, which reads `_floatingOpacity` through `s.Floating`, so
+nothing new had to be plumbed per path). Scope — BACKGROUND-only, settled over two wrong
+first cuts: the card's alpha IS the value (cut one scaled the popup tint's 0xCC on top of
+it, so even 100% read as translucent; the see-through tint look is still reachable at 80%
+on the slider), and the card's outline scales with it, while the TEXT, labels,
+hover/selection fills and separators keep their FIXED alphas (cut two faded the text with
+the card and mid-range numbers washed out — the user's rule: 文字不要有透明度; fixed fills
+also keep the hover feedback from vanishing exactly when the widget is subtle). The card
+RGB stays the popup's tint (`CardRgb*`); `CardAlpha` remains the POPUP's constant,
+untouched. The floor is 0.2 (`SetFloatingOpacity` clamps) — it keeps a hint of card
+grounding the solid text. The taskbar-embedded forms keep `k = 1` — they must match the
+opaque taskbar surface. The slider is settings-page only: a percent value has no
+right-click-menu shape, and the menu's `Opened` re-read rule doesn't apply to it.
+
+Verified end-to-end on 26200 by driving the real UI (right-click → 设置 → switches) with UI
+Automation: blur/tint/text/corners, drag = move + persist + no popup, 置顶显示 on/off live,
+模式 flip re-embedding into `Shell_TrayWnd` and returning to the remembered position, and
+taskbar mode unchanged.
+
+That run predates the rule in [`AGENTS.md`](../AGENTS.md) ("Build & run" — **UI testing, automated
+driving included, is the USER's job**). The findings stay here as the record of why this code is
+shaped the way it is; the method is not an instruction to repeat — UI-observable questions go to
+the user as a short checklist.
+
+## 37. A native crash is INVISIBLE to every managed handler — CrashTrace is the only record
+
+*`src/Interop/CrashTraceInterop.cs` (VEH + message ring + step markers),
+`src/UI/CrashReporter.cs` (installs it), `src/UI/TaskbarWindow.cs` (the ring/step call sites),
+`src/App.xaml.cs` (`CheckOverlayHealth`), `src/Sampling/SystemSampler.cs` (`Timed`)*
+
+The 2026-09-22 卡死 (a ~30 s freeze of a live process — 0 CPU, no messages, no log line, then a
+silent recovery) produced **nothing** in the app log, because the crash was a native
+`0xC0000005` raised in JIT/stub code: .NET 4+ does not deliver corrupted-state exceptions to
+managed catches, so `AppDomain.UnhandledException`, the `Dispatcher` hook and the WndProc catch
+all stayed silent — the only trace was an Application Error event and a WER dump (which is also
+what froze the process: WerFault suspends it, dumps it, and a *reflection* of it appears as a
+second `task_monitor.exe` process with 0 CPU whose parent is the app — that reflection is NOT a
+second instance, do not chase it). What finally named the bug:
+
+1. **`CrashTrace`'s vectored exception handler** (`logs/native-crash.log`, its own file, plain
+   `File.AppendAllText` — never `Logger`: the fault may be inside the logger holding its lock).
+   It runs before SEH on the faulting thread and records the exception code, the faulting address
+   with module/offset, the access type + touched address, the registers (`Rcx` = first argument),
+   a raw stack scan of plausible code addresses, and a best-effort managed stack. It returns
+   `EXCEPTION_CONTINUE_SEARCH`: pure observation, Windows keeps handling exactly as before.
+   Throttled to 4 records per run, and it filters by exception CODE — managed exceptions travel
+   as `0xE0434352` and would otherwise drown it.
+2. **The message ring** (`NoteMessage` at the top of WndProc) and **step markers**
+   (`NoteStep`, called by every `Timed` sampler step, the tick's phases and the `Start()`
+   steps — the NAMES only, no timings): a fault inside the dispatch path leaves no managed frame
+   to read and a JIT frame cannot be unwound, so "what was this thread doing" has to be recorded
+   as it goes. Both are one array/field write — no allocation, no lock, no logging.
+3. **The UI-thread watchdog** (`App.CheckOverlayHealth`, every 2 s): a stalled tick and a
+   vanished overlay HWND are the two states the taskbar thread cannot report itself. It logs the
+   episode's start and end (`覆盖层心跳停滞/恢复`, `覆盖层窗口已消失…`), which is what bounded
+   every stall to the WER window and caught the window-gone zombie.
+4. **The sampler's slow-step log** (`采样慢步骤`, `SystemSampler.Timed`): fires only when a step
+   exceeds 150 ms, so the hot path stays silent while a stall still leaves the offending step's
+   NAME behind (a USB disk that slept inside `IOCTL_DISK_PERFORMANCE` is the known suspect).
+   The `Start()` per-step MILLISECOND timings that lived here during the hunt are gone: only the
+   phase names remain (they feed the ring), and the baseline those timings produced is kept as a
+   comment at window creation (D3D/D2D/DComp ≈ 0.5 s, everything else single-digit ms).
+
+Two more things that belong to this mechanism: the WndProc catch does **not** try to handle a
+corrupted-state exception — .NET never delivers those to a managed catch, so there is nothing to
+catch there and the VEH record is the only account of such a fault. And
+`HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\task_monitor.exe` may be
+configured to keep mini dumps in `logs/dumps` (a machine-level debugging aid, not part of the
+app's contract — safe to delete; there is no debugger on this machine, so the VEH record is what
+is actually readable).
+
+## 38. 贴边隐藏 — the dock is DERIVED from the home, and the slide owns the position
+
+*`src/UI/TaskbarWindow.cs` (the `FloatEdge*`/slide helpers after `ClampFloatingToWorkArea`,
+`FloatingReposition`, the `WM_LBUTTON*`/`WM_MOUSELEAVE`/`WM_APP_DESELECT`/
+`WM_APP_SET_FLOAT_EDGE_HIDE` handlers, `Start`'s `floatDockEdge`), `src/App.xaml.cs`,
+`src/UI/Settings/SettingsWindow.xaml(.cs)`*
+
+设置 → 外观 → 悬浮模式 → 贴边隐藏 (also the right-click menu's checkable): a widget dropped
+within **8 DIP** of its monitor work area's **左/右/上** edge docks there and slides out, leaving
+**8 DIP** of card visible; hovering the strip slides it back out (peek), the mouse leaving slides
+it away again. The bottom edge is deliberately not dockable — the taskbar lives there.
+
+The shape to hold onto:
+
+1. **The dock is derived state, never stored.** One rule — "home within `EdgeSnapDip` of an
+   eligible work-area edge" (`FloatEdgeOf`, left/right before top) — evaluated at the three
+   sites that matter: the drag end, the settings/menu toggle, and `Start()` (so a docked home
+   reopens HIDDEN: the creation coords are the hidden position itself — born finished, no
+   flash). settings.yaml keeps only the switch + the home; the drag-end callback persists the
+   DROP position untouched, and the hidden rest is recomputed from the edge every tick
+   (`FloatHiddenPos`), which is why a resize or DPI change self-heals the strip within a tick.
+   A drop away from every edge releases the dock — visible is the default.
+2. **The slide is a first-class owner of the position.** `FloatingReposition` early-returns
+   while a slide is in flight AND while a button is held — the press half matters because a
+   press on the hidden strip lives OUTSIDE the work area until the drag threshold passes, and
+   the reposition clamp would otherwise yank the widget in from under the pointer mid-press.
+   A slide is the widget's OWN move, like the dodge: it never reports `FloatingDragged` (the
+   detail windows must not follow a hide/peek) and never writes the home. The animation is a
+   10 ms `WM_TIMER` step (`StepFloatSlide`, ease-out: a third of the remaining distance, 2px
+   floor — ~100–150 ms typical), killed on completion/press/destruction.
+3. **The hidden rest suppresses the dodge** (`ComputeFloatTarget` is not even consulted): an
+   off-screen widget has nothing to keep clear of, and a pinned window parked on the strip
+   must not walk it along the edge. A PEEK derives the normal target (dodge included — a
+   pinned window may have parked on the home while the widget was away), and `WM_MOUSELEAVE`
+   re-hides it — suppressed while a column is selected (its flyout is why the widget is out);
+   the flyout's close (`WM_APP_DESELECT` → `TryRehideFloat`) re-hides once the cursor is
+   elsewhere.
+4. **The peek is armed, not naive.** Docking is done with the cursor INSIDE the widget, and it
+   can land exactly on the exposed strip — the first stray mouse move there would pop the
+   widget straight back out. So the end of a hide slide arms the peek only when the cursor is
+   NOT on the widget (`FloatPeekArmed`); a cursor that docked onto the strip stays disarmed
+   until one `WM_MOUSELEAVE`. (Trace it: a cursor on the strip never leaves the rect while the
+   widget slides out, so the leave that re-arms is always a genuine exit.)
+5. **A press during a slide is not a click.** The press snaps the slide to its target first
+   (`FinishFloatSlide` — the grab offset needs a stable position) and flags `FloatSwallowClick`:
+   the widget was still moving under the cursor, so the slot the release lands on is not the
+   one the user aimed at. Dragging out of the hidden strip works — the drag clamp pulls the
+   widget into the work area following the grab point, and the drop re-evaluates the dock
+   (pull it past `EdgeSnapDip` inside to release).
+6. **Side taskbars (Win10-only, deprioritized)**: the edges are the WORK area's, so docking at
+   an edge that the taskbar occupies slides the widget under it; with 置顶显示 on the strip
+   then draws over the taskbar. Accepted — Win11 (the supported platform) has no side taskbars.
+
+The card greys out outside the floating form (`FloatingEdgeHideCard`, the `FloatingTopmostCard`
+rule), the menu item mirrors it with the same `Opened` re-read, and an open settings page is
+pushed back via `SyncFloatingEdgeHide`. Verified live: dock left/top, peek/re-hide cycles,
+drag-away release, re-dock from peek, and a clean log throughout.
+
+## 39. 全屏时隐藏 — the probe owns VISIBILITY, never the position
+
+*`src/UI/TaskbarWindow.cs` (`FullscreenAppOnScreen`, `UpdateFullscreenHide`, the tick's
+floating block, `FloatingReposition`'s `dockedRest`/`hiddenRest` split, `Start`'s
+`bornFullscreenHidden`), `src/Interop/ShellInterop.cs` (`SHQueryUserNotificationState`),
+`src/Interop/WindowBackdropInterop.cs` (`DwmGetWindowAttribute`), `src/App.xaml.cs`,
+`src/UI/Settings/SettingsWindow.xaml(.cs)`*
+
+设置 → 外观 → 悬浮模式 → 全屏时隐藏 (also the right-click menu's checkable): a fullscreen app
+in the FOREGROUND on the widget's own monitor (borderless-windowed game, F11 video,
+slideshow) hides the widget until the foreground stops being fullscreen. A **maximized**
+window never counts — that is the whole reason the probe reads
+`DWMWA_EXTENDED_FRAME_BOUNDS` (`WindowBackdropInterop`): the VISIBLE bounds stop at the work
+area, while `GetWindowRect` overshoots the monitor by the invisible resize borders and would
+make every maximized window read as fullscreen. (The no-DWM fallback keeps the raw rect but
+skips `IsZoomed` windows for exactly that reason.) The one case a rect probe cannot see is
+EXCLUSIVE-D3D fullscreen — the swapchain bypasses DWM, so the window rect is unreliable —
+and that is what `SHQueryUserNotificationState`'s `QUNS_RUNNING_D3D_FULL_SCREEN` covers,
+gated to "the game's window is on the same monitor" so a game on another screen leaves this
+one's widget alone. Excluded up front: our own process's windows (the pinned detail popups
+are topmost; 设置 maximized must not count) and the desktop — clicking it makes
+`Progman`/`WorkerW` the foreground window with a rect that IS the whole monitor. Any query
+failure fails open (the widget stays visible).
+
+The rules that keep it from tangling with everything else that owns the widget:
+
+1. **Hiding is `SW_HIDE` and only `SW_HIDE`.** No slide (a slide to some edge would crawl
+   across the screen during the game's opening frames), no dodge, no home write-back — the
+   probe is a THIRD owner beside the dodge and the slide, and it owns visibility alone.
+   `UpdateFullscreenHide` calls `ShowWindow` on the state TRANSITION only (`SW_HIDE` in,
+   `SW_SHOWNOACTIVATE` out) and logs that transition once (per-tick paths never log, §5).
+2. **A hidden widget is an INVISIBLE running one, not a parked one.** Timers fire on hidden
+   windows, so the tick, the watchdog heartbeat (`LastTickTickCount`) and the sampling all
+   continue — App's zombie check keys on `IsWindow`, never visibility — and the charts come
+   back with continuous history. `FloatingReposition` keeps maintaining the position (home
+   clamp, docked hidden rest) while hidden, which is what self-heals a resolution the game
+   changed by the time it exits. Do NOT pause the timer or skip the heartbeat stamp while
+   hidden: that would trip the "覆盖层心跳停滞" watchdog within ~4 s.
+3. **The dodge is suppressed while hidden** — `FloatingReposition`'s `hiddenRest` is
+   `dockedRest || FloatFullscreenHidden`, the same rule as the docked rest: an invisible
+   widget has nothing to keep clear of, and recovery must land on the home. Note the split:
+   only `dockedRest` feeds `FloatHiddenPos` — that helper's edge-0 fallthrough would treat a
+   fullscreen-hidden un-docked widget as a TOP dock.
+4. **A held button defers the hide** (`want && FloatPressed` returns): the drag keeps
+   writing the position from the cursor, and the widget must not vanish out from under an
+   in-progress press. The next tick re-probes. The SHOW direction never waits — restoring
+   over a live press is harmless.
+5. **`Start()` opens born hidden when a fullscreen app is already in the foreground** (the
+   flip happened mid-game, explorer restarted mid-game): creation already leaves the window
+   hidden, so `Start` simply skips its `ShowWindow` and pre-matches
+   `FloatFullscreenHidden` — no one-frame flash over the game, no duplicate transition log.
+   The same shape as a docked home reopening hidden (§38).
+6. **Peek/click machinery is untouched by design.** A hidden window receives no mouse
+   input, so no peek can fire while hidden; on recovery the window reappears wherever the
+   tick had kept it (home or docked hidden rest — the strip then peeks as usual).
+
+The toggle handler (`WM_APP_SET_FLOAT_FULLSCREEN_HIDE`) just runs the probe once — ON with
+a fullscreen foreground hides immediately, OFF restores unconditionally — and the tick
+carries it from there. The card greys out outside the floating form
+(`FloatingFullscreenHideCard`), the menu item mirrors it with the same `Opened` re-read,
+and an open settings page is pushed back via `SyncFloatingFullscreenHide`.

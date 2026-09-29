@@ -94,12 +94,21 @@ namespace task_monitor
         public void ApplyTheme()
         {
             _dark = ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark;
-            windowMaterial.CompositonColor = _dark
-                ? Color.FromArgb(0xCC, 0x20, 0x20, 0x20)
-                : Color.FromArgb(0xCC, 0xF3, 0xF3, 0xF3);
+            // The tints come from the SHARED constants (WindowBackdropInterop) — the floating
+            // widget's CARD is painted with the very same values, which is what keeps the
+            // widget's background the same colour as this popup's (the widget has no blur of
+            // its own; see that file for why).
+            windowMaterial.CompositonColor = TintColor(_dark
+                ? WindowBackdropInterop.DarkAcrylicTint
+                : WindowBackdropInterop.LightAcrylicTint);
             windowMaterial.IsDarkMode = _dark;
             _current?.ApplyTheme(_dark);
         }
+
+        // 0xAARRGGBB (the native accent GradientColor spelling) → a WPF Color for
+        // FluentWpfCore's WindowMaterial.
+        private static Color TintColor(int argb)
+            => Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb);
 
         private void DetailWindow_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
@@ -241,6 +250,56 @@ namespace task_monitor
             if ((ex & WindowInterop.WS_EX_TOPMOST) == 0 && _topmostRetries++ < 10)
                 Dispatcher.BeginInvoke(new Action(EnsureTopmost),
                     System.Windows.Threading.DispatcherPriority.Background);
+        }
+
+        // ---------- Following the floating widget's drag ----------
+        /// <summary>
+        /// Move with the floating widget while the user drags it (App wires
+        /// <see cref="TaskbarWindow.FloatingDragged"/> to this). Every open detail window is
+        /// anchored to the widget — the flyout beside its column, a pinned window wherever it
+        /// was put — so dragging the widget has to carry them along, or the pair comes apart.
+        ///
+        /// <para>Physical pixels in, physical pixels out (<c>GetWindowRect</c> + a raw
+        /// <c>SetWindowPos</c>, the same currency <see cref="PositionNearTaskbar"/> works in), so
+        /// nothing here depends on WPF's <c>Left</c>/<c>Top</c> being in step with a window this
+        /// class positions natively. The move is clamped into this window's work area
+        /// INDEPENDENTLY of the widget's own clamp: the widget is dragged to the screen edge
+        /// freely, and a formation that no longer fits deforms there rather than walking a
+        /// window off-screen (the floating keep-out settles any overlap that leaves behind —
+        /// TaskbarWindow.ComputeFloatTarget). Z-order is untouched (SWP_NOZORDER): the widget
+        /// owns its band, this window keeps its own.</para>
+        /// </summary>
+        internal void FollowFloatingDrag(int dxPhysical, int dyPhysical)
+        {
+            if (dxPhysical == 0 && dyPhysical == 0) return;
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero || !WindowInterop.GetWindowRect(hwnd, out var r)) return;
+            int w = r.right - r.left, h = r.bottom - r.top;
+            int x = r.left + dxPhysical, y = r.top + dyPhysical;
+
+            IntPtr mon = WindowInterop.MonitorFromWindow(hwnd, WindowInterop.MONITOR_DEFAULTTONEAREST);
+            var mi = new WindowInterop.MONITORINFO { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<WindowInterop.MONITORINFO>() };
+            if (mon != IntPtr.Zero && WindowInterop.GetMonitorInfoW(mon, ref mi))
+            {
+                if (x < mi.rcWork.left) x = mi.rcWork.left;
+                if (x + w > mi.rcWork.right) x = Math.Max(mi.rcWork.left, mi.rcWork.right - w);
+                if (y < mi.rcWork.top) y = mi.rcWork.top;
+                if (y + h > mi.rcWork.bottom) y = Math.Max(mi.rcWork.top, mi.rcWork.bottom - h);
+            }
+
+            // A pinned window remembers the spot the flyout occupied before pinning, to restore
+            // on unpin — the widget has moved since, so that spot has to move with it (in DIP,
+            // which is what _prePin* are): unpinning must land beside the widget's NEW position,
+            // not back where the widget used to be.
+            if (IsPinned)
+            {
+                var dpi = VisualTreeHelper.GetDpi(this);
+                _prePinLeft += dxPhysical / dpi.DpiScaleX;
+                _prePinTop += dyPhysical / dpi.DpiScaleY;
+            }
+
+            WindowInterop.SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
+                WindowInterop.SWP_NOSIZE | WindowInterop.SWP_NOZORDER | WindowInterop.SWP_NOACTIVATE);
         }
 
         // ---------- Placement: next to the taskbar's screen edge, aligned to the column ----------

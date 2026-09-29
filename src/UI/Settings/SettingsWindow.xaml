@@ -145,6 +145,63 @@
                     </ui:SettingsExpander.Items>
                 </ui:SettingsExpander>
 
+                <!-- 悬浮模式: the overlay leaves the taskbar entirely and lives on the
+                     desktop as a draggable acrylic widget (the detail popup's material).
+                     Its four sub-settings (置顶显示 / 贴边隐藏 / 全屏时隐藏 / 透明度) are items
+                     inside, enabled only while the mode is on — the same shape as
+                     靠左显示/靠左位置 above. -->
+                <ui:SettingsExpander x:Name="FloatingExpander" Header="悬浮模式"
+                                     Description="从任务栏脱离开来，作为可拖动的悬浮窗显示（任务栏上不再显示）。"
+                                     Margin="0,0,0,4">
+                    <ui:SettingsExpander.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.WindowMultiple_20_Regular}" />
+                    </ui:SettingsExpander.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="FloatingSwitch" Toggled="FloatingSwitch_Toggled" />
+                    <ui:SettingsExpander.Items>
+                        <ui:SettingsCard x:Name="FloatingTopmostCard" Header="置顶显示"
+                                         Description="始终显示在其它窗口之上。关闭后按普通窗口处理：会被别的窗口盖住，点一下悬浮窗即可重新置前。">
+                            <ui:ToggleSwitch x:Name="FloatingTopmostSwitch" Toggled="FloatingTopmostSwitch_Toggled" />
+                        </ui:SettingsCard>
+                        <!-- 贴边隐藏: drag the widget onto the 左/右/上 screen edge and it
+                             slides out of sight, leaving a narrow strip; hovering the strip
+                             pops it back out and the mouse leaving folds it away again. The
+                             dock is derived from the widget's saved home, so turning this on
+                             while the widget sits at an edge hides it immediately. -->
+                        <ui:SettingsCard x:Name="FloatingEdgeHideCard" Header="贴边隐藏"
+                                         Description="拖到屏幕左、右或上边缘时自动收起，只留一条窄边；鼠标移到窄边上会自动弹出，移开后自动收起。">
+                            <ui:ToggleSwitch x:Name="FloatingEdgeHideSwitch" Toggled="FloatingEdgeHideSwitch_Toggled" />
+                        </ui:SettingsCard>
+                        <!-- 全屏时隐藏: the widget disappears while a FULLSCREEN app is in
+                             the foreground on its monitor (borderless game, F11 video,
+                             slideshow) and comes back when the foreground stops being
+                             fullscreen. Maximized windows don't count — only真 fullscreen
+                             covers the whole monitor; a hidden widget keeps sampling. -->
+                        <ui:SettingsCard x:Name="FloatingFullscreenHideCard" Header="全屏时隐藏"
+                                         Description="前台应用全屏时（如游戏、全屏视频）自动隐藏悬浮窗，退出全屏后自动恢复；最大化的窗口不会触发。">
+                            <ui:ToggleSwitch x:Name="FloatingFullscreenHideSwitch" Toggled="FloatingFullscreenHideSwitch_Toggled" />
+                        </ui:SettingsCard>
+                        <!-- 透明度: BACKGROUND-only — the card's alpha IS this value (100% =
+                             a fully opaque card, the old tint look sits at 80%) and the card
+                             outline scales with it; text keeps full opacity (文字不要有
+                             透明度). Slider in whole percents, 20 floor. Live while dragging
+                             (the widget re-tints per step; the yaml write is debounced in
+                             App); percent readout beside the thumb. -->
+                        <ui:SettingsCard x:Name="FloatingOpacityCard" Header="透明度"
+                                         Description="调节悬浮窗背景的不透明度（文字不受影响，最低 20%）。">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="FloatingOpacityText" Text="100%"
+                                           VerticalAlignment="Center" MinWidth="36" TextAlignment="Right"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <Slider x:Name="FloatingOpacitySlider" Width="180" Margin="12,0,0,0"
+                                        Minimum="20" Maximum="100"
+                                        SmallChange="1" LargeChange="5"
+                                        IsSnapToTickEnabled="True" TickFrequency="1"
+                                        ValueChanged="FloatingOpacitySlider_ValueChanged" />
+                            </StackPanel>
+                        </ui:SettingsCard>
+                    </ui:SettingsExpander.Items>
+                </ui:SettingsExpander>
+
                 <!-- ============================== 采样 ============================== -->
                 <!-- One card per metric; the toggle enables/disables that metric's
                      sampling entirely (off = the metric is hidden from the taskbar

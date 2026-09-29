@@ -118,6 +118,70 @@ Not part of the sampler chain: `UpdateChecker.CheckOnce` runs **once at startup*
 `OnStartup`, so a change takes effect on the next launch (no live plumbing). See
 [`gotchas.md` §33](gotchas.md#33-更新检测).
 
+## 8. 悬浮模式 — `FloatingMode` + `FloatingX`/`FloatingY` + `FloatingTopmost` + `FloatingEdgeHide` + `FloatingFullscreenHide` + `FloatingOpacity`
+
+Not a sampler chain either — this one moves the WINDOW. The shape is still the same
+(field → volatile → WM_APP → re-applied on every fresh `Start()`), only the payload differs:
+
+| | |
+|---|---|
+| Setter | `TaskbarWindow.SetFloatingMode(on, x, y)` / `SetFloatingTopmost(bool)` / `SetFloatingEdgeHide(bool)` / `SetFloatingFullscreenHide(bool)` / `SetFloatingDark(bool)` / `SetFloatingOpacity(double)` |
+| Taskbar state | `_floating` / `_floatingTopmost` / `_floatingEdgeHide` / `_floatingFullscreenHide` / `_floatingDark` / `_floatingOpacity` (+ `_floatingX`/`_floatingY` — the home position) |
+| WM_APP | **`WM_APP_SET_FLOATING`** = the form flipped → the window is DESTROYED and App's recreate loop builds the other form (150ms, `ConsumeQuickRestart`); **`WM_APP_UPDATE_FLOATING`** = 置顶显示, 透明度, or the app theme changed → re-applied in place, no rebuild; **`WM_APP_SET_FLOAT_EDGE_HIDE`** = 贴边隐藏 flipped → the dock is re-derived from the home (ON at an edge slides out, OFF slides home); **`WM_APP_SET_FLOAT_FULLSCREEN_HIDE`** = 全屏时隐藏 flipped → the fullscreen probe runs at once (ON with a fullscreen foreground hides immediately, OFF restores unconditionally) |
+
+Two entry points, one handler each: the 设置 → 外观 switches AND the overlay right-click
+menu's checkable 悬浮模式/置顶显示/贴边隐藏/全屏时隐藏 items (`App.EnsureTaskbarMenu`) both call
+`OnFloatingModeChanged`/`OnFloatingTopmostChanged`/`OnFloatingEdgeHideChanged`/
+`OnFloatingFullscreenHideChanged`; an open
+SettingsWindow is pushed back via `SyncFloatingMode`/`SyncFloatingTopmost`/
+`SyncFloatingEdgeHide`/`SyncFloatingFullscreenHide`, and the menu re-reads `_config` on every
+`Opened` (置顶显示/贴边隐藏/全屏时隐藏
+grey out outside the floating form, same rule as their settings cards).
+
+- **`FloatingMode`** (null = off): 悬浮模式 on/off. The window form — parent, ex-style,
+  backdrop — is creation-time state, so this is the one setting that rebuilds the window
+  instead of mutating it (`Start()` is the single construction site for either form).
+- **`FloatingX`/`FloatingY`** (null = never dragged): the widget's home in screen px. Read by
+  `Start()` (which records the opening spot it computed as the home when none is saved), and
+  written by **App** from `TaskbarWindow.FloatingPositionChanged` when a drag ends — the only
+  settings write triggered by the taskbar thread (marshaled to the UI thread). The home is also
+  what the widget returns to after stepping aside for a detail window that covers it
+  (`SetFloatingKeepOut` → `WM_APP_SET_FLOAT_KEEPOUT`, a runtime-state push, not a setting); a
+  dodge is never written back here.
+- **`FloatingTopmost`** (null = on): live, no rebuild — it moves BOTH ex-style bits
+  (`WS_EX_TOPMOST` for the band, `WS_EX_NOACTIVATE` because the non-topmost form is an ordinary
+  window that must be activatable to be raiseable, §36 of the gotchas).
+- **`FloatingEdgeHide`** (null = off): 贴边隐藏, floating form only — a drop within 8 DIP of the
+  work area's 左/右/上 edge docks the widget there (slides out, a strip stays; hover peeks it
+  back, mouse-out re-hides). Live, no rebuild — and the dock itself is DERIVED from the home
+  (`FloatingX`/`FloatingY`, which is why a docked home reopens hidden), so nothing but the
+  switch and the home are stored. Mechanism + the slide/peek/armed rules:
+  [`gotchas.md` §38](gotchas.md#38-贴边隐藏--the-dock-is-derived-from-the-home-and-the-slide-owns-the-position).
+  Settings card + right-click menu item (checkable, greyed outside the floating form).
+- **`FloatingFullscreenHide`** (null = on): 全屏时隐藏, floating form only — a fullscreen app
+  in the foreground on the widget's monitor (borderless game, F11 video, slideshow; NOT a
+  maximized window) hides the widget until the foreground stops being fullscreen. Live, no
+  rebuild — the switch is the ONLY stored state; the fullscreen condition is probed by the
+  tick (`FullscreenAppOnScreen`), and the hide/restore is a plain `SW_HIDE`/
+  `SW_SHOWNOACTIVATE` that touches no positional state. Mechanism + the visibility-only
+  rules: [`gotchas.md` §39](gotchas.md#39-全屏时隐藏--the-probe-owns-visibility-never-the-position).
+  Settings card + right-click menu item (checkable, greyed outside the floating form).
+- **`FloatingOpacity`** (null = 1.0; 0.2–1.0, `double`): the widget's BACKGROUND opacity —
+  brush-alpha scaling in `ApplyTaskbarTheme` (NOT `WS_EX_LAYERED`; scope, why and the 0.2
+  floor: §36): the card's alpha IS the value (100% = fully opaque card), the card's outline
+  scales with it, text/labels/interaction fills keep fixed alphas (文字不要有透明度). Live per
+  slider step (the widget re-tints under the thumb; App debounces only the yaml write,
+  500ms — the Clash text boxes' reason); clamped in the setter because settings.yaml is
+  hand-editable. Settings-page only — a percent slider has no menu shape, and
+  `FloatingOpacityCard` greys out outside the floating form like `FloatingTopmostCard`.
+- **`FloatingDark`** is NOT in settings.yaml — it is the effective APP theme
+  (`ThemeManager.Current.ActualApplicationTheme`), pushed by App at startup and from the
+  `ActualApplicationThemeChanged` hook, because the floating widget's material is the detail
+  popup's (the taskbar form instead follows the SYSTEM theme).
+
+Full mechanism, the measured material choice and the creation-time rules:
+[`gotchas.md` §36](gotchas.md#36-悬浮模式--the-same-window-detached).
+
 ## Not in settings.yaml at all
 
 **开机自启动** — the scheduled task itself is the state (`src/StartupTask.cs`). Never add a

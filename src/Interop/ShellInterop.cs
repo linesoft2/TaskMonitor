@@ -4,11 +4,14 @@ using System.Runtime.InteropServices;
 namespace task_monitor
 {
     /// <summary>
-    /// shell32 interop for high-resolution exe icons. <c>System.Drawing.Icon.
+    /// shell32 interop for high-resolution exe icons and the user notification state.
+    /// <c>System.Drawing.Icon.
     /// ExtractAssociatedIcon</c> caps at the small/32px icon and then gets stretched,
     /// which reads blurry at high DPI; <c>IShellItemImageFactory</c> (the modern shell
     /// icon API, what Task Manager uses) returns the best icon the resource offers at
     /// any requested size — up to the 256px jumbo variant modern exes ship.
+    /// <see cref="SHQueryUserNotificationState"/> serves the floating widget's 全屏时隐藏
+    /// probe (the exclusive-D3D signal a window-rect check cannot see).
     /// </summary>
     /// <remarks>
     /// Pure native boundary: returns an HBITMAP the caller owns (free via
@@ -91,5 +94,19 @@ namespace task_monitor
 
         /// <summary>Free an HBITMAP returned by <see cref="GetIconBitmap"/>.</summary>
         public static void DeleteObject(IntPtr hObject) => DeleteObjectNative(hObject);
+
+        // ---------- user notification state (全屏时隐藏) ----------
+        // QUERY_USER_NOTIFICATION_STATE: QUNS_RUNNING_D3D_FULL_SCREEN is the one value the
+        // floating widget's fullscreen probe needs — an EXCLUSIVE-D3D fullscreen app (the
+        // game owns the swapchain outright), where a window-rect probe is unreliable. The
+        // other QUNS values add nothing over the rect check (a borderless-windowed
+        // fullscreen app covers rcMonitor anyway; presentation mode is not fullscreen).
+        public const int QUNS_RUNNING_D3D_FULL_SCREEN = 2;
+
+        /// <summary>Shell's own "what is the user doing" state — returns 0 (S_OK) and writes
+        /// <paramref name="state"/> (a QUERY_USER_NOTIFICATION_STATE value, e.g.
+        /// <see cref="QUNS_RUNNING_D3D_FULL_SCREEN"/>), or a failure HRESULT.</summary>
+        [DllImport("shell32.dll")]
+        public static extern int SHQueryUserNotificationState(out int state);
     }
 }

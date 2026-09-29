@@ -27,6 +27,11 @@ namespace task_monitor
         private readonly Action<bool, bool> _placementChanged;
         private readonly Action<bool> _autoStartChanged;
         private readonly Action<int> _themeChanged;           // 0=跟随系统 1=浅色 2=深色
+        private readonly Action<bool> _floatingChanged;       // 悬浮模式 (the whole form flips)
+        private readonly Action<bool> _floatingTopmostChanged; // 悬浮模式 → 置顶显示
+        private readonly Action<bool> _floatingEdgeHideChanged; // 悬浮模式 → 贴边隐藏
+        private readonly Action<bool> _floatingFullscreenHideChanged; // 悬浮模式 → 全屏时隐藏
+        private readonly Action<double> _floatingOpacityChanged; // 悬浮模式 → 透明度 (0.2–1.0)
         private readonly Action<int> _intervalChanged;        // ms: 500 / 1000 / 2000
         private readonly Action<int, bool> _samplingChanged;  // (overlay hit slot 0–4, enabled)
         private readonly Action<bool> _mergeSamePathChanged;  // 合并相同程序
@@ -52,6 +57,26 @@ namespace task_monitor
         /// failure App calls <see cref="SyncAutoStart"/> to snap the toggle back.</param>
         /// <param name="themeIndex">0=跟随系统 (yaml null) 1=浅色 2=深色.</param>
         /// <param name="themeChanged">Reported with the new combo index.</param>
+        /// <param name="floatingMode">Current 悬浮模式 state (yaml null = the off default).</param>
+        /// <param name="floatingChanged">Reported with the requested on/off — App rebuilds the
+        /// overlay window in its other form (taskbar child ⟷ desktop widget).</param>
+        /// <param name="floatingTopmost">Current 置顶显示 state (yaml null = the on default);
+        /// floating form only.</param>
+        /// <param name="floatingTopmostChanged">Reported with the requested on/off — applied
+        /// live (no rebuild).</param>
+        /// <param name="floatingEdgeHide">Current 贴边隐藏 state (yaml null = the off
+        /// default); floating form only.</param>
+        /// <param name="floatingEdgeHideChanged">Reported with the requested on/off — applied
+        /// live (the taskbar thread re-derives the dock from the home position).</param>
+        /// <param name="floatingFullscreenHide">Current 全屏时隐藏 state (yaml null = the on
+        /// default); floating form only.</param>
+        /// <param name="floatingFullscreenHideChanged">Reported with the requested on/off —
+        /// applied live (the taskbar thread's fullscreen probe runs at once, then per
+        /// tick).</param>
+        /// <param name="floatingOpacity">Current 透明度 as 0.2–1.0 (yaml null = 1.0, the
+        /// default); floating form only.</param>
+        /// <param name="floatingOpacityChanged">Reported with the new 0.2–1.0 opacity on every
+        /// slider step — App re-tints the widget live and persists debounced.</param>
         /// <param name="intervalMs">Current sampling interval (500/1000/2000).</param>
         /// <param name="intervalChanged">Reported with the new interval in ms.</param>
         /// <param name="samplingMask">Current per-metric sampling mask (SystemSampler.Mask*
@@ -105,6 +130,11 @@ namespace task_monitor
         internal SettingsWindow(bool overlayOnLeft, bool snapToStart, Action<bool, bool> placementChanged,
             bool autoStartOn, Action<bool> autoStartChanged,
             int themeIndex, Action<int> themeChanged,
+            bool floatingMode, Action<bool> floatingChanged,
+            bool floatingTopmost, Action<bool> floatingTopmostChanged,
+            bool floatingEdgeHide, Action<bool> floatingEdgeHideChanged,
+            bool floatingFullscreenHide, Action<bool> floatingFullscreenHideChanged,
+            double floatingOpacity, Action<double> floatingOpacityChanged,
             int intervalMs, Action<int> intervalChanged,
             int samplingMask, Action<int, bool> samplingChanged,
             bool mergeSamePath, Action<bool> mergeSamePathChanged,
@@ -125,6 +155,11 @@ namespace task_monitor
             _placementChanged = placementChanged;
             _autoStartChanged = autoStartChanged;
             _themeChanged = themeChanged;
+            _floatingChanged = floatingChanged;
+            _floatingTopmostChanged = floatingTopmostChanged;
+            _floatingEdgeHideChanged = floatingEdgeHideChanged;
+            _floatingFullscreenHideChanged = floatingFullscreenHideChanged;
+            _floatingOpacityChanged = floatingOpacityChanged;
             _intervalChanged = intervalChanged;
             _samplingChanged = samplingChanged;
             _mergeSamePathChanged = mergeSamePathChanged;
@@ -150,6 +185,28 @@ namespace task_monitor
             }
             AutoStartSwitch.IsOn = autoStartOn;
             ThemeCombo.SelectedIndex = themeIndex < 0 || themeIndex > 2 ? 0 : themeIndex;
+            FloatingSwitch.IsOn = floatingMode;
+            FloatingTopmostSwitch.IsOn = floatingTopmost;
+            // 置顶显示 only means anything in the floating form (the embedded overlay inherits
+            // the taskbar's band), so it follows the mode switch — same shape as 靠左位置.
+            FloatingTopmostCard.IsEnabled = floatingMode;
+            // …and so does 贴边隐藏 (the embedded overlay is anchored to the taskbar; it has
+            // no edges to dock to).
+            FloatingEdgeHideSwitch.IsOn = floatingEdgeHide;
+            FloatingEdgeHideCard.IsEnabled = floatingMode;
+            // …and so does 全屏时隐藏 (the embedded overlay sits in the taskbar, which a
+            // fullscreen app covers on its own).
+            FloatingFullscreenHideSwitch.IsOn = floatingFullscreenHide;
+            FloatingFullscreenHideCard.IsEnabled = floatingMode;
+            // …and so does 透明度 (the embedded overlay must match the opaque taskbar surface).
+            // The slider stores whole percents (snapped); the ctor hands App back a 0.2–1.0
+            // double. The readout text is set here because the guarded handler skips it.
+            FloatingOpacitySlider.Value = Math.Round(Math.Min(1.0, Math.Max(0.2, floatingOpacity)) * 100);
+            FloatingOpacityText.Text = $"{FloatingOpacitySlider.Value:0}%";
+            FloatingOpacityCard.IsEnabled = floatingMode;
+            // …and the two are mutually exclusive: a floating widget is positioned by dragging,
+            // not by the taskbar anchors, so 靠左显示/靠左位置 do nothing while it is on.
+            OnLeftExpander.IsEnabled = !floatingMode;
             IntervalCombo.SelectedIndex = IntervalToIndex(intervalMs);
             CpuSwitch.IsOn = (samplingMask & SystemSampler.MaskCpu) != 0;
             RamSwitch.IsOn = (samplingMask & SystemSampler.MaskRam) != 0;
@@ -277,6 +334,48 @@ namespace task_monitor
             _loaded = true;
         }
 
+        /// <summary>悬浮模式 was flipped from the taskbar right-click menu: push the state
+        /// back (incl. the sub-card enablement the Toggled handler maintains) without
+        /// re-firing the change callback.</summary>
+        public void SyncFloatingMode(bool on)
+        {
+            _loaded = false;
+            FloatingSwitch.IsOn = on;
+            FloatingTopmostCard.IsEnabled = on;
+            FloatingEdgeHideCard.IsEnabled = on;
+            FloatingFullscreenHideCard.IsEnabled = on;
+            FloatingOpacityCard.IsEnabled = on;
+            OnLeftExpander.IsEnabled = !on;
+            _loaded = true;
+        }
+
+        /// <summary>置顶显示 was flipped from the taskbar right-click menu, without
+        /// re-firing the change callback.</summary>
+        public void SyncFloatingTopmost(bool on)
+        {
+            _loaded = false;
+            FloatingTopmostSwitch.IsOn = on;
+            _loaded = true;
+        }
+
+        /// <summary>贴边隐藏 was flipped from the taskbar right-click menu, without
+        /// re-firing the change callback.</summary>
+        public void SyncFloatingEdgeHide(bool on)
+        {
+            _loaded = false;
+            FloatingEdgeHideSwitch.IsOn = on;
+            _loaded = true;
+        }
+
+        /// <summary>全屏时隐藏 was flipped from the taskbar right-click menu, without
+        /// re-firing the change callback.</summary>
+        public void SyncFloatingFullscreenHide(bool on)
+        {
+            _loaded = false;
+            FloatingFullscreenHideSwitch.IsOn = on;
+            _loaded = true;
+        }
+
         private void OnLeftSwitch_Toggled(object sender, RoutedEventArgs e)
         {
             if (!_loaded) return;
@@ -300,6 +399,45 @@ namespace task_monitor
         {
             if (!_loaded) return;
             _themeChanged?.Invoke(ThemeCombo.SelectedIndex);
+        }
+
+        private void FloatingSwitch_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded) return;
+            FloatingTopmostCard.IsEnabled = FloatingSwitch.IsOn;
+            FloatingEdgeHideCard.IsEnabled = FloatingSwitch.IsOn;
+            FloatingFullscreenHideCard.IsEnabled = FloatingSwitch.IsOn;
+            FloatingOpacityCard.IsEnabled = FloatingSwitch.IsOn;
+            OnLeftExpander.IsEnabled = !FloatingSwitch.IsOn;   // anchors don't apply to a dragged widget
+            _floatingChanged?.Invoke(FloatingSwitch.IsOn);
+        }
+
+        private void FloatingTopmostSwitch_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded) return;
+            _floatingTopmostChanged?.Invoke(FloatingTopmostSwitch.IsOn);
+        }
+
+        private void FloatingEdgeHideSwitch_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded) return;
+            _floatingEdgeHideChanged?.Invoke(FloatingEdgeHideSwitch.IsOn);
+        }
+
+        private void FloatingFullscreenHideSwitch_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded) return;
+            _floatingFullscreenHideChanged?.Invoke(FloatingFullscreenHideSwitch.IsOn);
+        }
+
+        // 悬浮模式 → 透明度 slider: fires per step while dragging, and each step is reported
+        // at once — the widget must re-tint live under the thumb, so no debounce here. App
+        // applies immediately and defers only the settings.yaml write.
+        private void FloatingOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (!_loaded) return;
+            FloatingOpacityText.Text = $"{FloatingOpacitySlider.Value:0}%";
+            _floatingOpacityChanged?.Invoke(FloatingOpacitySlider.Value / 100.0);
         }
 
         private void IntervalCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)

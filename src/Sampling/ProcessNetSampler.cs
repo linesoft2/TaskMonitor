@@ -71,6 +71,46 @@ namespace task_monitor
         // it asynchronously for the life of the registration).
         private SrumInterop.SruStatsCallback _callback;
 
+        // Retired instances — THE FIX for the reported crashes (2026-09-22): a rebuilt overlay
+        // constructs a whole new SystemSampler, hence a new ProcessNetSampler and a NEW SRUM
+        // registration, while the old registration stayed alive inside srumapi holding the old
+        // callback's raw function pointer. The old sampler (and with it `_callback`) became
+        // garbage, the next GC — in particular the forced one in SystemInfo.TrimMemory, which
+        // runs whenever a detail popup closes — collected the delegate and freed its marshalling
+        // stub, and srumapi then called a freed stub: 0xC0000005, no managed frame, `读 0x8` with
+        // a null target, dead in the middle of the message dispatch, ~1s later (the next SRU
+        // frame). Unregistering stops future callbacks; keeping the instance rooted keeps the
+        // stub VALID for a callback that is already in flight. The list is bounded by the number
+        // of overlay rebuilds in one session and holds a few KB each.
+        private static readonly List<ProcessNetSampler> Retired = new List<ProcessNetSampler>();
+
+        /// <summary>
+        /// Stop this instance's SRUM session — called when the overlay (and with it the sampler)
+        /// is torn down and rebuilt (悬浮模式 flip, explorer restart, exit). Idempotent and
+        /// never throws: a missing/partial registration just means nothing to release.
+        /// </summary>
+        public void Shutdown()
+        {
+            _available = false;
+            if (_registration != IntPtr.Zero)
+            {
+                try
+                {
+                    SrumInterop.SruUnregisterRealTimeStats(_registration);
+                    Logger.Info("SRUM 实时 API 已注销（覆盖层重建/退出）——防止旧回调指针被回收后仍被调用");
+                }
+                catch (Exception ex)
+                {
+                    Logger.WarnOnce("srum-unregister", "SRUM 注销失败（忽略）", ex);
+                }
+                _registration = IntPtr.Zero;
+            }
+            lock (Retired)
+            {
+                if (!Retired.Contains(this)) Retired.Add(this);
+            }
+        }
+
         public ProcessNetSampler()
         {
             try { Register(); }

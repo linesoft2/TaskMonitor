@@ -6,6 +6,7 @@ obj/
 .vs/
 .vscode/
 .claude/
+.zcode/
 *.user
 *.suo
 

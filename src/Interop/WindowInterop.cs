@@ -113,12 +113,25 @@ namespace task_monitor
         // WM_MOUSEACTIVATE return: do not activate the clicked window (or its parent).
         public const uint WM_MOUSEACTIVATE = 0x0021;
         public const int MA_NOACTIVATE = 3;
+        // …or activate AND process the click — what an ordinary (置顶显示 off) floating widget
+        // needs so a click can raise it above the foreground window.
+        public const int MA_ACTIVATE = 1;
 
         public const uint WM_RBUTTONUP = 0x0205;
 
         // SetWindowPos insertion-after handles / flags.
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        // "Take this window OUT of the topmost band" — 设置 → 外观 → 悬浮模式 → 置顶显示
+        // off. Only the demotion is unconditional; promotion (HWND_TOPMOST) is subject to the
+        // foreground lock (gotcha §7), which is why the floating widget is CREATED topmost
+        // instead of being promoted after the fact.
+        public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
         public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_NOZORDER = 0x0004;
+        public const uint SWP_FRAMECHANGED = 0x0020;
+
+        // WM_MOUSEMOVE wParam: the left button is still down (floating-mode drag).
+        public const int MK_LBUTTON = 0x0001;
 
         // AllowSetForegroundWindow(ASFW_ANY) grants foreground to any process.
         public const uint ASFW_ANY = 0xFFFFFFFF;
@@ -151,6 +164,28 @@ namespace task_monitor
         // was already pushed to the sampler; re-sample + redraw NOW so a disabled slot
         // shows "--" immediately instead of waiting out the current timer interval.
         public const uint WM_APP_SET_METRICS = WM_APP + 5;
+        // UI → taskbar: 悬浮模式 was turned on/off. The window's form (taskbar child vs
+        // top-level card widget) is a CREATION-time property — ex-style, parent, window shell
+        // — so the handler tears the window down and lets App's recreate loop build the other
+        // form (fast: TaskbarWindow.ConsumeQuickRestart).
+        public const uint WM_APP_SET_FLOATING = WM_APP + 6;
+        // UI → taskbar: a live floating-form style changed (置顶显示, or the app theme while
+        // 悬浮模式 is on) — re-apply the topmost band / card tint and redraw. No rebuild.
+        public const uint WM_APP_UPDATE_FLOATING = WM_APP + 7;
+        // UI → taskbar: the set of open detail windows changed, or one of them moved/resized —
+        // re-derive the floating widget's position, which steps aside when a popup covers it
+        // and goes home when none does. Zero payload: the HWND list rides in a field push
+        // (SetFloatingKeepOut), like the settings above; the taskbar thread reads the rects.
+        public const uint WM_APP_SET_FLOAT_KEEPOUT = WM_APP + 8;
+        // UI → taskbar: 贴边隐藏 was flipped (设置 → 外观 → 悬浮模式, or the right-click
+        // menu). Re-derive the dock from the home position: ON near an eligible work-area
+        // edge slides the widget out (a strip stays exposed); OFF slides it back home.
+        public const uint WM_APP_SET_FLOAT_EDGE_HIDE = WM_APP + 9;
+        // UI → taskbar: 全屏时隐藏 was flipped (设置 → 外观 → 悬浮模式, or the right-click
+        // menu). The probe runs at once — ON with a fullscreen foreground hides the widget
+        // immediately, OFF restores it no matter what is on screen. Visibility only: no
+        // position, dock or slide state is touched.
+        public const uint WM_APP_SET_FLOAT_FULLSCREEN_HIDE = WM_APP + 10;
 
         // ---------- user32 functions ----------
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -229,8 +264,23 @@ namespace task_monitor
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
 
+        // Screen-space cursor position — the floating widget's drag math works in screen
+        // coordinates (the window moves under the pointer while the grab offset stays fixed).
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool GetCursorPos(out POINT lpPoint);
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        // Window class query — the 全屏时隐藏 probe excludes the DESKTOP by class: clicking
+        // it makes Progman/WorkerW the foreground window and its rect IS the whole monitor.
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+        // The probe's no-DWM fallback: a maximized window's raw GetWindowRect overshoots its
+        // monitor, so only an un-maximized window may be measured that way.
+        [DllImport("user32.dll")]
+        public static extern bool IsZoomed(IntPtr hWnd);
 
         public const uint GA_ROOT = 2;
 
@@ -274,6 +324,11 @@ namespace task_monitor
         // ---------- kernel32 functions ----------
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr GetModuleHandleW(string lpModuleName);
+
+        // The 全屏时隐藏 probe's own-process exclusion: GetWindowThreadProcessId on the
+        // foreground window is compared against this (detail windows, 设置, the menu host).
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentProcessId();
 
         // ---------- Window-long pointer shim (32/64-bit aware) ----------
         public static IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex)

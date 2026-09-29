@@ -10,6 +10,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using iNKORE.UI.WPF.Modern;
 using iNKORE.UI.WPF.Modern.Common.IconKeys;
 using iNKORE.UI.WPF.Modern.Controls;
@@ -124,12 +125,19 @@ namespace task_monitor
             {
                 _detail?.ApplyTheme();
                 foreach (var w in _pinned) w.ApplyTheme();
+                // 悬浮模式的自绘卡片用的是 detail 弹窗那套色调常量，所以它的卡片颜色和文字颜色
+                // 跟 APP 主题走（DetailWindow.ApplyTheme 同源），不是任务栏的系统主题。
+                _taskbar?.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
             };
 
             // No main window — this is a taskbar widget. The overlay runs on its own
             // STA thread; DetailWindow is created on demand. ShutdownMode=OnExplicitShutdown
             // (set in App.xaml) keeps the process alive with no persistent WPF window.
             StartTaskbar();
+
+            // 卡死看门狗 — see CheckOverlayHealth. A freeze that heals itself leaves NOTHING
+            // in the log, because the stalled thread is the very thread that would write it.
+            StartOverlayWatchdog();
 
             // Pre-warm WPF: the overlay is a native Win32 window, so without this the
             // FIRST WPF window ever shown is the user's first click — which then eats
@@ -278,6 +286,30 @@ namespace task_monitor
             _taskbar.SetNetAdapter(_config.NetAdapterId);   // null = 自动 (the default)
             _taskbar.SetClashApi(_config.ClashEnabled != false, _config.ClashApiAddress, _config.ClashApiSecret); // null = on; null address = the 127.0.0.1:9090 default
             _taskbar.SetPublicIpLookup(_config.PublicIpEnabled != false); // null = on (the default)
+            // 悬浮模式 (设置 → 外观): the form Start() builds. -1 = no saved home yet → the
+            // widget opens where the taskbar overlay would have been anchored.
+            _taskbar.SetFloatingMode(_config.FloatingMode == true, _config.FloatingX ?? -1, _config.FloatingY ?? -1);
+            _taskbar.SetFloatingTopmost(_config.FloatingTopmost != false);   // null = 置顶 (the default)
+            _taskbar.SetFloatingOpacity(_config.FloatingOpacity ?? 1.0);     // null = 不透明 (the default)
+            _taskbar.SetFloatingEdgeHide(_config.FloatingEdgeHide == true);  // null = off (the default)
+            _taskbar.SetFloatingFullscreenHide(_config.FloatingFullscreenHide != false);  // null = on (the default)
+            // The floating widget's card follows the APP theme (it is painted in the detail
+            // popup's tint), not the taskbar's system theme — resolved here and kept live by the
+            // ActualApplicationThemeChanged hook in OnStartup.
+            _taskbar.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
+            // A drag ends on the taskbar thread; the position is settings, so it comes back
+            // here to be persisted (and only here — pushing it back would fight the drag).
+            _taskbar.FloatingPositionChanged = (x, y) => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _config.FloatingX = x;
+                _config.FloatingY = y;
+                TrySaveConfig();
+            }));
+            // …and while the drag is in progress every open detail window travels with the
+            // widget (same delta), so the pair never comes apart mid-drag. Live, on the UI
+            // thread: the windows have to move with the mouse, not after it.
+            _taskbar.FloatingDragged = (dx, dy) =>
+                Dispatcher.BeginInvoke(new Action<int, int>(FollowFloatingDrag), dx, dy);
 
             var thread = new Thread(() =>
             {
@@ -294,7 +326,14 @@ namespace task_monitor
                     {
                         _taskbar.Start();
                         if (!_stopping)
-                            Logger.Warn("任务栏覆盖层 Start() 已返回（窗口销毁——explorer 重启或初始化失败），2s 后重建");
+                        {
+                            // A 悬浮模式 flip tears the window down on purpose: come straight
+                            // back so the widget reappears in its new form in ~150ms instead of
+                            // blinking out for the whole explorer-restart backoff.
+                            int delay = _taskbar.ConsumeQuickRestart() ? 150 : 2000;
+                            Logger.Warn($"任务栏覆盖层 Start() 已返回（窗口销毁——explorer 重启或初始化失败），{delay}ms 后重建");
+                            Thread.Sleep(delay);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -342,6 +381,11 @@ namespace task_monitor
 
             _detail = new DetailWindow(_taskbar);
             _detail.PinStateChanged += OnDetailPinStateChanged;
+            // Any rect change (the popup's placement, the pin band growing the window upward,
+            // content height, a pinned window being dragged) moves the keep-out the floating
+            // widget dodges — republish it.
+            _detail.SizeChanged += (s, e) => ScheduleDetailKeepOut();
+            _detail.LocationChanged += (s, e) => ScheduleDetailKeepOut();
             _detail.Closed += (s, e) =>
             {
                 var w = (DetailWindow)s;
@@ -349,9 +393,11 @@ namespace task_monitor
                 _pinned.Remove(w);
                 // Free the column's press if this window had it pinned (idempotent).
                 _taskbar.SetColumnClickEnabled(w.Column, true);
+                ScheduleDetailKeepOut();
                 ScheduleIdleTrim();
             };
             _detail.ShowColumn(column);
+            ScheduleDetailKeepOut();   // the freshly placed popup is the widget's new keep-out
         }
 
         // A window that pins itself leaves the transient slot (so a new popup may open
@@ -374,6 +420,61 @@ namespace task_monitor
                 _detail = w;
                 _taskbar.SetColumnClickEnabled(w.Column, true);
             }
+            // Pin/unpin moves the window (the band grows out of the top; unpin restores the
+            // pre-pin spot) — a different keep-out for the floating widget either way.
+            ScheduleDetailKeepOut();
+        }
+
+        // ---------- 悬浮模式: the detail windows travel with the widget ----------
+        // The widget is being dragged, one step at a time (TaskbarWindow.FloatingDragged). Every
+        // open detail window is anchored to it — the flyout beside its column, a pinned window
+        // wherever the user put it — so they all move by the same delta and the group stays
+        // together. (A pinned window survives the drag by definition; the transient flyout
+        // survives it too whenever 置顶显示 is on, because the widget is WS_EX_NOACTIVATE and
+        // therefore never takes focus away from it. With 置顶显示 off, the click that starts the
+        // drag activates the widget and the flyout dismisses itself, as any focus loss does.)
+        private void FollowFloatingDrag(int dx, int dy)
+        {
+            _detail?.FollowFloatingDrag(dx, dy);
+            foreach (var w in _pinned) w.FollowFloatingDrag(dx, dy);
+        }
+
+        // ---------- 悬浮模式: keep the widget out from under a detail window ----------
+        // The widget's home is where the user dragged it, but a detail window can end up
+        // covering that spot: its placement is anchored to the widget's column and CLAMPED into
+        // the monitor work area, so on a screen too short to hold the popup beside the widget
+        // the popup lands on top of it (and pinning grows the window further up). Rather than
+        // re-place the popup, the widget steps aside — TaskbarWindow.ComputeFloatTarget — and
+        // goes back home once no open window covers it. App owns the window LISTS, so it
+        // publishes them; the taskbar thread reads the rects itself (and re-derives every tick,
+        // which is what makes a change that raised no WPF event still land).
+        //
+        // Deferred AND coalesced: toggling a column closes the old popup and opens the new one
+        // inside one dispatcher pass, so a synchronous push on the close would send the widget
+        // home for a few ms and dodge it right back out (a visible blink). Background priority
+        // also puts the push after the layout/render pass, i.e. after the new window's
+        // placement has actually reached its HWND.
+        private bool _keepOutQueued;
+
+        private void ScheduleDetailKeepOut()
+        {
+            if (_keepOutQueued) return;
+            _keepOutQueued = true;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _keepOutQueued = false;
+                var hwnds = new List<IntPtr>(_pinned.Count + 1);
+                AddKeepOut(_detail, hwnds);
+                foreach (var w in _pinned) AddKeepOut(w, hwnds);
+                _taskbar.SetFloatingKeepOut(hwnds.ToArray());
+            }), System.Windows.Threading.DispatcherPriority.Background);
+        }
+
+        private static void AddKeepOut(DetailWindow w, List<IntPtr> into)
+        {
+            if (w == null) return;
+            var hwnd = new WindowInteropHelper(w).Handle;
+            if (hwnd != IntPtr.Zero) into.Add(hwnd);
         }
 
         private void CloseDetail()
@@ -401,8 +502,95 @@ namespace task_monitor
             }), System.Windows.Threading.DispatcherPriority.Background);
         }
 
-        // ---------- Right-click context menu (设置 / Exit) ----------
+        // ---------- 卡死看门狗 (the reported 「进程卡死了…又恢复了」) ----------
+        // The taskbar thread owns the overlay window, its message loop, the sampler and the
+        // drawing. If a call inside it blocks — a USB disk that went to sleep inside
+        // IOCTL_DISK_PERFORMANCE, an RPC, the compositor — the widget holds its last frame and
+        // ignores clicks for as long as that call takes, and the stalled thread cannot log its
+        // own stall. Reported twice with an empty log, so this watchdog reports from the OTHER
+        // side, where it can always run: the tick heartbeat (TaskbarWindow.LastTickTickCount)
+        // and the overlay HWND, each with the episode's start and end. Healthy = silent.
+        // (The taskbar thread contributes the matching half: per-step and per-phase timings
+        // inside the tick, which name the blocking call when it finally returns.)
+        private System.Windows.Threading.DispatcherTimer _overlayWatch;
+        private const int WatchIntervalMs = 2000;
+        private long _stallLastTick;    // 0 = no stall in progress; else the last tick before it
+        private long _goneSinceTick;    // 0 = the overlay HWND is there; else when it vanished
+        private bool _goneLogged;
+
+        private void StartOverlayWatchdog()
+        {
+            _overlayWatch = new System.Windows.Threading.DispatcherTimer(
+                System.Windows.Threading.DispatcherPriority.Background)
+            { Interval = TimeSpan.FromMilliseconds(WatchIntervalMs) };
+            _overlayWatch.Tick += (s, e) => CheckOverlayHealth();
+            _overlayWatch.Start();
+        }
+
+        private void CheckOverlayHealth()
+        {
+            var tb = _taskbar;
+            if (tb == null) return;
+            long now = (long)SystemInfo.GetTickCount64();
+
+            // (1) The tick heartbeat. The threshold is deliberately loose: a 悬浮模式 flip
+            //     rebuilds the window and legitimately has a ~2s gap (Start()'s taskbar probe),
+            //     and a slow-but-working sampler must not be reported.
+            long last = tb.LastTickTickCount;
+            if (last != 0)
+            {
+                int interval = _config.SampleIntervalMs ?? 1000;
+                long threshold = Math.Max(4000, interval * 3L);
+                if (_stallLastTick == 0)
+                {
+                    if (now - last > threshold)
+                    {
+                        _stallLastTick = last;
+                        Logger.Warn($"覆盖层心跳停滞：已 {now - last}ms 没有采样 tick（设定 {interval}ms，阈值 {threshold}ms）——任务栏线程卡在某个阻塞调用里，恢复时会补记一行");
+                    }
+                }
+                else if (now - last <= interval * 2L)
+                {
+                    Logger.Warn($"覆盖层心跳恢复：本次停滞约 {now - _stallLastTick}ms（从最后一次正常 tick 算起）");
+                    _stallLastTick = 0;
+                }
+            }
+
+            // (2) The zombie state: the window is gone while Start() never returned, so the
+            //     recreate loop never fires either — and with the window died the 1s timer that
+            //     would have noticed. Nothing in the process can recover from it on its own.
+            //     A 悬浮模式 flip takes the window away on purpose for ~2s, so only a
+            //     disappearance that PERSISTS gets logged (and only then is the recovery line
+            //     worth printing — otherwise every flip would log a phantom "已恢复").
+            IntPtr hwnd = tb.OverlayHwnd;
+            bool there = hwnd != IntPtr.Zero && WindowInterop.IsWindow(hwnd);
+            if (!there)
+            {
+                if (_goneSinceTick == 0) _goneSinceTick = now;
+                else if (!_goneLogged && now - _goneSinceTick > 5000)
+                {
+                    _goneLogged = true;
+                    Logger.Error($"覆盖层窗口已消失 {(now - _goneSinceTick) / 1000}s 而 Start() 未返回——重建循环也停了，只能等阻塞调用返回或重启进程");
+                }
+            }
+            else if (_goneLogged)
+            {
+                Logger.Info($"覆盖层窗口已恢复（消失约 {now - _goneSinceTick}ms）");
+                _goneSinceTick = 0;
+                _goneLogged = false;
+            }
+            else
+            {
+                _goneSinceTick = 0;   // back before the threshold: a form flip, not an incident
+            }
+        }
+
+        // ---------- Right-click context menu (悬浮模式 / 置顶显示 / 设置 / Exit) ----------
         private ContextMenu _taskbarMenu;
+        private MenuItem _menuFloating;
+        private MenuItem _menuFloatingTopmost;
+        private MenuItem _menuFloatingEdgeHide;
+        private MenuItem _menuFloatingFullscreenHide;
         private Window _menuHost;
         // The settings window — at most one; a second menu click re-activates it.
         private SettingsWindow _settings;
@@ -425,6 +613,11 @@ namespace task_monitor
                 _config.OverlayOnLeft != false, _config.OverlaySnapToStart == true, OnOverlayPlacementChanged,
                 StartupTask.IsEnabled(), OnAutoStartChanged,
                 ThemeIndexOf(_config.Theme), OnThemeChanged,
+                _config.FloatingMode == true, OnFloatingModeChanged,
+                _config.FloatingTopmost != false, OnFloatingTopmostChanged,
+                _config.FloatingEdgeHide == true, OnFloatingEdgeHideChanged,
+                _config.FloatingFullscreenHide != false, OnFloatingFullscreenHideChanged,
+                _config.FloatingOpacity ?? 1.0, OnFloatingOpacityChanged,
                 _config.SampleIntervalMs ?? 1000, OnSampleIntervalChanged,
                 SamplingMaskOf(_config), OnMetricSamplingChanged,
                 _config.MergeSamePathProcesses != false, OnMergeSamePathChanged,
@@ -462,6 +655,89 @@ namespace task_monitor
             _taskbar.SetPlacement(onLeft, snapToStart);
             CloseDetail();
         }
+
+        // 设置 外观 → 悬浮模式 (or the right-click menu's checkable item): persist (null =
+        // off — only the enabled state is written) and hand the flip to the taskbar thread,
+        // which rebuilds the overlay window in its other form (top-level card widget instead
+        // of a taskbar child, or back). That also moves the flyout's anchor, so drop the
+        // transient popup; pinned windows are user-placed and stay. The saved home
+        // (FloatingX/Y) rides along, so turning the mode back on restores where the user
+        // last dragged the widget. An open settings window is synced back — a no-op when
+        // the change came from there.
+        private void OnFloatingModeChanged(bool on)
+        {
+            _config.FloatingMode = on ? true : (bool?)null;
+            TrySaveConfig();
+            CloseDetail();
+            _taskbar.SetFloatingMode(on, _config.FloatingX ?? -1, _config.FloatingY ?? -1);
+            _settings?.SyncFloatingMode(on);
+        }
+
+        // 设置 外观 → 悬浮模式 → 置顶显示 (or the right-click menu's checkable item): persist
+        // (null = on, the default — only the disabled state is written). No rebuild: the
+        // widget just changes z-order band, and the taskbar thread verifies + re-asserts the
+        // promotion (the foreground lock can eat it).
+        private void OnFloatingTopmostChanged(bool on)
+        {
+            _config.FloatingTopmost = on ? (bool?)null : false;
+            TrySaveConfig();
+            _taskbar.SetFloatingTopmost(on);
+            _settings?.SyncFloatingTopmost(on);
+        }
+
+        // 设置 外观 → 悬浮模式 → 贴边隐藏 (or the right-click menu's checkable item): persist
+        // (null = off, the default — only the enabled state is written) and hand it to the
+        // taskbar thread, which re-derives the dock from the home position — ON slides a
+        // home-at-edge widget out at once, OFF slides a hidden/peeked one back home. The
+        // dock itself is derived state (a home within the snap distance of a 左/右/上 work
+        // edge), so nothing but the switch is stored.
+        private void OnFloatingEdgeHideChanged(bool on)
+        {
+            _config.FloatingEdgeHide = on ? true : (bool?)null;
+            TrySaveConfig();
+            _taskbar.SetFloatingEdgeHide(on);
+            _settings?.SyncFloatingEdgeHide(on);
+        }
+
+        // 设置 外观 → 悬浮模式 → 全屏时隐藏 (or the right-click menu's checkable item):
+        // persist (null = on, the default — only the disabled state is written) and hand it
+        // to the taskbar thread, whose probe runs at once — ON with a fullscreen foreground
+        // hides the widget immediately, OFF restores it no matter what is on screen. The
+        // fullscreen state itself is derived live by the tick; only the switch is stored.
+        private void OnFloatingFullscreenHideChanged(bool on)
+        {
+            _config.FloatingFullscreenHide = on ? (bool?)null : false;
+            TrySaveConfig();
+            _taskbar.SetFloatingFullscreenHide(on);
+            _settings?.SyncFloatingFullscreenHide(on);
+        }
+
+        // 设置 外观 → 悬浮模式 → 透明度: applied LIVE (a plain re-tint on the taskbar thread —
+        // the widget must follow the thumb, so no debounce on the visual), but persisted
+        // debounced: the slider reports per step and every step would rewrite settings.yaml
+        // (the Clash text boxes debounce for the same reason — only the write is delayed
+        // here, not the effect). null = 不透明 (only a non-default value is written).
+        // Settings-page only: a percent slider has no right-click-menu shape.
+        private void OnFloatingOpacityChanged(double opacity)
+        {
+            _taskbar.SetFloatingOpacity(opacity);
+            _config.FloatingOpacity = opacity < 0.999 ? opacity : (double?)null;
+            if (_configSaveDebounce == null)
+            {
+                _configSaveDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                _configSaveDebounce.Tick += (s, e) =>
+                {
+                    _configSaveDebounce.Stop();
+                    TrySaveConfig();
+                };
+            }
+            _configSaveDebounce.Stop();
+            _configSaveDebounce.Start();
+        }
+
+        // The 透明度 slider's yaml-write debounce (see OnFloatingOpacityChanged). A fired
+        // timer outlives the settings window on purpose: the last dragged value still lands.
+        private DispatcherTimer _configSaveDebounce;
 
         // ---------- 设置: 开机自启动 / 主题 / 采样间隔 ----------
 
@@ -691,6 +967,50 @@ namespace task_monitor
             // App.xaml — the same look as iNKORE's MenuFlyout). They're applied by key
             // here because the FluentWpfCore resource dictionary is merged *after*
             // XamlControlsResources and would otherwise win for the keyless defaults.
+            // 悬浮模式/置顶显示/贴边隐藏/全屏时隐藏 mirror the 设置 → 外观 switches
+            // (checkable items funnelling into the same change handlers; a checkable
+            // MenuItem flips IsChecked before Click fires, so the handler reads the new
+            // state). Their checkmarks are refreshed on every open below — the settings
+            // window can change them too.
+            _menuFloating = new MenuItem
+            {
+                Header = "悬浮模式",
+                IsCheckable = true,
+                Icon = new FontIcon { Icon = FluentSystemIcons.WindowMultiple_16_Regular, FontSize = 16 },
+            };
+            _menuFloating.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemStyle");
+            _menuFloating.Click += (s, e) => OnFloatingModeChanged(_menuFloating.IsChecked);
+
+            _menuFloatingTopmost = new MenuItem
+            {
+                Header = "置顶显示",
+                IsCheckable = true,
+                Icon = new FontIcon { Icon = FluentSystemIcons.Pin_16_Regular, FontSize = 16 },
+            };
+            _menuFloatingTopmost.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemStyle");
+            _menuFloatingTopmost.Click += (s, e) => OnFloatingTopmostChanged(_menuFloatingTopmost.IsChecked);
+
+            _menuFloatingEdgeHide = new MenuItem
+            {
+                Header = "贴边隐藏",
+                IsCheckable = true,
+                Icon = new FontIcon { Icon = FluentSystemIcons.PanelLeftContract_16_Regular, FontSize = 16 },
+            };
+            _menuFloatingEdgeHide.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemStyle");
+            _menuFloatingEdgeHide.Click += (s, e) => OnFloatingEdgeHideChanged(_menuFloatingEdgeHide.IsChecked);
+
+            _menuFloatingFullscreenHide = new MenuItem
+            {
+                Header = "全屏时隐藏",
+                IsCheckable = true,
+                Icon = new FontIcon { Icon = FluentSystemIcons.FullScreenMinimize_16_Regular, FontSize = 16 },
+            };
+            _menuFloatingFullscreenHide.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemStyle");
+            _menuFloatingFullscreenHide.Click += (s, e) => OnFloatingFullscreenHideChanged(_menuFloatingFullscreenHide.IsChecked);
+
+            var separator = new Separator();
+            separator.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemSeparatorStyle");
+
             var settings = new MenuItem
             {
                 Header = "设置",
@@ -709,8 +1029,29 @@ namespace task_monitor
 
             _taskbarMenu = new ContextMenu();
             _taskbarMenu.SetResourceReference(FrameworkElement.StyleProperty, "DefaultContextMenuStyle");
+            _taskbarMenu.Items.Add(_menuFloating);
+            _taskbarMenu.Items.Add(_menuFloatingTopmost);
+            _taskbarMenu.Items.Add(_menuFloatingEdgeHide);
+            _taskbarMenu.Items.Add(_menuFloatingFullscreenHide);
+            _taskbarMenu.Items.Add(separator);
             _taskbarMenu.Items.Add(settings);
             _taskbarMenu.Items.Add(exit);
+
+            // Reflect the live state on every open: 置顶显示/贴边隐藏 only mean anything in the
+            // floating form, so they grey out with the mode — the same rule as the settings
+            // page's FloatingTopmostCard/FloatingEdgeHideCard. (Programmatic IsChecked sets
+            // don't fire Click.)
+            _taskbarMenu.Opened += (s, e) =>
+            {
+                bool isFloating = _config.FloatingMode == true;
+                _menuFloating.IsChecked = isFloating;
+                _menuFloatingTopmost.IsChecked = _config.FloatingTopmost != false;
+                _menuFloatingTopmost.IsEnabled = isFloating;
+                _menuFloatingEdgeHide.IsChecked = _config.FloatingEdgeHide == true;
+                _menuFloatingEdgeHide.IsEnabled = isFloating;
+                _menuFloatingFullscreenHide.IsChecked = _config.FloatingFullscreenHide != false;
+                _menuFloatingFullscreenHide.IsEnabled = isFloating;
+            };
 
             // There is no main window, so the menu needs an invisible host window to
             // attach to. 1×1, transparent, offscreen, topmost, non-activating → unseen.

@@ -71,6 +71,76 @@ namespace task_monitor
         public bool? OverlaySnapToStart { get; set; }
 
         /// <summary>
+        /// 悬浮模式 (设置 → 外观): true = the overlay DETACHES from the taskbar and lives on
+        /// the desktop as a free-floating card widget (the same metric grid, the same
+        /// drawing, its own card background in the detail popup's tint + rounded corners);
+        /// null = off (the default — only the enabled state is written). The taskbar keeps no
+        /// copy: 从任务栏脱离开来 means the embedded overlay is gone while this is on. The
+        /// window form is creation-time state, so App hands the flip to
+        /// <see cref="TaskbarWindow.SetFloatingMode"/>, which rebuilds the window.
+        /// </summary>
+        public bool? FloatingMode { get; set; }
+
+        /// <summary>
+        /// 置顶显示 (设置 → 外观 → 悬浮模式), floating form only: null = on (the default —
+        /// only the disabled state is written). On = the widget stays above every normal
+        /// window (like the taskbar overlay it replaces); off = an ordinary z-order window
+        /// that other windows cover. Applied live via
+        /// <see cref="TaskbarWindow.SetFloatingTopmost"/>.
+        /// </summary>
+        public bool? FloatingTopmost { get; set; }
+
+        /// <summary>
+        /// 透明度 (设置 → 外观 → 悬浮模式), floating form only: the BACKGROUND's opacity,
+        /// 0.2–1.0 — the card's alpha IS this value (1.0 = a fully opaque card; the old
+        /// see-through 0xCC tint look sits at 0.8) and the card's outline scales with it,
+        /// while text, labels and interaction fills keep their fixed alphas
+        /// (文字不要有透明度 — the numbers stay fully legible at every step). null = 1.0
+        /// (the default — only a non-default value is written); out-of-range values are
+        /// clamped by <see cref="TaskbarWindow.SetFloatingOpacity"/>. Applied live via
+        /// <see cref="TaskbarWindow.SetFloatingOpacity"/>; the taskbar-embedded form ignores
+        /// it (it must match the opaque taskbar surface).
+        /// </summary>
+        public double? FloatingOpacity { get; set; }
+
+        /// <summary>
+        /// 贴边隐藏 (设置 → 外观 → 悬浮模式), floating form only: null = off (the default —
+        /// only the enabled state is written). On = a widget dropped within a few px of its
+        /// monitor work area's 左/右/上 edge docks there and slides out of sight, leaving a
+        /// narrow strip; hovering the strip pulls it back out and the mouse leaving pushes it
+        /// back in. The dock itself is DERIVED from <see cref="FloatingX"/>/<
+        /// <see cref="FloatingY"/> (a home at an edge reopens hidden) — nothing but this
+        /// switch and the home are stored. Applied live via
+        /// <see cref="TaskbarWindow.SetFloatingEdgeHide"/>; the taskbar-embedded form
+        /// ignores it.
+        /// </summary>
+        public bool? FloatingEdgeHide { get; set; }
+
+        /// <summary>
+        /// 全屏时隐藏 (设置 → 外观 → 悬浮模式), floating form only: null = on (the default —
+        /// only the disabled state is written). On = a fullscreen application in the foreground
+        /// on the widget's own monitor (a borderless game, an F11 video, a slideshow — NOT a
+        /// maximized window) hides the widget until the foreground stops being fullscreen;
+        /// sampling and position maintenance continue while hidden. Purely a switch — the
+        /// fullscreen state is probed live on the tick, nothing derived is stored. Applied
+        /// live via <see cref="TaskbarWindow.SetFloatingFullscreenHide"/>; the
+        /// taskbar-embedded form ignores it.
+        /// </summary>
+        public bool? FloatingFullscreenHide { get; set; }
+
+        /// <summary>
+        /// The floating widget's home, as SCREEN coordinates in physical pixels (the overlay
+        /// works in physical px throughout — see TaskbarWindow's DPI handling). null = never
+        /// dragged → the widget opens where the taskbar overlay would have been anchored,
+        /// 8px off the taskbar. Written by App at the end of a drag
+        /// (<see cref="TaskbarWindow.FloatingPositionChanged"/>) and clamped into the
+        /// monitor's work area on every restore, so a monitor change can't strand it
+        /// off-screen.
+        /// </summary>
+        public int? FloatingX { get; set; }
+        public int? FloatingY { get; set; }
+
+        /// <summary>
         /// 深浅色外观: null = 跟随系统 (the iNKORE ThemeManager tracks the system theme
         /// live), Light/Dark = forced. Applied to <c>ThemeManager.Current.ApplicationTheme</c>
         /// at startup and on every settings-page change (App.ApplyThemeSetting).

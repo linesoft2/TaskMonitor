@@ -27,6 +27,11 @@ namespace task_monitor
         // The Dispatcher hook needs Application.Current, so App adds it in OnStartup.
         public static void Install()
         {
+            // NATIVE faults first (access violations and friends): they never reach the managed
+            // handlers below, and the reported 卡死 was exactly one of those (a 30 s WER dump of a
+            // crashed process, with an empty app log). See CrashTrace for the mechanism.
+            CrashTrace.Install();
+
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
                 // IsTerminating: the process dies when this handler returns, so Report

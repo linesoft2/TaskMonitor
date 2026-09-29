@@ -159,24 +159,42 @@ namespace task_monitor
 
         // ---------- idle working-set trim (Task Manager "内存" column) ----------
         /// <summary>
-        /// Full GC + <c>SetProcessWorkingSetSize(-1,-1)</c>: collect the managed garbage
-        /// first (so its pages are actually free), then hand every page not touched
-        /// recently back to the standby list. The app idles almost all the time (a 1s
-        /// sample tick), so one-touch pages — startup/JIT, prewarm, a closed popup's UI
-        /// tree — are pure resident-ballast between events. Reopening a panel pays a few
-        /// ms of soft faults (pages come back from standby, not disk) — an order of
-        /// magnitude cheaper than the JIT/BAML cold-start the prewarm exists to remove,
-        /// so trimming right after prewarm does NOT undo the prewarm's value. Called by
-        /// App at event points only (post-prewarm, last detail window closed) — never
+        /// <c>SetProcessWorkingSetSize(-1,-1)</c> after one plain GC: collect the managed garbage
+        /// so its pages are actually free, then hand every page not touched recently back to the
+        /// standby list. The app idles almost all the time (a 1s sample tick), so one-touch pages
+        /// — startup/JIT, prewarm, a closed popup's UI tree — are pure resident-ballast between
+        /// events. Reopening a panel pays a few ms of soft faults (pages come back from standby,
+        /// not disk) — an order of magnitude cheaper than the JIT/BAML cold-start the prewarm
+        /// exists to remove, so trimming right after prewarm does NOT undo the prewarm's value.
+        /// Called by App at event points only (post-prewarm, last detail window closed) — never
         /// on a timer (periodic trims are pure page-fault churn).
+        ///
+        /// <para><b>Two things it deliberately does NOT do any more</b> (the reported 卡死, whose
+        /// crash lands in interop-stub code with an empty app log — see CrashTrace): it never
+        /// runs more often than <see cref="TrimMinIntervalMs"/> — rapid 切换 detail 窗口 closes a
+        /// popup per switch and used to fire a forced GC per close — and it does NOT
+        /// <c>WaitForPendingFinalizers</c>. Waiting meant every unreachable DirectN/COM wrapper
+        /// was released and finalized ON THE SPOT while the taskbar thread was concurrently
+        /// inside its own COM calls (Draw), which is precisely the window a use-after-free shows
+        /// up in. Without the wait those wrappers are still released — by the finalizer thread,
+        /// in its own time, exactly as during normal operation.</para>
         /// </summary>
         internal static void TrimMemory()
         {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+            long now = (long)GetTickCount64();
+            long gap = _lastTrimTick == 0 ? -1 : now - _lastTrimTick;
+            if (gap >= 0 && gap < TrimMinIntervalMs) return;
+            _lastTrimTick = now;
+            CrashTrace.NoteTrim();
+            Logger.Info($"空闲内存回收：GC + 工作集 trim（间隔 {TrimMinIntervalMs}ms 限流；距上次 {(gap < 0 ? "首次" : gap + "ms")}）");
             GC.Collect();
             SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
         }
+
+        // A trim closer than this to the previous one is skipped: a burst of window closes must
+        // not become a burst of forced GCs.
+        private const int TrimMinIntervalMs = 30000;
+        private static long _lastTrimTick;
 
         // ---------- ntdll ----------
         internal const uint SYSTEM_PROCESSOR_PERFORMANCE_INFO_CLASS = 8;
