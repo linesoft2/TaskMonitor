@@ -3478,8 +3478,8 @@ namespace task_monitor
         // TrafficMonitor's CWinVersionHelper::IsWindows11OrLater (RtlGetNtVersionNumbers).
         private static readonly bool _isWin11OrLater = DetectWin11OrLater();
 
-        // The raw OS check (no taskbar-shape test) — App uses it for the one-time
-        // legacy-OS compatibility warning at startup.
+        // The raw OS check (no taskbar-shape test) — DetailWindow's Win10 carve-out (§40)
+        // and App's startup log line read it.
         internal static bool IsWin11OrLater => _isWin11OrLater;
 
         private static bool DetectWin11OrLater()

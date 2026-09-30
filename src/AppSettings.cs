@@ -31,14 +31,6 @@ namespace task_monitor
         public bool? ElevationConsent { get; set; }
 
         /// <summary>
-        /// Whether the legacy-OS (pre-Win11) compatibility warning has been shown. null =
-        /// never shown → the first launch on Windows 10 or older shows it once (App's
-        /// OnStartup), then true is persisted. Never written on Win11+, where the warning
-        /// never triggers.
-        /// </summary>
-        public bool? LegacyOsWarningShown { get; set; }
-
-        /// <summary>
         /// Show the taskbar overlay on the LEFT side of the taskbar instead of right of
         /// it. null/true = left (the default); only an explicit false is right. Which spot
         /// "left" means per taskbar family — and Win11's fallback to the right side on a

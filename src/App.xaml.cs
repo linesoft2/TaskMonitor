@@ -112,18 +112,6 @@ namespace task_monitor
 
             Logger.Info($"启动 — 版本 {VersionInfo.Current}，OS {Environment.OSVersion}，Win11+={TaskbarWindow.IsWin11OrLater}");
 
-            // One-time legacy-OS warning: the widget targets Windows 11; on Windows 10
-            // or older (the best-effort, no-longer-maintained classical taskbar path)
-            // tell the user once that compatibility issues are expected, then persist
-            // the flag so later launches stay quiet. Shown AFTER the gate + mutex, so
-            // only the surviving elevated instance ever displays it.
-            if (!TaskbarWindow.IsWin11OrLater && _config.LegacyOsWarningShown != true)
-            {
-                new LegacyOsWarningDialog().ShowDialog();
-                _config.LegacyOsWarningShown = true;
-                TrySaveConfig();
-            }
-
             // Repaint already-open detail windows on ANY effective theme flip — the 设置
             // 主题 combo, or a system-theme change while 跟随系统 (the iNKORE ThemeManager
             // tracks it and fires this; everything DynamicResource-driven — the settings

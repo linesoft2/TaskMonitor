@@ -41,8 +41,8 @@ bin/Debug/net48/task_monitor.exe &
 ```
 
 The app always runs **elevated and self-managed**; relaunching from an unelevated shell pops a UAC
-prompt on the secure desktop — that one step is the user's. Elevation gate, single-instance mutex,
-legacy-OS warning: `docs/architecture.md`.
+prompt on the secure desktop — that one step is the user's. Elevation gate and single-instance
+mutex: `docs/architecture.md`.
 
 **UI testing is the USER's job — all of it, not just screenshots.** That includes driving the real
 windows (UI Automation, synthetic clicks/drags), screen capture with pixel/colour analysis, and
@@ -128,8 +128,8 @@ acrylic); the Pivot hit-test flaw (invisible PreviousButton swallows first-tab c
 **Window families — never mix iNKORE's `UseModernWindowStyle`/`SystemBackdropType` with
 FluentWpfCore on the same window:** DetailWindow = borderless FluentWpfCore acrylic (Win10
 carve-out: no material, `AllowsTransparency` layered window + self-drawn rounded tint card — §40);
-SettingsWindow = iNKORE modern window + Mica; ConsentDialog/LegacyOsWarningDialog/
-UpdateAvailableDialog = iNKORE modern window (plain). iNKORE also styles the taskbar right-click menu
+SettingsWindow = iNKORE modern window + Mica; ConsentDialog/UpdateAvailableDialog = iNKORE modern
+window (plain). iNKORE also styles the taskbar right-click menu
 (standard `ContextMenu` via `SetResourceReference`, **by key**), not `MenuFlyout` (can't place at the
 cursor; NREs unless owned).
 

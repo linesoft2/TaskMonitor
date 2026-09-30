@@ -13,7 +13,7 @@
          for that exact tag. 立即更新 opens the source's releases page; 不再提醒 persists
          the tag to settings.yaml (UpdateChecker owns the follow-up); 稍后 / ✕ / Esc
          just close — the next startup asks again. Same window family as
-         LegacyOsWarningDialog: iNKORE modern window, shown elevated. -->
+         ConsentDialog: iNKORE modern window, shown elevated. -->
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />

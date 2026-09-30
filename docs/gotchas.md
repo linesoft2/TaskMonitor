@@ -518,7 +518,7 @@ locals. `SetTarget(null)` alone drops only the context's reference.
 *`src/UpdateChecker.cs`, `src/VersionInfo.cs`*
 
 `UpdateChecker.CheckOnce` is kicked off at the tail of `OnStartup`: thread-pool fetch → UI
-thread `UpdateAvailableDialog` (iNKORE modern window, same family as `LegacyOsWarningDialog`).
+thread `UpdateAvailableDialog` (iNKORE modern window, same family as `ConsentDialog`).
 
 **版本号唯一来源 = csproj `<Version>`** (`VersionInfo.Current` reads the SDK-generated
 `AssemblyInformationalVersion`; `release.yml` enforces tag == csproj). Two sources:

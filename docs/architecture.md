@@ -115,7 +115,7 @@ Implementation in `DetailWindow`, comments at the sites:
   **deselected**; unpin re-selects ("flyout open ⟺ column selected"). `Window_Closing` requests
   the column-aware deselect so a newer selection is never wiped.
 
-## Startup: elevation gate → mutex → legacy-OS warning
+## Startup: elevation gate → mutex
 
 **The app always runs elevated, self-managed** (manifest `asInvoker`): `App.RunElevationGate`
 (src/App.xaml.cs) runs at the top of `OnStartup`, BEFORE the single-instance mutex — an exiting
@@ -133,11 +133,6 @@ drop it. Exercising the consent dialog needs an unelevated launch (`explorer.exe
 across sessions — reachable only elevated, so `SeCreateGlobalPrivilege` is in hand). A second
 instance exits **silently** (the overlay is always visible anyway); a consented second launch still
 UAC-prompts first — inherent to the design.
-
-**Legacy-OS warning:** right after the mutex, a pre-Win11 first launch pops `LegacyOsWarningDialog`
-once (`TaskbarWindow.IsWin11OrLater` — the raw OS check, no taskbar-shape test) saying Win10
-compatibility issues are expected and won't be fixed; `legacyOsWarningShown: true` in settings.yaml
-suppresses it thereafter.
 
 **The sentinel** is the default way to stop a running instance: this agent shell may be unelevated
 while the app is elevated, and then `taskkill` fails with Access denied (UIPI) — file I/O is not
@@ -178,7 +173,6 @@ src/
     TaskbarWindow.cs        overlay + WndProc; owns the SystemSampler
     DetailWindow.xaml(.cs)  acrylic shell hosting one IDetailView
     ConsentDialog           first-run UAC-consent prompt (iNKORE modern window, unelevated)
-    LegacyOsWarningDialog   one-time pre-Win11 compatibility warning (iNKORE modern window, elevated)
     UpdateAvailableDialog   发现新版本提醒 (iNKORE modern window — 立即更新/不再提醒/稍后)
     Common/                 formatters · ProcessListTip · ProcessIconCache (the shared per-exe icon cache) · ChartTipHost/ChartPalette (the shared chart hover tip + colors) · PivotNavButtonFix · FollowTagPanel · the scroll stack
     Details/                the five IDetailViews
