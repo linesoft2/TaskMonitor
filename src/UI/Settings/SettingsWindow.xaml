@@ -172,8 +172,7 @@
                     </ui:SettingsExpander.HeaderIcon>
                     <ui:ToggleSwitch x:Name="FloatingSwitch" Toggled="FloatingSwitch_Toggled" />
                     <ui:SettingsExpander.Items>
-                        <ui:SettingsCard x:Name="FloatingTopmostCard" Header="置顶显示"
-                                         Description="始终显示在其它窗口之上。关闭后按普通窗口处理：会被别的窗口盖住，点一下悬浮窗即可重新置前。">
+                        <ui:SettingsCard x:Name="FloatingTopmostCard" Header="置顶显示">
                             <ui:ToggleSwitch x:Name="FloatingTopmostSwitch" Toggled="FloatingTopmostSwitch_Toggled" />
                         </ui:SettingsCard>
                         <!-- 贴边隐藏: drag the widget onto the 左/右/上 screen edge and it
