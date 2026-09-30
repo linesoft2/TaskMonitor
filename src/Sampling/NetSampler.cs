@@ -43,7 +43,7 @@ namespace task_monitor
             "环回", "隧道", "虚拟",
         };
 
-        private const int MaxHistory = 60;  // 60-tick rolling history for the detail chart
+        private const int MaxHistory = 60;
 
         private string _selectedId;        // NetworkInterface.Id (GUID) — stable locator
         private string _selectedName;      // Description, for display
@@ -152,6 +152,8 @@ namespace task_monitor
             return false;
         }
 
+        // A newly selected adapter's byte counters start fresh, so the rolling history is
+        // dropped — carrying it over would mix two adapters' rates into one chart.
         private void ApplySelection(string id, string name, NetworkInterface nic)
         {
             _selectedId = id;
@@ -159,8 +161,6 @@ namespace task_monitor
             _selectedNic = nic;
             _hasPrev = false;
             _silentSeconds = 0;
-            // The new adapter's byte counters start fresh — drop any history carried over
-            // from the previously selected adapter so the chart doesn't mix two adapters.
             _upHistory.Clear();
             _downHistory.Clear();
         }
@@ -293,16 +293,14 @@ namespace task_monitor
                 _silentSeconds = 0;
             }
 
-            // Record this tick's rate into the rolling history (up = sent, down = received).
             _upHistory.Enqueue(upRate);
             _downHistory.Enqueue(downRate);
             while (_upHistory.Count > MaxHistory) _upHistory.Dequeue();
             while (_downHistory.Count > MaxHistory) _downHistory.Dequeue();
 
-            return (upRate, downRate, _selectedName, _upHistory.ToArray(), _downHistory.ToArray());   // up = sent, down = received
+            return (upRate, downRate, _selectedName, _upHistory.ToArray(), _downHistory.ToArray());
         }
 
-        // Virtual/loopback/tunnel sniff: check Description first, then Name.
         private static bool IsVirtualAdapter(NetworkInterface nic)
         {
             string desc = nic.Description ?? string.Empty;

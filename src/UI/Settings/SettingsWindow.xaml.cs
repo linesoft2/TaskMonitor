@@ -60,7 +60,6 @@ namespace task_monitor
         /// <param name="autoStartChanged">Reported with the requested on/off; on a schtasks
         /// failure App calls <see cref="SyncAutoStart"/> to snap the toggle back.</param>
         /// <param name="themeIndex">0=跟随系统 (yaml null) 1=浅色 2=深色.</param>
-        /// <param name="themeChanged">Reported with the new combo index.</param>
         /// <param name="floatingMode">Current 悬浮模式 state (yaml null = the off default).</param>
         /// <param name="floatingChanged">Reported with the requested on/off — App rebuilds the
         /// overlay window in its other form (taskbar child ⟷ desktop widget).</param>
@@ -87,7 +86,6 @@ namespace task_monitor
         /// bits, in overlay hit-slot order).</param>
         /// <param name="samplingChanged">Reported with (slot, enabled) on every 采样 toggle.</param>
         /// <param name="mergeSamePath">Current 合并相同程序 state (yaml null = the on default).</param>
-        /// <param name="mergeSamePathChanged">Reported with the requested on/off.</param>
         /// <param name="diskDisplayIndex">Current 磁盘显示方式 combo index: 0=所有磁盘平均
         /// (yaml null) 1=最高利用率 2=特定磁盘.</param>
         /// <param name="pickedDiskIndex">The PhysicalDrive index the 特定磁盘 picker shows
@@ -128,7 +126,6 @@ namespace task_monitor
         /// <param name="updateCheckChanged">Reported with the requested on/off — takes
         /// effect on the next startup (the check runs once per launch).</param>
         /// <param name="updateSourceIndex">0=CNB (yaml null, the default) 1=GitHub.</param>
-        /// <param name="updateSourceChanged">Reported with the new combo index.</param>
         // internal: the signature mentions internal sampler types — App (same assembly) is
         // the only caller; the window is never instantiated from XAML.
         internal SettingsWindow(bool overlayOnLeft, bool snapToStart, Action<bool, bool> placementChanged,
@@ -596,7 +593,6 @@ namespace task_monitor
             ClashTestButton.IsEnabled = true;
         }
 
-        // The two 关于 external-link cards.
         private const string GitHubUrl = "https://github.com/linesoft2/TaskMonitor";
         private const string AcknowledgementsUrl = "https://github.com/linesoft2/TaskMonitor#参考--致谢--开源许可";
 

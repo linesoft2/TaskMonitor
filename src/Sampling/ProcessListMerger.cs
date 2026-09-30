@@ -79,7 +79,7 @@ namespace task_monitor
             if (solo != null) merged.AddRange(solo);
             merged.Sort((a, b) =>
             {
-                int c = rankBy(b).CompareTo(rankBy(a)); // desc by the summed key
+                int c = rankBy(b).CompareTo(rankBy(a));
                 return c != 0 ? c : string.CompareOrdinal(a.Name, b.Name);
             });
             if (merged.Count > topN) merged.RemoveRange(topN, merged.Count - topN);

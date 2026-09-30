@@ -91,7 +91,6 @@ namespace task_monitor
             out uint lpBytesReturned,
             IntPtr lpOverlapped);
 
-        // Overload for the fixed-size DISK_PERFORMANCE output struct.
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool DeviceIoControl(

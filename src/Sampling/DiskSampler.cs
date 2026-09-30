@@ -405,7 +405,7 @@ namespace task_monitor
             var byDisk = new Dictionary<int, List<string>>();
             foreach (string drive in Environment.GetLogicalDrives())   // "C:\"
             {
-                string path = @"\\.\" + drive.TrimEnd('\\');            // "\\.\C:"
+                string path = @"\\.\" + drive.TrimEnd('\\');
                 var handle = DiskInterop.CreateFileW(
                     path, 0, DiskInterop.FILE_SHARE_READ_WRITE, IntPtr.Zero,
                     DiskInterop.OPEN_EXISTING, 0, IntPtr.Zero);
@@ -424,7 +424,7 @@ namespace task_monitor
                         continue;
 
                     int count = BitConverter.ToInt32(buf, 0);
-                    string letter = drive.Substring(0, 2);              // "C:"
+                    string letter = drive.Substring(0, 2);
                     for (int e = 0; e < count && e < 8; e++)
                     {
                         int diskNumber = BitConverter.ToInt32(buf, 8 + e * 24);
@@ -478,7 +478,8 @@ namespace task_monitor
         private static string BuildName(string vendor, string product, int index)
         {
             string name = ((vendor ?? "") + " " + (product ?? "")).Trim();
-            // A space-padded vendor string alone ("ATA") reads worse than the model alone.
+            // A disk whose identify strings are both empty would render as a blank row —
+            // fall back to the PhysicalDrive number instead.
             if (name.Length == 0) name = $"PhysicalDrive{index}";
             return name;
         }

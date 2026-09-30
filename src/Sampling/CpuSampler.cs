@@ -125,7 +125,13 @@ namespace task_monitor
 
                 if (status == SystemInfo.STATUS_SUCCESS)
                 {
+                    // `returned` is what the API actually wrote, and the buffer was sized from
+                    // a DIFFERENT source (GetSystemInfo's dwNumberOfProcessors, which counts
+                    // only the caller's processor GROUP). On a >64-logical-processor host the
+                    // two can disagree, and without the upper clamp the loop below walks past
+                    // the n*size allocation into heap (garbage percentages, or an AV).
                     int count = (int)(returned / size);
+                    if (count > n) count = n;
                     if (count <= 0) count = n;
                     var result = new List<PerCoreTimes>(count);
                     for (int i = 0; i < count; i++)
@@ -166,7 +172,6 @@ namespace task_monitor
             return result;
         }
 
-        // ---------- CPU name + base MHz from the registry ----------
         private static void ReadCpuRegistry(out string name, out uint mhz)
         {
             name = "Unknown CPU";

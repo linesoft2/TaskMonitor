@@ -82,7 +82,15 @@ namespace task_monitor
                 return;
             }
 
-            if (!Version.TryParse(latestTag.TrimStart('v', 'V'), out Version latest) || latest <= VersionInfo.CurrentVersion)
+            if (!Version.TryParse(latestTag.TrimStart('v', 'V'), out Version latest))
+            {
+                // A tag we cannot parse is NOT "up to date" — saying so would hide a broken
+                // release scheme (or a scrape that matched something that is not a version)
+                // behind the healthiest-looking line in the log (§5).
+                Logger.Warn($"更新检测：{source} 的 tag「{latestTag}」无法解析为版本号，跳过本次检查");
+                return;
+            }
+            if (latest <= VersionInfo.CurrentVersion)
             {
                 Logger.Info($"更新检测：已是最新（当前 {VersionInfo.Current}，{source} latest {latestTag}）");
                 return;

@@ -53,7 +53,10 @@ namespace task_monitor
         // wlan_intf_opcode_current_connection → WLAN_CONNECTION_ATTRIBUTES.
         private const uint OpcodeCurrentConnection = 7;
         // dot11_BSS_type_any — list every cached BSS, we match the connected one by BSSID.
-        private const int Dot11BssTypeAny = 0;
+        // wlantypes.h: infrastructure=1, independent=2, any=3 (there is no 0) — passing 0
+        // made WlanGetNetworkBssList return ERROR_INVALID_PARAMETER, and the failure path
+        // is silent, so 频段/带宽 stayed empty for every Wi-Fi interface.
+        private const int Dot11BssTypeAny = 3;
 
         // ---------- WLAN_INTERFACE_INFO_LIST ----------
         // DWORD dwNumberOfItems @0x00, DWORD dwIndex @0x04, items @0x08.
@@ -102,13 +105,12 @@ namespace task_monitor
         // Sanity cap while copying the unmanaged IE blob.
         private const int MaxIeBlobBytes = 4096;
 
-        /// <summary>Live connection attributes of one Wi-Fi interface.</summary>
         internal sealed class WlanConnectionInfo
         {
             public string Ssid;             // UTF-8-decoded (SSIDs are opaque bytes); null when hidden
             public int PhyType;             // DOT11_PHY_TYPE: 7=n, 8=ac, 10=ax, 11=be
-            public uint RxRateKbps;         // negotiated receive rate
-            public uint TxRateKbps;         // negotiated transmit rate
+            public uint RxRateKbps;
+            public uint TxRateKbps;
             public uint CenterFreqKhz;      // BSS center frequency → the band; 0 = unknown
             public int ChannelWidthMHz;     // 20/40/80/160; 0 = unknown (see ParseChannelWidth)
             public bool EightyPlusEighty;   // 80+80 MHz discontiguous

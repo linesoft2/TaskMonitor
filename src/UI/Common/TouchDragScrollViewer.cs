@@ -173,6 +173,12 @@ namespace task_monitor
             if (_samples.Count < 2) return 0;
             var first = _samples[0];
             var last = _samples[_samples.Count - 1];
+            // Samples are only aged out while the finger MOVES (PushSample), so a drag that
+            // ends with a pause-and-hold still had its pre-pause pair here and flung the
+            // content away on release — a fling the user did not ask for. A stale last sample
+            // means they stopped and then lifted: no velocity.
+            long window = (long)(VelocityWindowMs / 1000.0 * Stopwatch.Frequency);
+            if (Stopwatch.GetTimestamp() - last.ts > window) return 0;
             double dt = (last.ts - first.ts) / (double)Stopwatch.Frequency;
             return dt > 0.001 ? (last.y - first.y) / dt : 0;
         }

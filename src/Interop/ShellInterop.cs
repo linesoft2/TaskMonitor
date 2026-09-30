@@ -5,19 +5,19 @@ namespace task_monitor
 {
     /// <summary>
     /// shell32 interop for high-resolution exe icons and the user notification state.
-    /// <c>System.Drawing.Icon.
-    /// ExtractAssociatedIcon</c> caps at the small/32px icon and then gets stretched,
-    /// which reads blurry at high DPI; <c>IShellItemImageFactory</c> (the modern shell
-    /// icon API, what Task Manager uses) returns the best icon the resource offers at
-    /// any requested size — up to the 256px jumbo variant modern exes ship.
+    /// <c>System.Drawing.Icon.ExtractAssociatedIcon</c> caps at the small/32px icon and then
+    /// gets stretched, which reads blurry at high DPI; <c>IShellItemImageFactory</c> (the
+    /// modern shell icon API, what Task Manager uses) returns the best icon the resource
+    /// offers at any requested size — up to the 256px jumbo variant modern exes ship.
     /// <see cref="SHQueryUserNotificationState"/> serves the floating widget's 全屏时隐藏
     /// probe (the exclusive-D3D signal a window-rect check cannot see).
     /// </summary>
     /// <remarks>
     /// Pure native boundary: returns an HBITMAP the caller owns (free via
     /// <see cref="DeleteObject"/>); the WPF <c>BitmapSource</c> conversion lives in the
-    /// UI layer (<c>CpuDetailView</c>), matching how <c>WindowInterop</c>/
-    /// <c>SystemInfo</c> keep their P/Invoke surface free of WPF types.
+    /// UI layer (<c>ProcessIconCache</c>, shared by the five detail views' process lists),
+    /// matching how <c>WindowInterop</c>/<c>SystemInfo</c> keep their P/Invoke surface free
+    /// of WPF types.
     /// </remarks>
     internal static class ShellInterop
     {
@@ -101,7 +101,10 @@ namespace task_monitor
         // game owns the swapchain outright), where a window-rect probe is unreliable. The
         // other QUNS values add nothing over the rect check (a borderless-windowed
         // fullscreen app covers rcMonitor anyway; presentation mode is not fullscreen).
-        public const int QUNS_RUNNING_D3D_FULL_SCREEN = 2;
+        // shellapi.h: QUNS_NOT_PRESENT=1, QUNS_BUSY=2, QUNS_RUNNING_D3D_FULL_SCREEN=3 —
+        // this was 2 for a while, i.e. the probe tested the BUSY state (the shell's own
+        // "looks like a fullscreen app" heuristic) and never the exclusive-D3D one.
+        public const int QUNS_RUNNING_D3D_FULL_SCREEN = 3;
 
         /// <summary>Shell's own "what is the user doing" state — returns 0 (S_OK) and writes
         /// <paramref name="state"/> (a QUERY_USER_NOTIFICATION_STATE value, e.g.

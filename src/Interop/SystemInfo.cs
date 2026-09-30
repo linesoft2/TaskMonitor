@@ -12,7 +12,6 @@ namespace task_monitor
     /// </summary>
     internal static class SystemInfo
     {
-        // ---------- structures ----------
         [StructLayout(LayoutKind.Sequential)]
         internal struct FILETIME
         {
@@ -122,8 +121,9 @@ namespace task_monitor
             public IntPtr Buffer;          // wide string, NOT null-terminated guaranteed
         }
 
-        // CallNtPowerInformation(ProcessorInformation) returns one of these per
-        // logical processor; we read CurrentMhz for the live CPU clock speed.
+        // CallNtPowerInformation(ProcessorInformation) returns one of these per logical
+        // processor. We read MaxMhz only — the nominal/base clock the turbo-aware live
+        // speed is multiplied against (gotcha §10); the struct's CurrentMhz is NOT used.
         [StructLayout(LayoutKind.Sequential)]
         internal struct PROCESSOR_POWER_INFORMATION
         {
@@ -135,7 +135,6 @@ namespace task_monitor
             public uint CurrentIdleState;
         }
 
-        // ---------- kernel32 ----------
         [DllImport("kernel32.dll", SetLastError = false)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool GetSystemTimes(out FILETIME idle, out FILETIME kernel, out FILETIME user);
@@ -196,7 +195,6 @@ namespace task_monitor
         private const int TrimMinIntervalMs = 30000;
         private static long _lastTrimTick;
 
-        // ---------- ntdll ----------
         internal const uint SYSTEM_PROCESSOR_PERFORMANCE_INFO_CLASS = 8;
         internal const uint SYSTEM_PROCESS_INFORMATION_CLASS = 5; // SystemProcessInformation (Task Manager's process list)
         internal const uint SYSTEM_PERFORMANCE_INFO_CLASS = 2;    // SystemPerformanceInformation — paged/non-paged pool + compressed (page counts; same source as Task Manager's memory panel)
@@ -286,11 +284,14 @@ namespace task_monitor
             public double DoubleValue;
         }
 
+        // dwUserData is DWORD_PTR (8 bytes on x64) — IntPtr, not uint: every caller passes
+        // 0 today, so the width never showed, but a 32-bit parameter would silently
+        // truncate any future pointer/handle handed to PDH.
         [DllImport("pdh.dll", CharSet = CharSet.Unicode, SetLastError = false)]
-        internal static extern uint PdhOpenQueryW(IntPtr lpDataSource, uint dwUserData, out IntPtr phQuery);
+        internal static extern uint PdhOpenQueryW(IntPtr lpDataSource, IntPtr dwUserData, out IntPtr phQuery);
 
         [DllImport("pdh.dll", CharSet = CharSet.Unicode, SetLastError = false)]
-        internal static extern uint PdhAddEnglishCounterW(IntPtr hQuery, string szFullCounterPath, uint dwUserData, out IntPtr phCounter);
+        internal static extern uint PdhAddEnglishCounterW(IntPtr hQuery, string szFullCounterPath, IntPtr dwUserData, out IntPtr phCounter);
 
         [DllImport("pdh.dll", SetLastError = false)]
         internal static extern uint PdhCollectQueryData(IntPtr hQuery);

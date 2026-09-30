@@ -66,7 +66,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- System.Drawing: only for Icon.ExtractAssociatedIcon (per-process icons in the CPU detail list). -->
+    <!-- System.Drawing: only for Icon.ExtractAssociatedIcon / SystemIcons (the per-process
+         icons ProcessIconCache shares with the five detail views' process lists). -->
     <Reference Include="System.Drawing" />
     <!-- System.Runtime.Serialization: DataContractJsonSerializer for the Clash/Mihomo
          /connections payload (ClashSampler) — a GAC framework assembly, so Costura

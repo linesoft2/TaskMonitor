@@ -50,12 +50,10 @@ namespace task_monitor
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool FreeLibrary(IntPtr hModule);
 
-        // ---------- callback ----------
         // Native: void CALLBACK SRU_CALLBACK(void* Context, _SRU_STATS_RECORD_SET* RecordSet)
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         internal delegate void SruStatsCallback(IntPtr context, IntPtr recordSet);
 
-        // ---------- the three exports (stdcall) ----------
         // Returns: <0 = failure; >=0 = success (per the reverse-engineering notes — a
         // positive value is an HRESULT-encoded success). Caller also treats a null
         // registration handle as failure.

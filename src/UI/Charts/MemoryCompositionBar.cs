@@ -119,7 +119,6 @@ namespace task_monitor
                 var trackBrush = Freeze(new SolidColorBrush(TrackColor));
                 dc.DrawRectangle(trackBrush, null, new Rect(0, 0, w, h));
 
-                // Segments 0..2 (使用中, 已修改, 备用). 可用 (Free) is the track left bare.
                 var fills = new[] { InUseColor, ModifiedColor, StandbyColor };
                 double x = 0;
                 for (int i = 0; i < 3; i++)

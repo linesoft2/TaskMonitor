@@ -13,7 +13,6 @@ namespace task_monitor
     /// </summary>
     internal static class WindowInterop
     {
-        // ---------- Structs ----------
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT
         {
@@ -74,10 +73,8 @@ namespace task_monitor
             public uint dwFlags;
         }
 
-        // ---------- Delegates ----------
         public delegate IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
-        // ---------- Window style constants ----------
         public const uint WS_POPUP = 0x80000000;
         public const uint WS_VISIBLE = 0x10000000;
 
@@ -106,9 +103,7 @@ namespace task_monitor
 
         // ShowWindow commands (we already have SW_SHOW=5).
         public const int SW_HIDE = 0;
-        public const int SW_SHOWNORMAL = 1;
         public const int SW_SHOWNOACTIVATE = 4;
-        public const int SW_RESTORE = 9;
 
         // WM_MOUSEACTIVATE return: do not activate the clicked window (or its parent).
         public const uint WM_MOUSEACTIVATE = 0x0021;
@@ -136,7 +131,6 @@ namespace task_monitor
         // AllowSetForegroundWindow(ASFW_ANY) grants foreground to any process.
         public const uint ASFW_ANY = 0xFFFFFFFF;
 
-        // ---------- Window messages ----------
         public const uint WM_DESTROY = 0x0002;
         public const uint WM_CLOSE = 0x0010;
         public const uint WM_NCDESTROY = 0x0082;
@@ -188,7 +182,6 @@ namespace task_monitor
         // position, dock or slide state is touched.
         public const uint WM_APP_SET_FLOAT_FULLSCREEN_HIDE = WM_APP + 10;
 
-        // ---------- user32 functions ----------
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
 
@@ -316,12 +309,6 @@ namespace task_monitor
         public static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
-        public static extern IntPtr SetActiveWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        public static extern bool BringWindowToTop(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
         public static extern bool AllowSetForegroundWindow(uint dwProcessId);
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -343,10 +330,6 @@ namespace task_monitor
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFO lpmi);
 
-        [DllImport("user32.dll", ExactSpelling = true)]
-        public static extern short GetKeyState(int nVirtKey); // placeholder; not used
-
-        // ---------- kernel32 functions ----------
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr GetModuleHandleW(string lpModuleName);
 

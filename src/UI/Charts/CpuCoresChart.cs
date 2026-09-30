@@ -181,11 +181,9 @@ namespace task_monitor
                 double slotCenter = (i + 0.5) * slotWidth;
                 double barLeft = slotCenter - barWidth / 2.0;
 
-                // Full-height track behind the bar.
                 var trackRect = new Rect(barLeft, 0, barWidth, h);
                 dc.DrawRoundedRectangle(trackBrush, null, trackRect, rx, ry);
 
-                // Value-proportional bar.
                 double barHeight = values[i] / 100.0 * h;
                 double barTop = h - barHeight;
                 var barRect = new Rect(barLeft, barTop, barWidth, barHeight);

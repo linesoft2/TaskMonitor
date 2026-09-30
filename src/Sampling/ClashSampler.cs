@@ -174,7 +174,7 @@ namespace task_monitor
                     _paths.Clear();
                     _lastOkTicks = 0;
                 }
-                return; // keep the last publication for the first few failures
+                return;
             }
             _failCount = 0;
 

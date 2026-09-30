@@ -9,7 +9,6 @@ namespace task_monitor
     /// </summary>
     internal static class HistoryTimeFormatter
     {
-        /// <summary>ticksAgo=0 → "现在", otherwise "N 秒前" (interval-scaled).</summary>
         public static string Ago(int ticksAgo, int intervalMs)
         {
             double sec = ticksAgo * intervalMs / 1000.0;

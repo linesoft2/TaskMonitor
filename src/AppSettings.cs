@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.IO;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -17,19 +16,10 @@ namespace task_monitor
     /// <summary>
     /// Persistent settings store — <c>settings.yaml</c> in the exe's own directory (the
     /// run directory; resolved from <see cref="AppDomain.BaseDirectory"/> because the
-    /// working directory is not stable across the runas self-relaunch). This is the
-    /// single store for ALL settings (the 设置 pages will hang theirs here); today it
-    /// carries the first-run elevation consent, the overlay placement (left/right
-    /// side + left-side anchor), the 深浅色 theme (null = 跟随系统), the sampling
-    /// interval (null = 1s), the per-metric sampling switches (null = enabled) and the
-    /// disk headline display mode (null = 所有磁盘平均; the specific-disk index), the GPU
-    /// headline display mode (null = 最高; the specific "GPU N" number) and the network
-    /// adapter pick (null = 自动; an adapter GUID), the 公网 IP lookup switch (null = on),
-    /// and the Clash/Mihomo integration
-    /// (null = on; switch + address + API secret), and the startup update check (null =
-    /// on; the CNB/GitHub source; the 不再提醒-skipped tag). The 开机自启动 toggle is deliberately NOT here — the
-    /// scheduled task itself is the state (<see cref="StartupTask"/>). YamlDotNet ignores
-    /// comment lines on read, so the header written by <see cref="Save"/> round-trips fine.
+    /// working directory is not stable across the runas self-relaunch). The single store
+    /// for ALL settings; each key is documented on its own property below. The 开机自启动
+    /// toggle is deliberately NOT here — the scheduled task itself is the state
+    /// (<see cref="StartupTask"/>).
     /// </summary>
     public sealed class AppSettings
     {
@@ -50,13 +40,10 @@ namespace task_monitor
 
         /// <summary>
         /// Show the taskbar overlay on the LEFT side of the taskbar instead of right of
-        /// it. null/true = left (the default); only an explicit false is right.
-        /// Win11 taskbar: left = the far-left corner / snapped left of Start, honored only
-        /// while the taskbar is centre-aligned (TaskbarAl); a left-aligned taskbar has no
-        /// room left of the Start button, so the overlay falls back to the right side
-        /// automatically. Classical (Win10) taskbar: always honored — left = the
-        /// task-buttons band's end next to Start (the top end on a side-docked taskbar),
-        /// right = the end next to the notification area.
+        /// it. null/true = left (the default); only an explicit false is right. Which spot
+        /// "left" means per taskbar family — and Win11's fallback to the right side on a
+        /// left-aligned taskbar (no room left of Start) — is the placement code's own
+        /// contract: TaskbarWindow.CalcPosition / ClassicalReposition.
         /// </summary>
         public bool? OverlayOnLeft { get; set; }
 
@@ -71,12 +58,10 @@ namespace task_monitor
         public bool? OverlaySnapToStart { get; set; }
 
         /// <summary>
-        /// 悬浮模式 (设置 → 外观): true = the overlay DETACHES from the taskbar and lives on
-        /// the desktop as a free-floating card widget (the same metric grid, the same
-        /// drawing, its own card background in the detail popup's tint + rounded corners);
-        /// null = off (the default — only the enabled state is written). The taskbar keeps no
-        /// copy: 从任务栏脱离开来 means the embedded overlay is gone while this is on. The
-        /// window form is creation-time state, so App hands the flip to
+        /// 悬浮模式 (设置 → 外观): true = the overlay DETACHES from the taskbar (从任务栏脱离开来
+        /// — the taskbar keeps no copy; mechanism + rules: gotchas §36) and lives on the desktop
+        /// as a free-floating card widget; null = off (the default — only the enabled state is
+        /// written). The window form is creation-time state, so App hands the flip to
         /// <see cref="TaskbarWindow.SetFloatingMode"/>, which rebuilds the window.
         /// </summary>
         public bool? FloatingMode { get; set; }
@@ -105,10 +90,9 @@ namespace task_monitor
 
         /// <summary>
         /// 贴边隐藏 (设置 → 外观 → 悬浮模式), floating form only: null = off (the default —
-        /// only the enabled state is written). On = a widget dropped within a few px of its
-        /// monitor work area's 左/右/上 edge docks there and slides out of sight, leaving a
-        /// narrow strip; hovering the strip pulls it back out and the mouse leaving pushes it
-        /// back in. The dock itself is DERIVED from <see cref="FloatingX"/>/<
+        /// only the enabled state is written). On = a widget dropped at its monitor work
+        /// area's 左/右/上 edge docks there and hides (behaviour + the slide/peek rules:
+        /// gotchas §38). The dock itself is DERIVED from <see cref="FloatingX"/>/<
         /// <see cref="FloatingY"/> (a home at an edge reopens hidden) — nothing but this
         /// switch and the home are stored. Applied live via
         /// <see cref="TaskbarWindow.SetFloatingEdgeHide"/>; the taskbar-embedded form
@@ -118,10 +102,9 @@ namespace task_monitor
 
         /// <summary>
         /// 全屏时隐藏 (设置 → 外观 → 悬浮模式), floating form only: null = on (the default —
-        /// only the disabled state is written). On = a fullscreen application in the foreground
-        /// on the widget's own monitor (a borderless game, an F11 video, a slideshow — NOT a
-        /// maximized window) hides the widget until the foreground stops being fullscreen;
-        /// sampling and position maintenance continue while hidden. Purely a switch — the
+        /// only the disabled state is written). On = a fullscreen application in the
+        /// foreground on the widget's own monitor hides the widget until the foreground
+        /// stops being fullscreen (probe + rules: gotchas §39). Purely a switch — the
         /// fullscreen state is probed live on the tick, nothing derived is stored. Applied
         /// live via <see cref="TaskbarWindow.SetFloatingFullscreenHide"/>; the
         /// taskbar-embedded form ignores it.
@@ -234,8 +217,7 @@ namespace task_monitor
         /// endpoints in <see cref="NetInfoSampler"/>, plus the 公网延迟 ICMP ping to
         /// www.baidu.com); only the disabled state is ever written. Off stops BOTH the
         /// HTTP lookups and the latency probe — no traffic to the public internet at all
-        /// (the 公网 IPv4 / 公网延迟 cells show "—" and the v6 row collapses; the LAN-only
-        /// 本地延迟 gateway ping is unaffected). Pushed live via
+        /// (the LAN-only 本地延迟 gateway ping is unaffected). Pushed live via
         /// <see cref="TaskbarWindow.SetPublicIpLookup"/>.
         /// </summary>
         public bool? PublicIpEnabled { get; set; }
@@ -254,9 +236,7 @@ namespace task_monitor
         /// Clash/Mihomo external-controller address (设置 → 采样项目 → 网络 → Clash/Mihomo):
         /// "host:port" (an http:// prefix is tolerated), null/empty = the conventional
         /// <see cref="ClashSampler.DefaultAddress"/> (127.0.0.1:9090) — a stock core works
-        /// with zero setup, and only a custom address is ever written here. The core's
-        /// proxied per-process traffic appears in the Network detail list as standalone
-        /// "Clash"-tagged rows (ClashSampler). Pushed live via
+        /// with zero setup, and only a custom address is ever written here. Pushed live via
         /// <see cref="TaskbarWindow.SetClashApi"/>.
         /// </summary>
         public string ClashApiAddress { get; set; }
@@ -308,9 +288,14 @@ namespace task_monitor
             }
             catch (Exception ex)
             {
-                // Never lose a hand-edited or corrupt file silently — keep it as .bad.
-                try { File.Move(FilePath, FilePath + ".bad"); } catch { /* best effort */ }
-                Debug.WriteLine($"settings.yaml unreadable, using defaults: {ex}");
+                // Never lose a hand-edited or corrupt file silently — keep a copy as .bad.
+                // COPY, overwriting: net48's File.Move refuses an existing target, so after
+                // one corruption every later preservation silently failed and the next Save
+                // destroyed the file it was meant to keep. Logger (not Debug) because a
+                // Release build has no Debug listener — "所有设置都重置了" must not arrive
+                // with an empty log (§4/§5). Logger never throws.
+                try { File.Copy(FilePath, FilePath + ".bad", true); } catch { /* best effort */ }
+                Logger.Warn("settings.yaml 不可读，改用默认值（原文件已另存为 .bad）", ex);
                 return new AppSettings();
             }
         }
@@ -321,11 +306,14 @@ namespace task_monitor
                 .WithNamingConvention(CamelCaseNamingConvention.Instance)
                 .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
                 .Build();
-            // Write-then-replace: no torn reads, and a crash mid-write leaves the old file.
+            // Atomic swap. The old Delete-then-Move left a window in which settings.yaml did
+            // not exist at all: a kill there (or a failing Move — AV holding the file) lost
+            // every setting for good, while the complete .tmp sat there unread. File.Replace
+            // does the exchange in one step, so the live file is always readable.
             var tmp = FilePath + ".tmp";
             File.WriteAllText(tmp, serializer.Serialize(this));
-            if (File.Exists(FilePath)) File.Delete(FilePath);
-            File.Move(tmp, FilePath);
+            if (File.Exists(FilePath)) File.Replace(tmp, FilePath, null);
+            else File.Move(tmp, FilePath);
         }
     }
 }

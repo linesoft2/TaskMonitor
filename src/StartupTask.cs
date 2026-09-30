@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Security;
 using System.Security.Principal;
 using System.Text;
 
@@ -37,13 +38,32 @@ namespace task_monitor
         public static bool IsEnabled() => RunSchtasks($"/Query /TN \"{TaskName}\"") == 0;
 
         /// <summary>Create (overwrite) or delete the logon task. Returns false when
-        /// schtasks failed, so the caller can snap the settings toggle back to reality.</summary>
+        /// schtasks failed, so the caller can snap the settings toggle back to reality.
+        /// Never throws: the caller is a UI toggle handler, where an escaping exception
+        /// means a crash dialog (App's DispatcherUnhandledException hook) for a
+        /// best-effort feature.</summary>
         public static bool SetEnabled(bool on)
+        {
+            try
+            {
+                return SetEnabledCore(on);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"开机自启动：{(on ? "注册" : "删除")}计划任务失败（设置开关将回滚）", ex);
+                return false;
+            }
+        }
+
+        private static bool SetEnabledCore(bool on)
         {
             if (!on) return RunSchtasks($"/Delete /TN \"{TaskName}\" /F") == 0;
 
             var exe = Process.GetCurrentProcess().MainModule.FileName;
             var userSid = WindowsIdentity.GetCurrent().User.Value;
+            // XML-escape the exe path: an install path containing & or < would make the
+            // document malformed, schtasks would fail, and the toggle would silently snap
+            // back with no visible trace.
             var xml = $@"<?xml version=""1.0"" encoding=""UTF-16""?>
 <Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
   <RegistrationInfo>
@@ -72,7 +92,7 @@ namespace task_monitor
   </Settings>
   <Actions Context=""Author"">
     <Exec>
-      <Command>{exe}</Command>
+      <Command>{SecurityElement.Escape(exe)}</Command>
     </Exec>
   </Actions>
 </Task>
@@ -90,9 +110,13 @@ namespace task_monitor
             }
         }
 
-        // schtasks prints localized output we never parse — only the exit code matters.
-        // Hidden console, fully drained, bounded wait (it is a local RPC client; 10s is
-        // generous) so a wedged service can never hang the settings page.
+        // schtasks prints localized output we never parse — only the exit code matters, so
+        // the pipes stay UNredirected: with RedirectStandardOutput/Error = true and no
+        // reader, a chatty failure fills the ~4KB pipe buffer, schtasks blocks, and the
+        // bounded wait below burns its whole 10s on the UI thread and reports a false
+        // failure (the toggle then snaps back although the task was created).
+        // CreateNoWindow keeps the console hidden; the wait stays bounded so a wedged
+        // service can never hang the settings page.
         private static int RunSchtasks(string arguments)
         {
             try
@@ -103,8 +127,6 @@ namespace task_monitor
                     Arguments = arguments,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
                 }))
                 {
                     if (p == null) return -1;
@@ -115,7 +137,9 @@ namespace task_monitor
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"schtasks {arguments} failed: {ex}");
+                // Logger, not Debug: a Release build has no Debug listener, and a failed
+                // 开机自启动 toggle is user-visible (§4/§5).
+                Logger.Warn($"开机自启动：schtasks {arguments} 调用失败", ex);
                 return -1;
             }
         }

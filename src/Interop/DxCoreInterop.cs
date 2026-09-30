@@ -83,6 +83,12 @@ namespace task_monitor
         [PreserveSig]
         int CreateAdapterList(uint numAttributes, IntPtr filterAttributes, ref Guid riid,
             out IDXCoreAdapterList ppvAdapterList);
+        // Slot 2. Declared even though nothing calls it: a COM vtable is positional, so
+        // omitting a slot silently shifts every method below onto the wrong function
+        // (dxcore_interface.h order: CreateAdapterList, GetAdapterByLuid,
+        // IsNotificationTypeSupported, RegisterEventNotification, UnregisterEventNotification).
+        [PreserveSig]
+        int GetAdapterByLuid(ref long adapterLuid, ref Guid riid, out IDXCoreAdapter ppvAdapter);
         [PreserveSig]
         [return: MarshalAs(UnmanagedType.I1)]
         bool IsNotificationTypeSupported(DXCoreNotificationType notificationType);
@@ -227,8 +233,14 @@ namespace task_monitor
         /// CoUninitialize (the thread lives for the process lifetime and shares COM with WPF).</summary>
         public static void EnsureComApartment()
         {
-            CoInitializeEx(IntPtr.Zero, 0 /* COINIT_APARTMENTTHREADED */);
+            CoInitializeEx(IntPtr.Zero, CoInitApartmentThreaded);
         }
+
+        // objbase.h: COINIT_APARTMENTTHREADED = 0x2, COINIT_MULTITHREADED = 0x0. Passing the
+        // literal 0 asked for the MTA while the comment (and the STA thread this runs on)
+        // said apartment-threaded — on a thread that had not joined an apartment yet that
+        // would have bound every RCW created here to the MTA.
+        private const uint CoInitApartmentThreaded = 0x2;
 
         [DllImport("ole32.dll", ExactSpelling = true)]
         private static extern int CoInitializeEx(IntPtr pvReserved, uint dwCoInit);

@@ -412,7 +412,6 @@ namespace task_monitor
                                  : orect.left - w - 8;   // left of a right-docked one
             }
 
-            // Clamp inside the overlay's monitor work area (both axes, any edge).
             IntPtr mon = WindowInterop.MonitorFromWindow(overlay, WindowInterop.MONITOR_DEFAULTTONEAREST);
             var mi = new WindowInterop.MONITORINFO { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<WindowInterop.MONITORINFO>() };
             if (mon != IntPtr.Zero && WindowInterop.GetMonitorInfoW(mon, ref mi))
@@ -497,7 +496,6 @@ namespace task_monitor
             PinStateChanged?.Invoke(this, pinned);
         }
 
-        // Flyout position saved when pinned; restored on unpin.
         private double _prePinLeft;
         private double _prePinTop;
 
@@ -543,7 +541,6 @@ namespace task_monitor
         {
             // A pinned window keeps living on focus loss — it closes via its ✕ button.
             if (_dismissed || IsPinned) return;
-            // Any focus loss → tear down (a fresh window is created on next open).
             _dismissed = true;
             _owner.RequestDeselect(_column);
             Close();

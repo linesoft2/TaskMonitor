@@ -41,9 +41,9 @@ namespace task_monitor
 
             _baseMhz = QueryPowerMaxMhz();
 
-            bool opened = SystemInfo.PdhOpenQueryW(IntPtr.Zero, 0, out _pdhQuery) == 0
+            bool opened = SystemInfo.PdhOpenQueryW(IntPtr.Zero, IntPtr.Zero, out _pdhQuery) == 0
                           && SystemInfo.PdhAddEnglishCounterW(_pdhQuery,
-                                SystemInfo.CpuProcessorPerformanceCounterPath, 0, out _perfCounter) == 0;
+                                SystemInfo.CpuProcessorPerformanceCounterPath, IntPtr.Zero, out _perfCounter) == 0;
             if (opened)
             {
                 SystemInfo.PdhCollectQueryData(_pdhQuery); // seed baseline (discarded)
@@ -66,7 +66,6 @@ namespace task_monitor
             };
         }
 
-        // ---------- live CPU frequency ----------
         // % Processor Performance is the ratio of actual cycles to nominal, so it
         // exceeds 100% under turbo boost: live MHz = base * pct / 100. This is the
         // PDH counter Task Manager reads (via PCW); the power API's CurrentMhz is

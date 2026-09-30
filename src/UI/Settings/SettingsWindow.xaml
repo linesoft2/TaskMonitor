@@ -69,7 +69,6 @@
             </local:TouchDragScrollViewer.Physics>
             <StackPanel Margin="44,8,44,32">
 
-                <!-- ============================== 通用 ============================== -->
                 <TextBlock Style="{StaticResource SectionHeaderStyle}" Margin="1,4,0,6" Text="通用" />
 
                 <ui:SettingsCard Header="开机自启"
@@ -111,7 +110,6 @@
                     </ui:SettingsExpander.Items>
                 </ui:SettingsExpander>
 
-                <!-- ============================== 外观 ============================== -->
                 <TextBlock Style="{StaticResource SectionHeaderStyle}" Text="外观" />
 
                 <ui:SettingsCard Header="主题"
@@ -215,7 +213,6 @@
                     </ui:SettingsExpander.Items>
                 </ui:SettingsExpander>
 
-                <!-- ============================== 采样 ============================== -->
                 <!-- One card per metric; the toggle enables/disables that metric's
                      sampling entirely (off = the metric is hidden from the taskbar
                      overlay, the later metrics shift forward to fill its slot).
@@ -350,7 +347,6 @@
                     </ui:SettingsExpander.Items>
                 </ui:SettingsExpander>
 
-                <!-- ============================== 关于 ============================== -->
                 <TextBlock Style="{StaticResource SectionHeaderStyle}" Text="关于" />
 
                 <!-- The about card is an expander: app identity in the header, the
@@ -450,10 +446,8 @@
                                VerticalAlignment="Center"
                                Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                     <ui:SettingsExpander.Items>
-                        <!-- External-link cards. The URLs are placeholders for now (empty
-                             in the code-behind — clicks no-op until they're filled in).
-                             The GitHub icon is the official GitHub mark path (its
-                             fill-rule=evenodd is WPF's default), tinted by the theme. -->
+                        <!-- External-link cards. The GitHub icon is the official GitHub mark
+                             path (its fill-rule=evenodd is WPF's default), tinted by the theme. -->
                         <ui:SettingsCard Header="GitHub"
                                          IsClickEnabled="True"
                                          Click="GitHubCard_Click">

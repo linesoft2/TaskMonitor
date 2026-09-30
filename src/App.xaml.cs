@@ -32,7 +32,7 @@ namespace task_monitor
         // The transient (unpinned) flyout — at most one; torn down on every toggle.
         private DetailWindow _detail;
         // Pinned windows — one per column at most; survive focus loss and coexist with
-        // the transient flyout. All open windows get the per-second snapshot push.
+        // the transient flyout. All open windows get every snapshot push (one per tick).
         private readonly List<DetailWindow> _pinned = new List<DetailWindow>();
 
         // Single-instance guard handle — see OnStartup. Kept alive for the whole process
@@ -137,9 +137,6 @@ namespace task_monitor
                 _taskbar?.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
             };
 
-            // No main window — this is a taskbar widget. The overlay runs on its own
-            // STA thread; DetailWindow is created on demand. ShutdownMode=OnExplicitShutdown
-            // (set in App.xaml) keeps the process alive with no persistent WPF window.
             StartTaskbar();
 
             // 卡死看门狗 — see CheckOverlayHealth. A freeze that heals itself leaves NOTHING
@@ -171,17 +168,21 @@ namespace task_monitor
                 SystemInfo.TrimMemory();
             }), System.Windows.Threading.DispatcherPriority.Background);
 
-            // Startup update check (设置 → 通用 → 检查更新 / 更新源): one fetch on a pool
-            // thread; pops the 发现新版本 dialog when the configured source has a newer
-            // tag (不再提醒 for that exact tag persists to settings.yaml). Best-effort —
-            // never blocks startup, never crashes the app.
             UpdateChecker.CheckOnce(_config, TrySaveConfig);
         }
 
         protected override void OnExit(ExitEventArgs e)
         {
             Logger.Info("退出");
-            _stopping = true;   // stop the overlay-recreate loop from re-entering Start()
+            _stopping = true;
+            // Flush a pending 透明度 debounce first: the timer dies with the dispatcher, so
+            // quitting within its 500ms window silently reverted the last slider step even
+            // though the comment above the timer promises the value still lands.
+            if (_configSaveDebounce?.IsEnabled == true)
+            {
+                _configSaveDebounce.Stop();
+                TrySaveConfig();
+            }
             // Classical (Win10) taskbar path: the overlay's WM_DESTROY restores the
             // shrunk task-buttons band. Ask for that destroy and give the taskbar thread
             // a bounded moment to run it — it's a background thread, so without the join
@@ -214,7 +215,6 @@ namespace task_monitor
             // re-applied to open windows live via the ActualApplicationThemeChanged hook.
             ApplyThemeSetting();
 
-            // Already elevated (dev shell, or the relaunched child): nothing to do.
             if (IsElevated()) return true;
 
             if (_config.ElevationConsent == true)
@@ -228,16 +228,20 @@ namespace task_monitor
             }
 
             // First run (or previously refused — nothing was written then): ask.
+            bool consented = false;
             if (new ConsentDialog().ShowDialog() == true)
             {
+                consented = true;
                 Logger.Info("提权门：用户首次同意, 持久化后 runas 自我重启提升权限");
                 _config.ElevationConsent = true;
                 TrySaveConfig();        // best effort — a read-only install dir degrades to "ask again"
                 TryRelaunchElevated();
             }
-            // Refused (不允许 / ✕ / Esc), or the UAC prompt was cancelled: exit rather
-            // than run degraded — "始终保持在管理员权限的状态下运行".
-            Logger.Info("提权门：未提权（拒绝或 UAC 取消）");
+            // Refused (不允许 / ✕ / Esc), or the UAC prompt was cancelled (reported by
+            // TryRelaunchElevated's own catch): exit rather than run degraded —
+            // "始终保持在管理员权限的状态下运行". Logged only on the refusal path: an
+            // unconditional line here made a consented relaunch look refused in the log.
+            if (!consented) Logger.Info("提权门：未提权（用户拒绝或对话框取消）");
             Shutdown();
             return false;
         }
@@ -291,7 +295,6 @@ namespace task_monitor
             // Initial overlay placement + sampling cadence from settings.yaml (the
             // settings page reports later changes via OnOverlayPlacementChanged /
             // OnSampleIntervalChanged).
-            // OverlayOnLeft null = 靠左 (the default); only an explicit false is right.
             _taskbar.SetPlacement(_config.OverlayOnLeft != false, _config.OverlaySnapToStart == true);
             _taskbar.SetSampleInterval(_config.SampleIntervalMs ?? 1000);
             _taskbar.SetMetricSamplingMask(SamplingMaskOf(_config));
@@ -352,6 +355,11 @@ namespace task_monitor
                             _taskbar.LastTickTickCount = (long)SystemInfo.GetTickCount64();
                             Thread.Sleep(delay);
                             _taskbar.LastTickTickCount = (long)SystemInfo.GetTickCount64();
+                            // Already backed off above. Falling through to the 2s below took
+                            // it TWICE, so a 悬浮模式 flip waited ~2.15s (150+2000) instead of
+                            // the documented ~150ms — exactly the blink this branch exists to
+                            // avoid — and an explorer restart waited ~4s.
+                            continue;
                         }
                     }
                     catch (Exception ex)
@@ -359,6 +367,7 @@ namespace task_monitor
                         // The taskbar overlay is non-critical; never let it take the app down.
                         Logger.Error("任务栏覆盖层 Start() 抛异常，2s 后重建", ex);
                     }
+                    // FAILURE backoff only — the ordinary return already slept its own delay.
                     if (!_stopping) Thread.Sleep(2000);
                 }
             })
@@ -385,8 +394,6 @@ namespace task_monitor
             CloseDetail();
             if (column < 0) return;
 
-            // A pinned window for this column already shows it — bring it to front
-            // instead of opening a duplicate.
             var existing = _pinned.Find(w => w.Column == column);
             if (existing != null)
             {
@@ -416,7 +423,7 @@ namespace task_monitor
                 ScheduleIdleTrim();
             };
             _detail.ShowColumn(column);
-            ScheduleDetailKeepOut();   // the freshly placed popup is the widget's new keep-out
+            ScheduleDetailKeepOut();
         }
 
         // A window that pins itself leaves the transient slot (so a new popup may open
@@ -503,7 +510,6 @@ namespace task_monitor
             d?.Close();
         }
 
-        // ---------- Idle working-set trim ----------
         // A detail window closing leaves its whole UI tree (BAML-built controls, charts,
         // acrylic resources) resident until a GC happens to run — which, for a process
         // that then sits idle, may be never. Trim once the LAST window is gone. The check
@@ -549,6 +555,11 @@ namespace task_monitor
 
         private void CheckOverlayHealth()
         {
+            // The UI queue is still pumped during OnExit's Join (§41), so this tick can fire
+            // mid-teardown. Without the guard, a quit that crossed the 45s zombie threshold
+            // would run the self-heal: spawn a successor process and hard-exit this one —
+            // "退出 didn't stick, the widget came back".
+            if (_stopping) return;
             var tb = _taskbar;
             if (tb == null) return;
             long now = (long)SystemInfo.GetTickCount64();
@@ -1131,8 +1142,7 @@ namespace task_monitor
                 _menuFloatingFullscreenHide.IsEnabled = isFloating;
             };
 
-            // There is no main window, so the menu needs an invisible host window to
-            // attach to. 1×1, transparent, offscreen, topmost, non-activating → unseen.
+            // There is no main window, so the menu needs an invisible host window to attach to.
             _menuHost = new Window
             {
                 Width = 1, Height = 1,

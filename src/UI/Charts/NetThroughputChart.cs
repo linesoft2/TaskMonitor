@@ -9,9 +9,8 @@ namespace task_monitor
     /// <summary>
     /// Bidirectional network throughput chart: upload (↑) is drawn as a line + faint area
     /// in the UPPER half (growing up from the centerline), and download (↓) is mirrored in
-    /// the LOWER half (growing down from the centerline), each in its own color. Both halves
-    /// share one vertical scale — auto-sized to the larger of the two series' max in the
-    /// visible window — so up and down stay directly comparable. 60-tick rolling history.
+    /// the LOWER half (growing down from the centerline), each in its own color. 60-tick
+    /// rolling history; each half scales to its own series' peak (see <c>OnRender</c>).
     ///
     /// Hand-drawn via DrawingContext with no charting library (same pattern as
     /// <see cref="UsageHistoryChart"/>). Used only by the Network detail panel.
@@ -299,7 +298,7 @@ namespace task_monitor
             dc.DrawLine(gridPen, new Point(0, h * 0.25), new Point(w, h * 0.25));
             dc.DrawLine(gridPen, new Point(0, h * 0.75), new Point(w, h * 0.75));
 
-            // Vertical divides the 60-second history into 4 segments (interior only).
+            // Vertical divides the 60-tick history (30/60/120 s at 0.5/1/2 s 采样间隔) into 4 segments (interior only).
             for (int i = 1; i <= 3; i++)
             {
                 double x = w * (i / 4.0);
@@ -377,7 +376,6 @@ namespace task_monitor
 
             dc.DrawGeometry(fillBrush, null, areaGeometry);
 
-            // Line stroke on top.
             var lineFigure = new PathFigure();
             bool lineStarted = false;
 

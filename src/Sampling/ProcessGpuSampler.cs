@@ -72,7 +72,7 @@ namespace task_monitor
         {
             try
             {
-                uint rc = SystemInfo.PdhOpenQueryW(IntPtr.Zero, 0, out _query);
+                uint rc = SystemInfo.PdhOpenQueryW(IntPtr.Zero, IntPtr.Zero, out _query);
                 if (rc != 0)
                 {
                     Logger.Warn($"PdhOpenQueryW 失败 rc=0x{rc:X8}——按进程 GPU 列表保持为空");
@@ -80,7 +80,7 @@ namespace task_monitor
                 }
                 // English counter path so the sampler works on any UI locale (same API the
                 // CPU-speed sampler uses; the GPU Engine counter set itself is locale-named).
-                rc = SystemInfo.PdhAddEnglishCounterW(_query, CounterPath, 0, out _counter);
+                rc = SystemInfo.PdhAddEnglishCounterW(_query, CounterPath, IntPtr.Zero, out _counter);
                 if (rc != 0)
                 {
                     Logger.Warn($"PdhAddEnglishCounterW(GPU Engine) 失败 rc=0x{rc:X8}（无 GPU 引擎计数器集？）——按进程 GPU 列表保持为空");
@@ -173,7 +173,7 @@ namespace task_monitor
                 var rows = new List<KeyValuePair<int, GpuProcAgg>>(byPid);
                 rows.Sort((a, b) =>
                 {
-                    int c = b.Value.MaxPct.CompareTo(a.Value.MaxPct); // desc by GPU%
+                    int c = b.Value.MaxPct.CompareTo(a.Value.MaxPct);
                     return c != 0 ? c : a.Key.CompareTo(b.Key);
                 });
 
@@ -184,7 +184,7 @@ namespace task_monitor
                 {
                     int pid = rows[i].Key;
                     var agg = rows[i].Value;
-                    string exePath = ResolveExePath(pid);
+                    string exePath = ResolveExePath(pid, pidToName);
                     result.Add(new ProcessInfo
                     {
                         Name = ResolveName(pid, exePath, pidToName),
@@ -196,8 +196,13 @@ namespace task_monitor
                 }
                 return mergeByPath ? ProcessListMerger.MergeByPath(result, p => p.GpuPercent, TopN) : result;
             }
-            catch
+            catch (Exception ex)
             {
+                // WarnOnce, not a plain Warn: this path runs every tick (§5). Without ANY log
+                // line a permanent failure (a changed counter set, a bad stride after an OS
+                // update, permissions) was indistinguishable from "no GPU engines" and could
+                // never be diagnosed from the log.
+                Logger.WarnOnce("proc-gpu-sample", "按进程 GPU 采样失败——本 tick 列表为空", ex);
                 return empty; // never let a sampling failure take down the overlay
             }
         }
@@ -262,6 +267,11 @@ namespace task_monitor
                 int part = inst.IndexOf("_part_", ns, StringComparison.Ordinal);
                 engType = NormalizeEngineName(part >= 0 ? inst.Substring(ns, part - ns) : inst.Substring(ns));
             }
+            // A missing or empty engtype would render a blank 引擎 cell where Task Manager
+            // shows "Engine N" (its ParseCounterName synthesizes the same name, as the note
+            // above says). Build it from the _eng_<n> ordinal we already have.
+            if (string.IsNullOrEmpty(engType) && ScanDecToken(inst, "_eng_", out int engOrdinal))
+                engType = "Engine " + engOrdinal;
             return true;
         }
 
@@ -286,7 +296,6 @@ namespace task_monitor
             return true;
         }
 
-        // Reads hex digits at p (IndexOf-positioned), advances p past them.
         private static bool ScanHex(string s, ref int p, out uint value)
         {
             value = 0;
@@ -305,7 +314,6 @@ namespace task_monitor
             return p > start;
         }
 
-        // Finds "_token_" and parses the decimal number right after it.
         private static bool ScanDecToken(string s, string token, out int value)
         {
             value = 0;
@@ -359,11 +367,22 @@ namespace task_monitor
 
         // Cached per PID across ticks. Returns null for processes we can't open (protected/
         // system/dead) — the UI shows its default icon and "PID {pid}" name for those.
-        private string ResolveExePath(int pid)
+        // The kernel ImageName from the walk validates the cache: Windows recycles PIDs, and
+        // without the check a recycled PID kept the DEAD process's exe path — the row then
+        // showed the right name (the name comes from the walk) with the previous process's
+        // icon. Same guard as ProcessCpuSampler.ResolveExePath.
+        private string ResolveExePath(int pid, Dictionary<int, string> pidToName)
         {
-            if (_exeByPid.TryGetValue(pid, out string cached)) return cached;
+            string imageFileName = null;
+            pidToName?.TryGetValue(pid, out imageFileName);
+
+            if (_exeByPid.TryGetValue(pid, out string cached) &&
+                (cached == null || string.IsNullOrEmpty(imageFileName) ||
+                 cached.EndsWith(imageFileName, StringComparison.OrdinalIgnoreCase)))
+                return cached;
+
             string path = SystemInfo.QueryProcessImageFileName(pid);
-            _exeByPid[pid] = path; // cache hit or miss (null) — both stored
+            _exeByPid[pid] = path;
             return path;
         }
     }

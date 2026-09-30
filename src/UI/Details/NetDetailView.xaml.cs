@@ -3,10 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Interop;
 using System.Windows.Documents;
 using System.Windows.Threading;
 using System.Threading;
@@ -25,7 +22,7 @@ namespace task_monitor
     /// process's real-time upload/download rate (SRUM real-time API — same source as Task
     /// Manager's 网络 column, but up/down kept separate).
     /// Self-contained — owns its chart theming, the hover tooltip, and the icon cache. Created
-    /// fresh per popup open; refreshed each second by <see cref="DetailWindow"/>.
+    /// fresh per popup open; refreshed on every sampling tick by <see cref="DetailWindow"/>.
     /// </summary>
     public partial class NetDetailView : UserControl, IDetailView
     {
@@ -37,18 +34,11 @@ namespace task_monitor
         // scales its tick offset by it (settings 采样间隔).
         private int _intervalMs = 1000;
 
-        // Per-exe-path icon cache (frozen BitmapSources). Refresh runs every second on the
-        // UI thread; after the first tick every path is a cache hit, so icon extraction
-        // (a shell call) only happens once per distinct exe while the popup is open.
-        private readonly Dictionary<string, ImageSource> _iconByPath =
-            new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
-        private ImageSource _defaultIcon;
-
-        // Open-tooltip state, so the per-second Refresh can update the shown value
-        // without waiting for the mouse to move (which is what re-fires MouseMove).
-        private Popup _tipPopup;
-        private TextBlock _tipText;
-        private int _tipIndex = -1;
+        // Hover tooltip + the per-exe icon cache — shared implementations, see UI/Common. The
+        // tip state lives in the host so the per-second Refresh can update a shown value
+        // without waiting for the mouse to move (what re-fires MouseMove).
+        private readonly ChartTipHost _tip = new ChartTipHost();
+        private readonly ProcessIconCache _icons = new ProcessIconCache();
 
         // Click-to-copy feedback: the just-copied IP button flashes "已复制" for a moment,
         // then the timer restores the address (kept in Tag).
@@ -69,7 +59,7 @@ namespace task_monitor
             InitializeComponent();
 
             ApplyTheme(dark);
-            AttachTip();
+            _tip.Attach(NetChart, NetChart.HitTest, HistoryTip, HistoryTipText, FormatTip);
 
             ProcessListTip.Attach(NetList, ProcessTip, ProcessTipDesc, ProcessTipPath);
 
@@ -167,14 +157,13 @@ namespace task_monitor
             PublicRttRun.Text = FormatRtt(info.PublicRttMs);
 
             // Keep the open tooltip in lockstep with this per-second refresh.
-            if (_tipPopup is not null && _tipPopup.IsOpen && _tipText is not null && _tipIndex >= 0)
-                _tipText.Text = FormatTip(_tipIndex);
+            _tip.Refresh();
 
             // Per-process list: resolve each row's icon (cache-backed) and bind.
             if (s.TopNetProcesses != null)
             {
                 foreach (var p in s.TopNetProcesses)
-                    p.Icon = ResolveIcon(p.ExePath);
+                    p.Icon = _icons.Resolve(p.ExePath);
                 NetList.ItemsSource = s.TopNetProcesses;
             }
         }
@@ -354,47 +343,6 @@ namespace task_monitor
             }
         }
 
-        // ---------- Custom WPF tooltip for the throughput chart ----------
-        private void AttachTip()
-        {
-            // Hit-test on every mouse move and place the popup next to the cursor. Keep the
-            // hovered index so Refresh() can update the tooltip text each second without
-            // waiting for the mouse to move.
-            var lastMouse = new Point();
-            NetChart.MouseMove += (_, e) =>
-            {
-                lastMouse = e.GetPosition(NetChart);
-                int index = NetChart.HitTest(lastMouse);
-
-                if (index < 0)
-                {
-                    HistoryTip.IsOpen = false;
-                    _tipPopup = null;
-                    return;
-                }
-
-                _tipIndex = index;
-                _tipText = HistoryTipText;
-                _tipPopup = HistoryTip;
-                HistoryTipText.Text = FormatTip(index);
-                if (string.IsNullOrEmpty(HistoryTipText.Text))
-                {
-                    HistoryTip.IsOpen = false;
-                    _tipPopup = null;
-                    return;
-                }
-                HistoryTip.HorizontalOffset = lastMouse.X + 14;
-                HistoryTip.VerticalOffset = lastMouse.Y + 14;
-                HistoryTip.IsOpen = true;
-            };
-
-            NetChart.MouseLeave += (_, _) =>
-            {
-                HistoryTip.IsOpen = false;
-                _tipPopup = null;
-            };
-        }
-
         private string FormatTip(int i)
         {
             var up = NetChart.UpValues;
@@ -407,93 +355,6 @@ namespace task_monitor
             string ups = hasUp ? NetRateFormatter.Format((long)up[i].Value) : "—";
             string downs = hasDown ? NetRateFormatter.Format((long)down[i].Value) : "—";
             return $"{when} · ↑ {ups}  ↓ {downs}";
-        }
-
-        // ---------- process icons ----------
-        // Source size for the cached icon bitmaps. The list slot renders at 16×16 logical
-        // pixels, so 48 source pixels covers up to ~3× DPI as a clean downscale (and the
-        // shell pulls the jumbo-capable icon variant modern exes ship, not the 16/32px one
-        // Icon.ExtractAssociatedIcon is capped at — that one reads blurry on high-DPI).
-        private const int IconPixelSize = 48;
-
-        // Resolve an exe's icon from its full path, caching the frozen ImageSource. Paths we
-        // can't open an icon for are cached as the default icon so we don't retry every tick.
-        private ImageSource ResolveIcon(string exePath)
-        {
-            if (string.IsNullOrEmpty(exePath)) return DefaultIcon;
-            if (_iconByPath.TryGetValue(exePath, out ImageSource cached)) return cached;
-
-            ImageSource src = TryExtractIcon(exePath) ?? DefaultIcon;
-            _iconByPath[exePath] = src;
-            return src;
-        }
-
-        // High-resolution path: IShellItemImageFactory → HBITMAP → BitmapSource. Returns null
-        // when the shell can't produce a bitmap for the path; throws on a mid-conversion
-        // failure (caller catches and falls back to the legacy icon).
-        private static BitmapSource ExtractHighRes(string path)
-        {
-            IntPtr hbmp = ShellInterop.GetIconBitmap(path, IconPixelSize);
-            if (hbmp == IntPtr.Zero) return null;
-            try
-            {
-                var src = Imaging.CreateBitmapSourceFromHBitmap(
-                    hbmp, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-                src.Freeze(); // cross-thread safe; the list is produced on the taskbar thread
-                return src;
-            }
-            finally { ShellInterop.DeleteObject(hbmp); }
-        }
-
-        private static ImageSource TryExtractIcon(string path)
-        {
-            // Prefer the high-resolution shell image (IShellItemImageFactory — what Task
-            // Manager uses). Any failure here falls through to the proven legacy path below,
-            // so the popup never crashes on a single bad icon.
-            try
-            {
-                var hi = ExtractHighRes(path);
-                if (hi != null) return hi;
-            }
-            catch { /* fall through to the legacy path below */ }
-
-            // Fallback: the legacy associated icon (≤32px) when the modern API can't resolve
-            // the path (UNC, some packaged apps, missing/inaccessible image).
-            try
-            {
-                using (var icon = System.Drawing.Icon.ExtractAssociatedIcon(path))
-                {
-                    if (icon == null) return null;
-                    var src = Imaging.CreateBitmapSourceFromHIcon(
-                        icon.Handle, Int32Rect.Empty, BitmapSizeOptions.FromWidthAndHeight(IconPixelSize, IconPixelSize));
-                    src.Freeze();
-                    return src;
-                }
-            }
-            catch
-            {
-                return null; // missing/inaccessible image — fall back to the default icon
-            }
-        }
-
-        private ImageSource DefaultIcon
-        {
-            get
-            {
-                if (_defaultIcon == null)
-                {
-                    try
-                    {
-                        // SystemIcons.Application is a shared system icon — do not dispose it.
-                        var sysIcon = System.Drawing.SystemIcons.Application;
-                        _defaultIcon = Imaging.CreateBitmapSourceFromHIcon(
-                            sysIcon.Handle, Int32Rect.Empty, BitmapSizeOptions.FromWidthAndHeight(IconPixelSize, IconPixelSize));
-                        _defaultIcon.Freeze();
-                    }
-                    catch { /* keep null; rows with no icon just show a blank slot */ }
-                }
-                return _defaultIcon;
-            }
         }
 
         // ---------- Theming: tooltip surfaces + paint the chart + tie the header's ↑/↓ values to the line colors ----------
@@ -509,15 +370,12 @@ namespace task_monitor
 
         private void ApplyChartTheme()
         {
-            var up = GetUpColor();     // green
-            var down = GetDownColor(); // accent
-
-            NetChart.UpColor = up;
-            NetChart.DownColor = down;
-            NetChart.GridColor = FaintBase(0x1A);
-            NetChart.AxisColor = FaintBase(0x40);
-            NetChart.FrameColor = FaintBase(0x66);
-            NetChart.LabelColor = GetLabelGray();
+            NetChart.UpColor = GetUpColor();                 // green
+            NetChart.DownColor = ChartPalette.Accent;
+            NetChart.GridColor = ChartPalette.FaintBase(0x1A);
+            NetChart.AxisColor = ChartPalette.FaintBase(0x40);
+            NetChart.FrameColor = ChartPalette.FaintBase(0x66);
+            NetChart.LabelColor = ChartPalette.LabelGray;
             NetChart.UpFillOpacity = 48.0 / 255.0;
             NetChart.DownFillOpacity = 48.0 / 255.0;
 
@@ -525,31 +383,11 @@ namespace task_monitor
             // lines are tinted. The arrow glyph still disambiguates direction.
         }
 
-        // Theme-adaptive gray for the chart's edge annotations (each half's scale ceiling) —
-        // the same secondary text color the rest of the panel uses for muted labels.
-        private static Color GetLabelGray()
-        {
-            var brush = Application.Current.TryFindResource("TextFillColorSecondaryBrush") as SolidColorBrush;
-            return brush?.Color ?? Color.FromRgb(0x88, 0x88, 0x88);
-        }
-
-        // Download keeps the app's accent (the on-brand "primary" hue used by the CPU/RAM lines);
-        // upload gets a distinct green. If the user's accent happens to be greenish these two
-        // collapse — tweak GetUpColor (or swap) in that case.
+        // Upload gets a distinct green; download keeps the app's accent (ChartPalette.Accent —
+        // the on-brand "primary" hue the CPU/RAM lines use). If the user's accent happens to be
+        // greenish these two collapse — swap them in that case.
         private Color GetUpColor()
             => _dark ? Color.FromRgb(0x3F, 0xB9, 0x50)   // brighter green reads on dark acrylic
                      : Color.FromRgb(0x0A, 0x8C, 0x4B);   // deeper green reads on light
-
-        private static Color GetDownColor()
-            => (Color?)Application.Current.TryFindResource("SystemAccentColor") ?? Color.FromRgb(0x00, 0x78, 0xD4);
-
-        // SystemBaseLowColor adapts to the theme; re-tinted to the requested alpha for grid /
-        // axis / frame so the chart chrome matches the CPU/RAM chart's faint guides.
-        private static Color FaintBase(byte alpha)
-        {
-            var color = (Color?)Application.Current.TryFindResource("SystemBaseLowColor")
-                        ?? Color.FromArgb(0x33, 0x00, 0x00, 0x00);
-            return Color.FromArgb(alpha, color.R, color.G, color.B);
-        }
     }
 }

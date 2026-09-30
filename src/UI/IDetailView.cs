@@ -3,10 +3,10 @@ using System.Windows.Controls;
 namespace task_monitor
 {
     /// <summary>
-    /// A self-contained detail panel for one metric (CPU/RAM/Disk/Net). Created fresh per
-    /// popup open by <see cref="DetailWindow"/> and refreshed each second with the
-    /// latest <see cref="SystemSnapshot"/>. Each metric's panel owns its own header,
-    /// content and interactions, so they can diverge freely.
+    /// A self-contained detail panel for one metric (CPU/内存/磁盘/GPU/网络). Created fresh
+    /// per popup open by <see cref="DetailWindow"/> and refreshed on every sampling tick
+    /// (采样间隔 — 0.5/1/2 s) with the latest <see cref="SystemSnapshot"/>. Each metric's
+    /// panel owns its own header, content and interactions, so they can diverge freely.
     /// </summary>
     internal interface IDetailView
     {

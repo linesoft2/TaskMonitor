@@ -6,9 +6,9 @@ using System.Windows.Media;
 namespace task_monitor
 {
     /// <summary>
-    /// Lightweight WPF-only area/line chart for a 0–100 usage history (CPU% or RAM%).
-    /// Renders directly via DrawingContext with no external charting library.
-    /// Used by both the CPU and RAM detail panels.
+    /// Lightweight WPF-only area/line chart for a 0–100 usage history (CPU / RAM /
+    /// 磁盘 / GPU %). Renders directly via DrawingContext with no external charting
+    /// library.
     /// </summary>
     public sealed class UsageHistoryChart : FrameworkElement
     {
@@ -172,7 +172,7 @@ namespace task_monitor
                 dc.DrawLine(gridPen, new Point(0, y), new Point(w, y));
             }
 
-            // Vertical divides the 60-second history into 4 segments (interior only).
+            // Vertical divides the 60-tick history (30/60/120 s at 0.5/1/2 s 采样间隔) into 4 segments (interior only).
             for (int i = 1; i <= 3; i++)
             {
                 double x = w * (i / 4.0);
@@ -245,7 +245,6 @@ namespace task_monitor
 
             dc.DrawGeometry(fillBrush, null, areaGeometry);
 
-            // Stroke on top of the area.
             var lineFigure = new PathFigure();
             bool lineStarted = false;
 

@@ -161,7 +161,6 @@ namespace task_monitor
             sample.ProcessCount = processCount;
             sample.CompressedBytes = compressedBytes;
 
-            // Promote the cursor: this tick's cycles become next tick's baseline.
             _prevCycles.Clear();
             foreach (var e in entries) _prevCycles[e.Pid] = e.CycleTime;
 
@@ -191,10 +190,9 @@ namespace task_monitor
             }
             _prevIoTickMs = nowMs;
 
-            // Top-by-CPU (CPU detail list): rank real processes (exclude Idle) by CPU%.
             entries.Sort((a, b) =>
             {
-                int c = b.Delta.CompareTo(a.Delta); // desc by cycle delta (= desc by CPU%)
+                int c = b.Delta.CompareTo(a.Delta);
                 return c != 0 ? c : string.CompareOrdinal(a.Name, b.Name);
             });
             foreach (var e in entries)
@@ -216,15 +214,14 @@ namespace task_monitor
             if (mergeByPath)
                 sample.TopProcesses = ProcessListMerger.MergeByPath(sample.TopProcesses, p => p.CpuPercent, TopN);
 
-            // Top-by-memory (RAM detail list): same walk, ranked by private working set.
             entries.Sort((a, b) =>
             {
-                int c = b.WorkingSet.CompareTo(a.WorkingSet); // desc by working set
+                int c = b.WorkingSet.CompareTo(a.WorkingSet);
                 return c != 0 ? c : string.CompareOrdinal(a.Name, b.Name);
             });
             foreach (var e in entries)
             {
-                if (e.Pid == 0 || e.Name.Equals("Memory Compression", StringComparison.OrdinalIgnoreCase)) continue; // exclude Idle + Memory Compression (a kernel pseudo-process; its WS is read separately as the "(compressed)" value)
+                if (e.Pid == 0 || e.Name.Equals("Memory Compression", StringComparison.OrdinalIgnoreCase)) continue;
                 long ws = e.WorkingSet < 0 ? 0 : e.WorkingSet;
 
                 sample.TopMemoryProcesses.Add(new ProcessInfo
@@ -244,7 +241,7 @@ namespace task_monitor
             // Task Manager's per-process disk column (not the header's all-I/O counters).
             entries.Sort((a, b) =>
             {
-                int c = (b.ReadRate + b.WriteRate).CompareTo(a.ReadRate + a.WriteRate); // desc by total rate
+                int c = (b.ReadRate + b.WriteRate).CompareTo(a.ReadRate + a.WriteRate);
                 return c != 0 ? c : string.CompareOrdinal(a.Name, b.Name);
             });
             foreach (var e in entries)
@@ -413,7 +410,7 @@ namespace task_monitor
                 return cached;
 
             string path = SystemInfo.QueryProcessImageFileName(pid);
-            _exeByPid[pid] = path; // cache hit or miss (null) — both stored
+            _exeByPid[pid] = path;
             return path;
         }
     }

@@ -223,7 +223,6 @@ namespace task_monitor
             info.GatewayRttMs = gateway != null ? ProbeRttMs(gateway.ToString()) : -1;
             info.PublicRttMs = _publicIpLookupEnabled ? ProbeRttMs(PublicProbeHost) : -1;
 
-            // Public IP — cached; an adapter switch re-triggers the lookup immediately.
             if (nic.Id != _adapterId)
             {
                 _adapterId = nic.Id;
@@ -297,7 +296,7 @@ namespace task_monitor
         // wlanapi call in the whole sampler lives inside TryQueryWifiLive below.
         private void TryRefreshWifiCache(NetworkInterface nic)
         {
-            if (nic.NetworkInterfaceType != NetworkInterfaceType.Wireless80211) return;  // wired: nothing to cache
+            if (nic.NetworkInterfaceType != NetworkInterfaceType.Wireless80211) return;
 
             long nowMs = Stopwatch.GetTimestamp() * 1000 / Stopwatch.Frequency;
             if (_wifiCache != null
@@ -488,7 +487,6 @@ namespace task_monitor
             }
         }
 
-        // BSS center frequency (kHz) → the band name.
         private static string BandToString(uint khz)
         {
             if (khz == 0) return null;

@@ -16,7 +16,6 @@ namespace task_monitor
         // tick offsets by it. Stamped by TaskbarWindow right after Sample().
         public int SampleIntervalMs = 1000;
 
-        // CPU
         public double CpuPercent;            // 0–100 overall
         public double[] PerCoreUsage = Array.Empty<double>(); // 0–100 per logical core
         public double[] CpuHistory = Array.Empty<double>();   // recent overall CPU% for the graph
@@ -45,7 +44,6 @@ namespace task_monitor
         // its dominant engine name.
         public List<ProcessInfo> TopGpuProcesses = new List<ProcessInfo>();
 
-        // RAM
         public double RamPercent;            // 0–100
         public double TotalRamGb;
         public double UsedRamGb;
@@ -247,12 +245,28 @@ namespace task_monitor
         public void SetPublicIpLookup(bool enabled) => _publicIpLookupEnabled = enabled;
 
         /// <summary>
-        /// Release the sampler's NATIVE registrations — currently the SRUM real-time session
-        /// (<see cref="ProcessNetSampler.Shutdown"/>), whose callback pointer must not outlive a
-        /// collected delegate (the reported 卡死 crash). Called when the overlay window is torn
-        /// down and rebuilt, i.e. before this sampler becomes garbage. Safe to call once.
+        /// Release the sampler's NATIVE registrations and idle its background pollers —
+        /// the SRUM real-time session (<see cref="ProcessNetSampler.Shutdown"/>), whose
+        /// callback pointer must not outlive a collected delegate (the reported 卡死 crash),
+        /// plus the two process-lifetime poll threads of <see cref="NetInfoSampler"/> and
+        /// <see cref="ClashSampler"/>. Called when the overlay window is torn down and
+        /// rebuilt, i.e. before this sampler becomes garbage. Safe to call once.
+        ///
+        /// <para>Those two threads have no stop flag (they are process-lifetime by design)
+        /// and every rebuild — 悬浮模式 flip, explorer restart, the §43 self-heal — creates
+        /// a FRESH sampler, so without these two lines each rebuild left the retired pair
+        /// polling at ~1 Hz forever: gateway + 公网 ICMP/HTTP (which must stop when the user
+        /// switches 公网 IP off, §30) and the Clash endpoint (§31). Clearing their inputs is
+        /// exactly the documented "off" state of both, so no behaviour changes. No Join here:
+        /// a poll cycle can block on ICMP/HTTP, and teardown runs on the taskbar STA thread
+        /// (§43's bounded-wait rule).</para>
         /// </summary>
-        public void Shutdown() => _procNet.Shutdown();
+        public void Shutdown()
+        {
+            _procNet.Shutdown();
+            _netInfo.Adapter = null;
+            _clash.SetEndpoint(null, null);
+        }
 
         // ---------- slow-step diagnostics (the reported 「卡死几秒后自己恢复」) ----------
         // The whole tick runs on the taskbar thread, and while one of these calls blocks the
@@ -284,7 +298,7 @@ namespace task_monitor
         public SystemSnapshot Sample()
         {
             int mask = _enabledMask;         // one volatile read, consistent for the tick
-            bool mergeByPath = _mergeByPath; // same — one read, used for all three lists
+            bool mergeByPath = _mergeByPath; // same — one read; feeds all three per-process samplers
             int prev = _lastMask;
             _lastMask = mask;
 

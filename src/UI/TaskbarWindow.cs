@@ -96,7 +96,6 @@ namespace task_monitor
         private static int PackedStackedCount(int mask) => (mask & 1) + ((mask >> 1) & 1) + ((mask >> 2) & 1) + ((mask >> 3) & 1);
 
         // Derive all geometry from the sampling mask (bit per slot, SystemSampler.Mask*).
-        // vertical = the side-docked classical strips layout; false = the two-row grid.
         private static OverlayLayout ComputeLayout(int mask, bool vertical)
         {
             var l = new OverlayLayout
@@ -105,7 +104,6 @@ namespace task_monitor
                 Pos0 = -1, Pos1 = -1, Pos2 = -1, Pos3 = -1,
                 SlotMask = mask,
             };
-            // Pack the visible stacked metrics into the row positions in order (空缺补齐).
             int pos = 0;
             for (int slot = 0; slot < 4 && pos < 4; slot++)
             {
@@ -203,10 +201,6 @@ namespace task_monitor
         // stub (surfaces as a stack-less NullReferenceException; the 2026-07-30 crash).
         private static readonly WindowInterop.WndProc _wndProc = new WindowInterop.WndProc(WndProc);
         private GCHandle _stateHandle;
-
-        // --------------------------------------------------------------------
-        // Public entry point: full init + blocking message loop.
-        // --------------------------------------------------------------------
 
         /// <summary>
         /// Invoked on the taskbar thread whenever a hit slot is clicked. The argument
@@ -419,7 +413,6 @@ namespace task_monitor
         }
 
         // ---------- 悬浮模式 (floating form) ----------
-        // and App's recreate loop immediately builds the other form (ConsumeQuickRestart).
         // top-level WS_POPUP standing on the desktop — the SAME window class, layout, drawing,
         // hit-testing and sampler as the taskbar form, plus its own card background and a
         // rounded window region (WindowBackdropInterop) — and the taskbar keeps no copy of it.
@@ -895,14 +888,10 @@ namespace task_monitor
             // Same re-apply for 合并相同程序 — a re-entered Start must not silently
             // reset the user's merge toggle either.
             sampler.SetMergeByPath(_mergeSamePathProcesses);
-            // Same re-apply for the disk 显示方式 (mode + specific-disk index).
             sampler.SetDiskDisplay(_diskDisplayMode, _diskDisplayIndex);
-            // Same re-apply for the GPU 显示方式 and the pinned network adapter.
             sampler.SetGpuDisplay(_gpuDisplayMode, _gpuDisplayIndex);
             sampler.SetNetAdapter(_netAdapterId);
-            // Same re-apply for the Clash/Mihomo integration (switch + endpoint).
             sampler.SetClashApi(_clashEnabled, _clashApiAddress, _clashApiSecret);
-            // Same re-apply for the 公网 IP lookup switch.
             sampler.SetPublicIpLookup(_publicIpLookupEnabled);
             _sampler = sampler;   // expose to UI-thread instance methods (RequestWifiDetails)
             var state = new RenderState
@@ -1050,7 +1039,6 @@ namespace task_monitor
                     Logger.Info($"已嵌入任务栏（父={(classical ? "ReBarWindow32" : "Shell_TrayWnd")}）");
                 if (classical)
                 {
-                    // Carve out our slot (shrink/shift the band) and dock into it.
                     RepositionOverlay(hwnd, state, force: true);
                     // Match the opaque backdrop to the real taskbar colour at the final dock
                     // rect NOW (the step-7 first frame still carried the fixed tint) and
@@ -1299,7 +1287,6 @@ namespace task_monitor
                     new D2D_RECT_F { left = 0f, top = 0f, right = layout.Width, bottom = s.LogicalHeight },
                     s.CardBrush);
 
-            // Highlight (selected) / hover fill, per hit slot (strips here, cells above).
             for (int i = 0; i < SlotCount; i++)
             {
                 IComObject<ID2D1Brush> brush = null;
@@ -1322,7 +1309,6 @@ namespace task_monitor
                 ctx.FillRectangle(new D2D_RECT_F { left = 0f, top = y - lineHalf, right = layout.Width, bottom = y + lineHalf }, s.SeparatorBrush);
             }
 
-            // One strip per visible slot (GPU falls back to "--" without an adapter).
             DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 0, "CPU", $"{s.Snapshot.CpuPercent:F0}%");
             DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 1, "内存", $"{s.Snapshot.RamPercent:F0}%");
             DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 2, "磁盘", $"{s.Snapshot.DiskPercent:F0}%");
@@ -1481,7 +1467,6 @@ namespace task_monitor
                 Flags = 0,
             });
 
-            // D2D1: factory → device → context → bitmap target (the back buffer, wrapped).
             s.D2dFactory = D2D1Functions.D2D1CreateFactory1(D2D1_FACTORY_TYPE.D2D1_FACTORY_TYPE_SINGLE_THREADED);
             s.D2dDevice = s.D2dFactory.Object.CreateDevice<ID2D1Device>(s.DxgiDevice);
             s.D2dContext = s.D2dDevice.CreateDeviceContext<ID2D1DeviceContext>(D2D1_DEVICE_CONTEXT_OPTIONS.D2D1_DEVICE_CONTEXT_OPTIONS_NONE);
@@ -1627,10 +1612,6 @@ namespace task_monitor
                 return false;
             }
         }
-
-        // --------------------------------------------------------------------
-        // Recreate render target for a new DPI (WM_DPICHANGED / poll).
-        // --------------------------------------------------------------------
 
         // Retarget the D2D context at a fresh swap-chain back buffer of the given size.
         // The OLD surface/bitmap wrappers are DISPOSED before ResizeBuffers: DXGI rejects
@@ -1789,7 +1770,11 @@ namespace task_monitor
                 if (xrel >= 0 && xrel + windowWidth <= taskbarWidth)
                     return (taskbarLeft + xrel, xrel);
             }
-            onLeft = false;   // resolved to the right-hand anchor below
+            // Fall-through: the caller asked for the right side, the taskbar is
+            // left-aligned, or the left request could not be honoured (Start missing / no
+            // room) — anchor right of the tray. (This used to assign `onLeft = false` here
+            // so a later guard could ask "did we fall through?"; the assignment was dead
+            // because nothing below read it except that guard.)
 
             int xs;
             int xr;
@@ -1805,15 +1790,15 @@ namespace task_monitor
                 xs = taskbarRect.right - windowWidth - fallback;
                 xr = taskbarWidth - windowWidth - fallback;
             }
-            // TrafficMonitor's avoid_overlap_with_widgets: a LEFT-aligned Win11 taskbar
-            // with the Widgets button shown lays its icon group out from the far left,
-            // so the 160px reserve keeps us clear of the widgets button there. The
-            // !onLeft guard matters: when the caller asked for the left side but the
-            // Start button is missing / there is no room, the code above lands on this
-            // right-hand anchor instead — and the reserve has no business being applied
-            // there (it just shoves the overlay leftwards, off the screen on a narrow
-            // taskbar; a real log had the overlay land at x=-1199 that way).
-            if (IsWidgetsButtonShown() && !onLeft && !IsTaskbarCenterAligned())
+            // TrafficMonitor's avoid_overlap_with_widgets: on a LEFT-aligned Win11 taskbar
+            // with the Widgets button shown the icon group lays out from the far left, so the
+            // 160px reserve applies to this anchor too (see the port note at the top of
+            // CalcPosition). The condition used to be `IsWidgetsButtonShown() && !onLeft &&
+            // !IsTaskbarCenterAligned()` — the middle conjunct was dead (every path reaching
+            // here has onLeft false), and its comment described a case the guard therefore did
+            // not cover. Keeping a narrow taskbar from stranding the overlay off-screen is the
+            // clamp's job below, which is where the reported x=-1199 was actually fixed.
+            if (IsWidgetsButtonShown() && !IsTaskbarCenterAligned())
             {
                 int reserve = WidgetsReserve(dpi);
                 xs -= reserve;
@@ -2467,6 +2452,7 @@ namespace task_monitor
         /// window (ComputeFloatTarget) and goes back home once none covers it. The 1s poll
         /// re-derives and re-clamps it (moving the window only when the result changed), so the
         /// steady-state per-tick cost is a monitor query plus one GetWindowRect per open detail
+        /// window.
         /// </summary>
         private static void FloatingReposition(IntPtr hwnd, RenderState s, bool force)
         {
@@ -2486,19 +2472,17 @@ namespace task_monitor
             bool hiddenRest = dockedRest || s.FloatFullscreenHidden;
             int x = s.FloatX, y = s.FloatY;
             bool dodged = s.FloatAvoiding;
-            // A HELD button owns the position: the drag handler writes s.FloatX/FloatY straight
-            // from the cursor and only publishes the new home on release, so re-deriving
-            // mid-drag would yank the widget back out from under the pointer.
-            if (!s.FloatPressed)
+            // Derive the target. A HELD button never reaches here — the FloatPressed return
+            // above owns the position while the drag handler writes FloatX/FloatY straight
+            // from the cursor. This was an `if (!s.FloatPressed)` wrapper, which could never
+            // be false at this point and only hid that the case was already handled.
+            if (hiddenRest)
             {
-                if (hiddenRest)
-                {
-                    x = s.Owner._floatingX;
-                    y = s.Owner._floatingY;
-                    dodged = false;
-                }
-                else ComputeFloatTarget(hwnd, s, out x, out y, out dodged);
+                x = s.Owner._floatingX;
+                y = s.Owner._floatingY;
+                dodged = false;
             }
+            else ComputeFloatTarget(hwnd, s, out x, out y, out dodged);
             ClampFloatingToWorkArea(hwnd, ref x, ref y, s.PhysicalWidth, s.PhysicalHeight);
             if (dockedRest && FloatingWorkArea(hwnd, out var hideWork))
                 FloatHiddenPos(s.FloatDockEdge, hideWork, x, y, s.PhysicalWidth, s.PhysicalHeight, s.Dpi, out x, out y);
@@ -2539,7 +2523,6 @@ namespace task_monitor
         private static void RepositionOverlay(IntPtr hwnd, RenderState s, bool force)
         {
             if (s == null) return;
-            // 悬浮模式 has no anchor: the widget is wherever the user put it.
             if (s.Floating)
             {
                 FloatingReposition(hwnd, s, force);
@@ -2637,7 +2620,6 @@ namespace task_monitor
         private static bool RectsEqual(WindowInterop.RECT a, WindowInterop.RECT b)
             => a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
 
-        // Band-height-only convenience for the callers that don't position (GetBandSize).
         private static int TaskbarBandHeight(IntPtr taskbar, WindowInterop.RECT taskbarRect)
         {
             TaskbarBand(taskbar, taskbarRect, out int h, out _);
@@ -2762,9 +2744,17 @@ namespace task_monitor
             }
             else
             {
+                // Throttle FIRST, exactly like the horizontal branch above. With the
+                // LastMinLength check after the assignment, the next 100ms pass found
+                // rcMin.height == LastMinLength (which IS the shrunken height we left) and
+                // returned having already stored the SHRUNKEN rect as the restore target:
+                // RestoreMinWindow then "restored" the band to the size it already had, and
+                // every forced pass (采样 toggle, DPI change, orientation flip, exit)
+                // re-measured the shrunken band and took our height off it again until the
+                // task buttons collapsed. gotcha §1 is exactly this rule.
+                if (!force && rcMin.bottom - rcMin.top == s.LastMinLength) return;
                 int bandH = rcMin.bottom - rcMin.top;
                 s.MinOriRect = rcMin;
-                if (!force && rcMin.bottom - rcMin.top == s.LastMinLength) return;
                 s.MinOriValid = true;
                 s.MinSpace = rcMin.top - rcBar.top;
                 s.LastMinLength = bandH - s.PhysicalHeight;
@@ -2949,7 +2939,6 @@ namespace task_monitor
             }
         }
 
-        // A band move (cross-thread into explorer's toolbar) via the worker.
         private static bool BandMoveAndWait(IntPtr h, int x, int y, int w, int ht, int timeoutMs)
             => RunOnNativeWorker(() =>
             {
@@ -3220,7 +3209,7 @@ namespace task_monitor
                     // window the user expects a click to bring forward. Windows keeps the
                     // FOREGROUND window at the top of the non-topmost band, so activating is the
                     // only way a click can raise the widget above the app they are working in —
-                                        // and that form is deliberately created WITHOUT WS_EX_NOACTIVATE (Start()'s
+                    // and that form is deliberately created WITHOUT WS_EX_NOACTIVATE (Start()'s
                     // ex-style), so this is the second half of the same decision.
                     var ms = StateOf(hwnd);
                     if (ms != null && ms.Floating && !ms.Owner._floatingTopmost)
@@ -3435,7 +3424,6 @@ namespace task_monitor
                         // foreground lock so the WPF popup (same process) can activate.
                         WindowInterop.AllowSetForegroundWindow(WindowInterop.ASFW_ANY);
 
-                        // Tell the UI thread which column to show (-1 = hide).
                         s.ToggleCallback?.Invoke(newSel);
                     }
                     return IntPtr.Zero;
@@ -3443,7 +3431,6 @@ namespace task_monitor
 
                 case WindowInterop.WM_RBUTTONUP:
                 {
-                    // Right-click → ask the UI thread to show the context menu.
                     StateOf(hwnd)?.RightClickRequested?.Invoke();
                     return IntPtr.Zero;
                 }
@@ -3495,7 +3482,6 @@ namespace task_monitor
 
                 case WindowInterop.WM_APP_REPOSITION:
                 {
-                    // UI thread changed the placement settings (SetPlacement) — re-anchor.
                     RepositionOverlay(hwnd, StateOf(hwnd), force: true);
                     return IntPtr.Zero;
                 }
@@ -3677,12 +3663,12 @@ namespace task_monitor
                         // Heartbeat for App's watchdog, BEFORE any work: it is the only way an
                         // outside observer can tell "this thread is stuck inside a call" (the
                         // widget then holds its last frame and ignores clicks) from "all fine" —
-                                                // a stalled tick cannot log itself. See the field's remarks.
+                        // a stalled tick cannot log itself. See the field's remarks.
                         if (s.Owner != null) s.Owner.LastTickTickCount = (long)SystemInfo.GetTickCount64();
                         // explorer died and took the taskbar with it. A reparented child
                         // is destroyed WITH its parent, so still being alive here means
                         // SetParent lost the race (we're a floating top-level popup) —
-                                                // self-destruct; the owner re-enters Start() and re-embeds us on
+                        // self-destruct; the owner re-enters Start() and re-embeds us on
                         // the new taskbar. 悬浮模式 has no parent to lose, but it reads the
                         // taskbar for its height/theme, so it is rebuilt the same way (at the
                         // position the taskbar thread last remembered).
@@ -3974,7 +3960,7 @@ namespace task_monitor
             // a device loss (CreateDeviceResources never touches them).
             public IComObject<IDWriteTextFormat> LabelFormat;
             public IComObject<IDWriteTextFormat> ValueFormat;
-            public IComObject<IDWriteTextFormat> NetFormat;   // left-aligned, for the net column
+            public IComObject<IDWriteTextFormat> NetFormat;   // flush-right (TRAILING), for the net rates
             public IComObject<ID2D1Brush> TextBrush;
             public IComObject<ID2D1Brush> LabelBrush;   // dimmed TextBrush for metric labels / ↑↓
             public IComObject<ID2D1Brush> HighlightBrush;

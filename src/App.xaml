@@ -43,7 +43,6 @@
                                     <Setter Property="Background" Value="{DynamicResource SubtleFillColorTertiaryBrush}" />
                                     <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
                                 </Trigger>
-                                <!-- Checked state: keep the hover fill lit. -->
                                 <Trigger Property="ToggleButton.IsChecked" Value="True">
                                     <Setter Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
                                 </Trigger>

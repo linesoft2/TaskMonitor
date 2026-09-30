@@ -32,8 +32,8 @@ namespace task_monitor
         private static readonly HashSet<string> _onceKeys = new HashSet<string>(StringComparer.Ordinal);
         private static StreamWriter _writer;     // null until the first successful write
         private static string _dir;              // null = no usable log dir (read-only install)
-        private static DateTime _fileDate;       // the day _writer's file belongs to
-        private static int _failures;            // consecutive I/O failures
+        private static DateTime _fileDate;
+        private static int _failures;
 
         /// <summary>
         /// Locate/create the log dir and prune old files. Called once from App's static
@@ -84,13 +84,6 @@ namespace task_monitor
             Write("WARN", msg, ex);
         }
 
-        /// <summary>INFO only the first time per <paramref name="key"/>.</summary>
-        public static void InfoOnce(string key, string msg)
-        {
-            lock (_sync) { if (!_onceKeys.Add(key)) return; }
-            Write("INFO", msg, null);
-        }
-
         private static void Write(string level, string msg, Exception ex)
         {
             lock (_sync)
@@ -130,8 +123,7 @@ namespace task_monitor
             { AutoFlush = true };
         }
 
-        // Prune task_monitor-*.log files untouched for over a week. Best-effort per file —
-        // a locked log (another instance writing it) is skipped, never fatal.
+        // Best-effort per file — a locked log (another instance writing it) is skipped, never fatal.
         private static void CleanupLocked()
         {
             try

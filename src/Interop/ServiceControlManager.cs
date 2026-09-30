@@ -8,8 +8,8 @@ namespace task_monitor
     /// <summary>One running Win32 service as <c>EnumServicesStatusExW</c> reports it.</summary>
     internal sealed class ServiceRef
     {
-        public string Name;        // service name ("wuauserv")
-        public string DisplayName; // localized display name ("Windows Update")
+        public string Name;
+        public string DisplayName;
     }
 
     /// <summary>

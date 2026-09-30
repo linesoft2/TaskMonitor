@@ -6,9 +6,10 @@ area. The **canonical** statement of each rule still lives in a comment at the c
 site named in the heading — when the two disagree, the code comment wins and this file
 (and the index) must be fixed.
 
-Cross-cutting companions: [`settings-plumbing.md`](settings-plumbing.md) (every
-设置→sampler chain) and [`scroll-stack.md`](scroll-stack.md) (the three-file scrolling
-implementation).
+Cross-cutting companions: [`architecture.md`](architecture.md) (the two threads, the
+cross-thread contract, the detail/pin model, startup/elevation, layout),
+[`settings-plumbing.md`](settings-plumbing.md) (every 设置→sampler chain) and
+[`scroll-stack.md`](scroll-stack.md) (the three-file scrolling implementation).
 
 ---
 
@@ -252,6 +253,16 @@ instance so an in-flight callback's stub stays valid) called from `SystemSampler
 from `WM_DESTROY`, before the state turns to garbage. Found with the `CrashTrace` VEH (the
 message ring said `WM_APP_SET_FLOAT_KEEPOUT`, the step marker said `绘制阶段`, the stack scan
 showed `srumapi.dll`, and the record's 距上次内存回收 was 875 ms) — see §37.
+
+**The same teardown also IDLES the two poll threads, and that half is easy to lose.** A
+retired `SystemSampler` owns `NetInfoSampler` + `ClashSampler`, each of which starts a
+`while (true)` thread in its ctor and has no stop flag — so `SystemSampler.Shutdown()` clears
+their inputs (`_netInfo.Adapter = null`, `_clash.SetEndpoint(null, null)`, the documented
+"off" state of both) instead of trying to join them. Without those two lines every rebuild
+left the retired pair polling at ~1 Hz for the rest of the session — gateway + 公网 ICMP/HTTP
+(which must stop when the user switched 公网 IP off, §30) and the Clash endpoint (§31), one
+extra pair per 悬浮模式 flip / explorer restart / §43 self-heal. No Join in the teardown path:
+a poll cycle can block on ICMP/HTTP and teardown runs on the taskbar STA thread (§43).
 
 ## 16. Wi-Fi `wlanapi` calls are on-demand, NOT per-tick
 

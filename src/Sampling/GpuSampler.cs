@@ -482,7 +482,6 @@ namespace task_monitor
             }
         }
 
-        // ---------- enumeration: two attribute lists, deduped by LUID ----------
         private void Reenumerate()
         {
             try

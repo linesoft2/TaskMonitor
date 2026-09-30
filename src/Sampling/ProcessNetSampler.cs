@@ -138,7 +138,6 @@ namespace task_monitor
             IntPtr pFree = SrumInterop.GetProcAddress(_srumModule, "SruFreeRecordSet");
             if (pReg == IntPtr.Zero || pUnreg == IntPtr.Zero || pFree == IntPtr.Zero)
             {
-                // one of the exports is missing — per-process net stays disabled
                 Logger.Warn("srumapi.dll 导出缺失（SruRegisterRealTimeStats/SruUnregisterRealTimeStats/SruFreeRecordSet）——按进程网络流量不可用");
                 return;
             }
@@ -292,7 +291,7 @@ namespace task_monitor
                         {
                             if (kv.Key <= 4) continue; // Idle/System never own SRUM records (System still appears when SRUM tracks it)
                             if ("Memory Compression".Equals(kv.Value, StringComparison.OrdinalIgnoreCase)) continue; // same exclusion as the walk lists
-                            if (_lastActive.ContainsKey(kv.Key)) continue; // already emitted above (live or retained)
+                            if (_lastActive.ContainsKey(kv.Key)) continue;
                             rows.Add((kv.Key, 0.0, 0.0, 0.0, null, null));
                         }
                     }
@@ -310,7 +309,7 @@ namespace task_monitor
                 }
             }
 
-            // Rank by total throughput desc, then by name for a stable order on ties.
+            // Rank by total throughput desc, then by PID for a stable order on ties.
             rows.Sort((a, b) =>
             {
                 int c = b.Total.CompareTo(a.Total);
@@ -324,7 +323,7 @@ namespace task_monitor
             {
                 var r = rows[i];
                 bool viaClash = r.ClashPath != null;
-                string exePath = viaClash ? r.ClashPath : ResolveExePath(r.Pid);
+                string exePath = viaClash ? r.ClashPath : ResolveExePath(r.Pid, pidToName);
                 result.Add(new ProcessInfo
                 {
                     // A clash row's display name is the core's metadata.process (usually the
@@ -362,12 +361,24 @@ namespace task_monitor
 
         // Cached per PID across ticks. Returns null for processes we can't open (protected/
         // system/dead) — the UI shows its default icon and "PID {pid}" name for those.
-        private string ResolveExePath(int pid)
+        // The kernel ImageName from the walk validates the cache: Windows recycles PIDs, and
+        // without the check a recycled PID kept the DEAD process's exe path — the row then
+        // showed the right name (the name comes from the walk) with the previous process's
+        // icon. Same guard as ProcessCpuSampler.ResolveExePath.
+        private string ResolveExePath(int pid, Dictionary<int, string> pidToName)
         {
-            if (pid < 0) return null; // no real process to open
-            if (_exeByPid.TryGetValue(pid, out string cached)) return cached;
+            if (pid < 0) return null;
+
+            string imageFileName = null;
+            pidToName?.TryGetValue(pid, out imageFileName);
+
+            if (_exeByPid.TryGetValue(pid, out string cached) &&
+                (cached == null || string.IsNullOrEmpty(imageFileName) ||
+                 cached.EndsWith(imageFileName, StringComparison.OrdinalIgnoreCase)))
+                return cached;
+
             string path = SystemInfo.QueryProcessImageFileName(pid);
-            _exeByPid[pid] = path; // cache hit or miss (null) — both stored
+            _exeByPid[pid] = path;
             return path;
         }
     }

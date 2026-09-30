@@ -20,15 +20,29 @@ namespace task_monitor
     /// </summary>
     internal static class PivotNavButtonFix
     {
+        /// <summary>Wire the fix up — call ONCE per TabControl, from the view's ctor: it
+        /// subscribes to <c>Loaded</c>, which is what guarantees the template parts exist.</summary>
         public static void Apply(TabControl tabs)
         {
             // Template parts only exist after the first layout pass; Loaded guarantees it.
-            tabs.Loaded += (_, _) =>
-            {
-                tabs.ApplyTemplate();
-                Fix(tabs, "PreviousButton");
-                Fix(tabs, "NextButton");
-            };
+            tabs.Loaded += (_, _) => Reapply(tabs);
+        }
+
+        /// <summary>
+        /// Re-apply the binding to the CURRENT template parts. A live 浅色/深色 switch makes
+        /// iNKORE's ThemeManager re-resolve the implicit style and re-instantiate the
+        /// ControlTemplate, so the new Previous/Next buttons are born without the binding and
+        /// <c>Loaded</c> does not fire again — the invisible PreviousButton then swallowed
+        /// clicks over the first tab's left 20px until the popup was reopened. Idempotent
+        /// (re-setting the same binding is a no-op), so the pivot views call it from their
+        /// <c>ApplyTheme</c>, which is exactly the theme-switch path.
+        /// </summary>
+        public static void Reapply(TabControl tabs)
+        {
+            if (tabs == null) return;
+            tabs.ApplyTemplate();
+            Fix(tabs, "PreviousButton");
+            Fix(tabs, "NextButton");
         }
 
         private static void Fix(DependencyObject root, string name)
