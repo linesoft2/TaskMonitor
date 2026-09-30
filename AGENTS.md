@@ -181,7 +181,7 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 30. **公网 IP off kills ALL public traffic** (lookups + the ICMP probe); the LAN gateway ping is unaffected.
 31. **Clash/Mihomo** — `req.Proxy = null`; rows appended standalone and exempt from merging; `null` endpoint = poller asleep.
 32. **DISPOSE back-buffer wrappers before `ResizeBuffers`** — they live on `RenderState`, never in locals.
-33. **更新检测** — csproj `<Version>` is the only version source; CNB reads the WEB 307 redirect; 不再提醒 skips only that version.
+33. **更新检测** — csproj `<Version>` is the only version source; CNB reads the WEB 307 redirect; 不再提醒 skips only that version; an unreachable host (not an HTTP answer) earns ONE retry 5 minutes later, and it re-reads the live config.
 34. **net48's `Run.Text` is not a dependency property** — a `{Binding}` on a `Run` throws at startup; set named Runs in code.
 
 **Floating widget / rendering / forensics**

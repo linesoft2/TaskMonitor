@@ -117,7 +117,10 @@ thread). Full design: [`gotchas.md` §31](gotchas.md#31-clashmihomo-代理流量
 ## 7. 更新检测 — `UpdateCheckEnabled` + `UpdateSource` + `IgnoredUpdateVersion`
 
 Not part of the sampler chain: `UpdateChecker.CheckOnce` runs **once at startup** from
-`OnStartup`, so a change takes effect on the next launch (no live plumbing). See
+`OnStartup`, so a change takes effect on the next launch (no live plumbing). The one exception
+is a *pending retry*: after a network-level failure the single retry 5 minutes out re-reads the
+live config, so switching 检查更新 off cancels it and a 更新源 change is honored — nothing to
+wire up, it reads the same `AppSettings` instance. See
 [`gotchas.md` §33](gotchas.md#33-更新检测).
 
 ## 8. 悬浮模式 — `FloatingMode` + `FloatingX`/`FloatingY` + `FloatingTopmost` + `FloatingEdgeHide` + `FloatingFullscreenHide` + `FloatingOpacity`

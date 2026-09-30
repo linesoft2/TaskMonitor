@@ -534,10 +534,23 @@ thread `UpdateAvailableDialog` (iNKORE modern window, same family as `LegacyOsWa
 The system proxy applies (do NOT set `Proxy=null` the way ClashSampler does — the update check
 faces the public internet, and the user's proxy helps rather than hurts).
 
+**A first attempt that cannot REACH the host is retried once, 5 minutes later**
+(`RetryDelay` / `ScheduleRetry`: a one-shot `System.Threading.Timer`, never a sleeping pool
+thread). The logon launch happens before Wi-Fi/VPN/DHCP is up often enough that a transient
+miss would otherwise cost the whole session's prompt. The gate is `IsNetworkFailure` — the
+DNS/connect/timeout/TLS-handshake `WebExceptionStatus` family plus a nested
+`SocketException`/`IOException` — deliberately NOT an HTTP answer we cannot use (403 rate
+limit, 404, changed page structure): five minutes changes nothing about those, so
+`ProtocolError`/`TrustFailure` are not retried. Single-shot by construction: the retry passes
+`canRetry:false`, so a second failure is log-only until the next launch. The retry re-reads the
+LIVE config, so 检查更新 OFF during the window cancels it (off must mean zero traffic) and a
+源 switch is honored.
+
 `settings.yaml` keys: `updateCheckEnabled` (null=开), `updateSource` (null=cnb, only
 "github" is written), `ignoredUpdateVersion`. **"不再提醒" skips only that specific
 version** — a newer version still prompts. Three buttons: 立即更新 (opens the release page) /
-不再提醒 / 稍后. All exceptions are log-only, never fatal; a failed check is silent.
+不再提醒 / 稍后. All exceptions are log-only, never fatal; a failed check is silent
+(`更新检测：… 连接失败，5 分钟后重试一次` / `… 读取失败（下次启动重试）` are the only traces).
 
 ## 34. net48's `Run.Text` is not a dependency property
 

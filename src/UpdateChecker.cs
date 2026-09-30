@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
@@ -19,6 +20,12 @@ namespace task_monitor
     /// page; 不再提醒 persists that exact tag to settings.yaml and it is never prompted
     /// again — a still newer one is). Everything here is best-effort: any failure is
     /// logged and swallowed — the check must never crash, block, or spam the app.
+    ///
+    /// A check that fails to reach the host at all is retried ONCE, <see cref="RetryDelay"/>
+    /// later (see <see cref="ScheduleRetry"/>) — the logon launch is early enough that
+    /// Wi-Fi/VPN/DHCP often is not up yet, and a transient miss would otherwise cost the
+    /// whole session's update prompt. An answer we simply cannot use (403 rate limit, a
+    /// changed page structure) is NOT retried: five minutes changes nothing about it.
     ///
     /// Sources:
     ///  - "github": the releases JSON API — anonymous reads are allowed (a User-Agent
@@ -47,6 +54,15 @@ namespace task_monitor
             @"/linesoft2/TaskMonitor/-/releases/tag/(v?\d+(?:\.\d+){1,3})",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+        /// <summary>How long after a failed first attempt the single retry runs.</summary>
+        private static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(5);
+
+        // The pending retry, null when none is armed. A one-shot System.Threading.Timer —
+        // never a sleeping pool thread (5 minutes would occupy one of them) and never a
+        // WPF timer (this has nothing to do with the UI thread). Process-scoped: it dies
+        // with the process, which is exactly the lifetime wanted.
+        private static Timer _retryTimer;
+
         [DataContract]
         private sealed class GithubRelease
         {
@@ -58,12 +74,22 @@ namespace task_monitor
         public static void CheckOnce(AppSettings config, Action saveConfig)
         {
             if (config.UpdateCheckEnabled == false) return;   // 设置 → 通用 → 检查更新 off
-            bool github = string.Equals(config.UpdateSource, "github", StringComparison.OrdinalIgnoreCase);
-            ThreadPool.QueueUserWorkItem(_ => CheckOnPoolThread(config, saveConfig, github));
+            QueueCheck(config, saveConfig, canRetry: true);
         }
 
-        private static void CheckOnPoolThread(AppSettings config, Action saveConfig, bool github)
+        private static void QueueCheck(AppSettings config, Action saveConfig, bool canRetry)
         {
+            ThreadPool.QueueUserWorkItem(_ => CheckOnPoolThread(config, saveConfig, canRetry));
+        }
+
+        private static void CheckOnPoolThread(AppSettings config, Action saveConfig, bool canRetry)
+        {
+            // Read the LIVE settings, not a snapshot: this also runs as the retry, five
+            // minutes after startup, so 检查更新 may have been switched off (cancel it —
+            // "off means zero traffic" would otherwise quietly leak a request) or the
+            // source changed (honor the new one) in the meantime.
+            if (config.UpdateCheckEnabled == false) return;
+            bool github = string.Equals(config.UpdateSource, "github", StringComparison.OrdinalIgnoreCase);
             string source = github ? "github" : "cnb";
             string latestTag;
             try
@@ -73,7 +99,16 @@ namespace task_monitor
             }
             catch (Exception ex)
             {
-                Logger.Warn($"更新检测：{source} 源读取失败（下次启动重试）", ex);
+                // Only an unreachable host earns the retry — see IsNetworkFailure.
+                if (canRetry && IsNetworkFailure(ex))
+                {
+                    Logger.Warn($"更新检测：{source} 源连接失败，{RetryDelay.TotalMinutes:0} 分钟后重试一次", ex);
+                    ScheduleRetry(config, saveConfig);
+                }
+                else
+                {
+                    Logger.Warn($"更新检测：{source} 源读取失败（下次启动重试）", ex);
+                }
                 return;
             }
             if (string.IsNullOrEmpty(latestTag))
@@ -105,6 +140,57 @@ namespace task_monitor
             var dispatcher = Application.Current?.Dispatcher;
             if (dispatcher == null || dispatcher.HasShutdownStarted) return;
             dispatcher.BeginInvoke(new Action(() => ShowPrompt(config, saveConfig, github, latestTag)));
+        }
+
+        // One-shot retry, <see cref="RetryDelay"/> out. Armed DISABLED and then Change()d so
+        // the callback can never run before _retryTimer holds it (a 5-minute race is
+        // theoretical, but the ordering costs nothing). Single-shot is the contract: the
+        // retry passes canRetry:false, so a second failure logs and gives up until the next
+        // launch — deliberately, this is a startup nicety, not a poller.
+        private static void ScheduleRetry(AppSettings config, Action saveConfig)
+        {
+            try
+            {
+                Timer timer = null;
+                timer = new Timer(_ =>
+                {
+                    timer.Dispose();
+                    _retryTimer = null;
+                    try { CheckOnPoolThread(config, saveConfig, canRetry: false); }
+                    catch (Exception ex) { Logger.Warn("更新检测：重试失败", ex); }
+                }, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                _retryTimer = timer;
+                timer.Change(RetryDelay, Timeout.InfiniteTimeSpan);
+            }
+            catch (Exception ex) { Logger.Warn("更新检测：重试未能安排", ex); }
+        }
+
+        // "We could not reach the host" as opposed to "the host answered with something we
+        // cannot use" (403 rate limit, 404, changed page structure) — only the former is
+        // worth a second attempt. ProtocolError/TrustFailure are therefore NOT retried,
+        // while the DNS/connect/timeout/TLS-handshake family is; an inner
+        // SocketException/IOException counts too, since a dropped connection surfaces as
+        // WebExceptionStatus.UnknownError with the real cause nested. Status codes, never
+        // message text — the message is localized (this machine logs Chinese).
+        private static bool IsNetworkFailure(Exception ex)
+        {
+            for (Exception e = ex; e != null; e = e.InnerException)
+            {
+                if (e is SocketException || e is IOException) return true;
+                if (!(e is WebException we)) continue;
+                switch (we.Status)
+                {
+                    case WebExceptionStatus.Timeout:
+                    case WebExceptionStatus.ConnectFailure:
+                    case WebExceptionStatus.NameResolutionFailure:
+                    case WebExceptionStatus.ProxyNameResolutionFailure:
+                    case WebExceptionStatus.ConnectionClosed:
+                    case WebExceptionStatus.KeepAliveFailure:
+                    case WebExceptionStatus.SecureChannelFailure:
+                        return true;
+                }
+            }
+            return false;
         }
 
         // UI thread. ShowDialog blocks only this dispatcher frame; all three outcomes are
