@@ -101,6 +101,13 @@ namespace task_monitor
                 return;
             }
 
+            // With the mutex held, any shutdown.sentinel on disk targeted a PREVIOUS
+            // instance (the build flow's touch is always consumed by the still-running
+            // old instance before we can start) — a leftover must not self-exit us 2s in
+            // (2026-09-29: a double-touched sentinel did exactly that, and the shutdown
+            // then raced the queued prewarm into a crash dialog).
+            TaskbarWindow.ClearStaleShutdownSentinel();
+
             base.OnStartup(e);
 
             Logger.Info($"启动 — 版本 {VersionInfo.Current}，OS {Environment.OSVersion}，Win11+={TaskbarWindow.IsWin11OrLater}");
@@ -150,6 +157,14 @@ namespace task_monitor
             // showing it at startup regressed the menu: it stopped opening at all.
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                // This Background-priority slot can be reached MID-SHUTDOWN: OnExit's
+                // Join of the taskbar thread keeps pumping the STA queue, dispatching
+                // whatever is still queued (2026-09-29: a stale sentinel exited the app
+                // 2s in, and the prewarm then ran against resources that were already
+                // being torn down — NRE inside WPF's DeferredAppResourceReference, crash
+                // dialog on a graceful exit). Skip when stopping; Prewarm itself also
+                // never throws (it is a pure optimization).
+                if (_stopping) return;
                 new DetailWindow(_taskbar).Prewarm();
                 // Hand the one-touch startup pages (JIT of the show path, BAML parse,
                 // prewarm's UI trees) back to the standby list — see ScheduleIdleTrim.
@@ -332,7 +347,11 @@ namespace task_monitor
                             // blinking out for the whole explorer-restart backoff.
                             int delay = _taskbar.ConsumeQuickRestart() ? 150 : 2000;
                             Logger.Warn($"任务栏覆盖层 Start() 已返回（窗口销毁——explorer 重启或初始化失败），{delay}ms 后重建");
+                            // Keep the watchdog's heartbeat fed through the rebuild gap —
+                            // this thread is alive and working, just between ticks (§43).
+                            _taskbar.LastTickTickCount = (long)SystemInfo.GetTickCount64();
                             Thread.Sleep(delay);
+                            _taskbar.LastTickTickCount = (long)SystemInfo.GetTickCount64();
                         }
                     }
                     catch (Exception ex)
@@ -517,6 +536,7 @@ namespace task_monitor
         private long _stallLastTick;    // 0 = no stall in progress; else the last tick before it
         private long _goneSinceTick;    // 0 = the overlay HWND is there; else when it vanished
         private bool _goneLogged;
+        private bool _restartedForZombie;   // the 45s zombie self-restart already fired this run
 
         private void StartOverlayWatchdog()
         {
@@ -546,7 +566,12 @@ namespace task_monitor
                     if (now - last > threshold)
                     {
                         _stallLastTick = last;
-                        Logger.Warn($"覆盖层心跳停滞：已 {now - last}ms 没有采样 tick（设定 {interval}ms，阈值 {threshold}ms）——任务栏线程卡在某个阻塞调用里，恢复时会补记一行");
+                        // Forensics FROM THE OTHER SIDE: the blocked thread can never name
+                        // its own blocking call, so dump what it last marked (CrashTrace's
+                        // step + message ring) plus a NATIVE STACK grab of the taskbar
+                        // thread (suspend µs → copy → resume — CaptureStackOf cannot wedge
+                        // behind whatever the thread is blocked in).
+                        Logger.Warn($"覆盖层心跳停滞：已 {now - last}ms 没有采样 tick（设定 {interval}ms，阈值 {threshold}ms）——任务栏线程卡在某个阻塞调用里，恢复时会补记一行；当前步骤={CrashTrace.CurrentStep}，最近消息=[{CrashTrace.RecentMessages()}]，线程栈={CrashTrace.CaptureStackOf(tb.NativeThreadId)}");
                     }
                 }
                 else if (now - last <= interval * 2L)
@@ -570,7 +595,60 @@ namespace task_monitor
                 else if (!_goneLogged && now - _goneSinceTick > 5000)
                 {
                     _goneLogged = true;
-                    Logger.Error($"覆盖层窗口已消失 {(now - _goneSinceTick) / 1000}s 而 Start() 未返回——重建循环也停了，只能等阻塞调用返回或重启进程");
+                    Logger.Error($"覆盖层窗口已消失 {(now - _goneSinceTick) / 1000}s 而 Start() 未返回——重建循环也停了；先唤醒消息循环，45s 后仍无恢复将自动重启进程（当前步骤={CrashTrace.CurrentStep}，最近消息=[{CrashTrace.RecentMessages()}]）");
+                    // The gentle in-process wake BEFORE the process restart: a window gone
+                    // this long usually means the loop is parked in GetMessage on an EMPTY
+                    // queue — the timers died with the window and, the WM_DESTROY that would
+                    // post the quit never having been dispatched (the 2026-09-30 卡死's end
+                    // state: RIP=win32u = NtUserGetMessage), nothing will ever wake it. One
+                    // PostThreadMessage(WM_QUIT) makes GetMessage return 0: Start() returns,
+                    // the recreate loop re-embeds on the new taskbar — ~7s, no restart.
+                    // Harmless when the thread is instead blocked in a call: the quit waits
+                    // in the queue for its return (the 45s restart stays the backstop).
+                    if (tb.NativeThreadId > 0)
+                        WindowInterop.PostThreadMessageW((uint)tb.NativeThreadId, WindowInterop.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+                }
+                // Self-heal the unrecoverable zombie: the taskbar thread is blocked inside a
+                // call that never returned (the 2026-09-30 卡死 — 20+ minutes, only a manual
+                // kill helped), the window is gone, and the recreate loop is dead with it.
+                // Nothing INSIDE the process can recover that — a foreground thread can't be
+                // killed safely — so respawn the process and hard-exit this one. We are
+                // ELEVATED, and a child of an elevated process is elevated too: a plain
+                // CreateProcess (UseShellExecute=false — no shell to lean on while explorer
+                // may itself be mid-restart) hands the successor full rights SILENTLY, no
+                // UAC at all (the gate's IsElevated passes). The single-instance mutex is
+                // un-owned and dies with us; Environment.Exit does not wait for the hung
+                // foreground thread the way a Main-return would. The log handle goes first —
+                // FileShare.Read would eat the child's first lines (Logger.ReleaseHandle).
+                // Once per process lifetime: a repeat zombie restarts again.
+                if (!_restartedForZombie && now - _goneSinceTick > 45000)
+                {
+                    _restartedForZombie = true;
+                    Logger.Error($"覆盖层窗口消失 {(now - _goneSinceTick) / 1000}s——判定为不可恢复卡死，自动重启进程（父进程已提权，子进程静默接管，无 UAC）");
+                    try
+                    {
+                        var exe = Process.GetCurrentProcess().MainModule.FileName;
+                        // Drop the mutex handle FIRST: the named object is an existence
+                        // test, so it only dies WITH its last handle — the child checks it
+                        // ~0.3s in, while this process still has ~1s of OnExit (the taskbar
+                        // Join) left to live; undisposed, the child takes itself for a
+                        // second instance and exits silently (2026-09-30 PID=368).
+                        _singleInstanceMutex?.Dispose();
+                        _singleInstanceMutex = null;
+                        // And release the log handle (FileShare.Read eats the child's first
+                        // lines) — this process writes NOTHING after this point.
+                        Logger.ReleaseHandle();
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = exe,
+                            UseShellExecute = false,
+                            WorkingDirectory = Path.GetDirectoryName(exe),
+                        });
+                        // No "spawned OK" line on purpose: logging it would re-open the
+                        // handle ReleaseHandle just freed and eat the child's first lines.
+                    }
+                    catch (Exception ex) { Logger.Error("自动重启：拉起新进程失败", ex); }
+                    Environment.Exit(0);
                 }
             }
             else if (_goneLogged)

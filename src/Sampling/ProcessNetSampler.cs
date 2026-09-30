@@ -352,6 +352,7 @@ namespace task_monitor
         // case the walk map is ever unavailable (it normally carries "System" already).
         private static string ResolveName(int pid, string exePath, Dictionary<int, string> pidToName)
         {
+            if (pid < 0) return "未知"; // Win10 SRUM's unattributable-traffic record carries ProcessId 0xFFFFFFFF (= -1)
             if (pid == 4) return "System";
             if (pidToName != null && pidToName.TryGetValue(pid, out string img) && !string.IsNullOrEmpty(img))
                 return img;
@@ -363,6 +364,7 @@ namespace task_monitor
         // system/dead) — the UI shows its default icon and "PID {pid}" name for those.
         private string ResolveExePath(int pid)
         {
+            if (pid < 0) return null; // no real process to open
             if (_exeByPid.TryGetValue(pid, out string cached)) return cached;
             string path = SystemInfo.QueryProcessImageFileName(pid);
             _exeByPid[pid] = path; // cache hit or miss (null) — both stored

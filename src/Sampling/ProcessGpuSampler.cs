@@ -5,6 +5,16 @@ using System.Runtime.InteropServices;
 
 namespace task_monitor
 {
+    /// <summary>One (adapter, engine) pair's aggregated utilization + display name for a
+    /// tick — <see cref="ProcessGpuSampler.EngineMap"/>'s value, the adapter-level fallback
+    /// data for <see cref="GpuSampler"/> when the driver predates DXCore's
+    /// engine-running-time state.</summary>
+    internal sealed class GpuEngineSlice
+    {
+        public double Util;    // summed per-process % on this engine this tick, clamped 0–100
+        public string Name;    // normalized engtype ("3D", "Copy", …); null when absent
+    }
+
     /// <summary>
     /// Per-process GPU utilization — the source of Task Manager's Processes-page "GPU" column,
     /// replicated from Taskmgr.exe (WdcProcessMonitor::ProcessGpuInformation →
@@ -27,6 +37,14 @@ namespace task_monitor
     /// engines on the machine) the sampler stays unavailable and the list stays empty —
     /// total, silent degradation, same contract as <see cref="ProcessNetSampler"/>.
     /// Sampled on the taskbar STA thread once per second; single-threaded.
+    ///
+    /// The same per-tick collect optionally feeds an ADAPTER-level engine map
+    /// (<see cref="EngineMap"/>, built when asked): the per-process percentages summed
+    /// per (adapter LUID, physical index, engine ordinal), plus the engtype names. It is
+    /// <see cref="GpuSampler"/>'s utilization/name fallback for adapters whose driver
+    /// predates DXCore's engine-running-time state (Win10's dxcore + e.g. VMware SVGA 3D
+    /// report it unsupported) — the eng ordinals are D3DKMT node ordinals on both sides,
+    /// so they line up 1:1.
     /// </summary>
     internal sealed class ProcessGpuSampler
     {
@@ -77,21 +95,31 @@ namespace task_monitor
             }
         }
 
+        /// <summary>The per-(adapter LUID, phys, eng) totals from the latest collect that was
+        /// asked to build them (<paramref name="buildEngineMap"/>) — null otherwise. Consumed
+        /// by <see cref="GpuSampler"/> on the same thread, right after Sample().</summary>
+        public IReadOnlyDictionary<(long luid, int phys, int eng), GpuEngineSlice> EngineMap { get; private set; }
+
         /// <summary>
         /// Top-N processes by GPU utilization (Task Manager's aggregation: the max over all
         /// of the process's GPU-engine instances), each row carrying the dominant engine
         /// name ("3D", "Copy", "Video Decode", …) for the list's 引擎 column. Empty on the
         /// warm-up tick and whenever the counter set is unavailable.
         /// </summary>
-        public List<ProcessInfo> Sample(Dictionary<int, string> pidToName, bool mergeByPath)
+        public List<ProcessInfo> Sample(Dictionary<int, string> pidToName, bool mergeByPath, bool buildEngineMap = false)
         {
             var empty = new List<ProcessInfo>();
+            EngineMap = null;
             if (!_available) return empty;
 
             try
             {
                 if (SystemInfo.PdhCollectQueryData(_query) != 0) return empty;
                 if (!TryReadCounterArray(out uint itemCount)) return empty;
+
+                var engineMap = buildEngineMap
+                    ? new Dictionary<(long luid, int phys, int eng), GpuEngineSlice>()
+                    : null;
 
                 // Aggregate per PID: max over all its engine instances (Taskmgr's rule —
                 // MAX within each adapter, then MAX across adapters, which collapses to a
@@ -111,6 +139,17 @@ namespace task_monitor
                     string inst = namePtr == IntPtr.Zero ? null : Marshal.PtrToStringUni(namePtr);
                     if (string.IsNullOrEmpty(inst) || !TryParseInstance(inst, out int pid, out string engType))
                         continue;
+
+                    if (engineMap != null &&
+                        TryParseAdapterTokens(inst, out long luid, out int phys, out int eng))
+                    {
+                        var key = (luid, phys, eng);
+                        if (!engineMap.TryGetValue(key, out var slice))
+                            engineMap[key] = slice = new GpuEngineSlice();
+                        slice.Util += pct;
+                        if (slice.Name == null && !string.IsNullOrEmpty(engType)) slice.Name = engType;
+                    }
+
                     if (pid <= 4) continue; // Idle/System never own GPU engines; skip defensively
 
                     if (!byPid.TryGetValue(pid, out var agg))
@@ -120,6 +159,13 @@ namespace task_monitor
                         agg.MaxPct = pct;
                         agg.Engine = engType;
                     }
+                }
+
+                if (engineMap != null)
+                {
+                    foreach (var slice in engineMap.Values)
+                        if (slice.Util > 100) slice.Util = 100;
+                    EngineMap = engineMap;
                 }
 
                 if (byPid.Count == 0) return empty;
@@ -217,6 +263,59 @@ namespace task_monitor
                 engType = NormalizeEngineName(part >= 0 ? inst.Substring(ns, part - ns) : inst.Substring(ns));
             }
             return true;
+        }
+
+        // "…_luid_0x00000000_0x0001ABCD_phys_0_eng_2_…" → adapter LUID + phys/engine
+        // ordinals. The two hex halves are the LUID's HighPart/LowPart (the same bit
+        // layout as DXCore's InstanceLuid int64); phys/eng are D3DKMT node ordinals,
+        // which DXCore's physicalAdapterIndex/engineIndex also use — so a DXCore adapter
+        // entry keys straight into the map built from these.
+        private static bool TryParseAdapterTokens(string inst, out long luid, out int phys, out int eng)
+        {
+            luid = 0; phys = 0; eng = 0;
+            int t = inst.IndexOf("_luid_0x", StringComparison.Ordinal);
+            if (t < 0) return false;
+            int p = t + 8;   // past "_luid_0x"
+            if (!ScanHex(inst, ref p, out uint hi)) return false;
+            if (p + 3 > inst.Length || inst[p] != '_' || inst[p + 1] != '0' || inst[p + 2] != 'x') return false;
+            p += 3;
+            if (!ScanHex(inst, ref p, out uint lo)) return false;
+            luid = ((long)hi << 32) | lo;
+            if (!ScanDecToken(inst, "_phys_", out phys)) return false;
+            if (!ScanDecToken(inst, "_eng_", out eng)) return false;
+            return true;
+        }
+
+        // Reads hex digits at p (IndexOf-positioned), advances p past them.
+        private static bool ScanHex(string s, ref int p, out uint value)
+        {
+            value = 0;
+            int start = p;
+            while (p < s.Length)
+            {
+                char c = s[p];
+                int d = c >= '0' && c <= '9' ? c - '0'
+                    : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                    : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                    : -1;
+                if (d < 0) break;
+                value = value * 16 + (uint)d;   // 8 hex digits max — no overflow
+                p++;
+            }
+            return p > start;
+        }
+
+        // Finds "_token_" and parses the decimal number right after it.
+        private static bool ScanDecToken(string s, string token, out int value)
+        {
+            value = 0;
+            int t = s.IndexOf(token, StringComparison.Ordinal);
+            if (t < 0) return false;
+            int p = t + token.Length;
+            int start = p;
+            while (p < s.Length && s[p] >= '0' && s[p] <= '9')
+                value = value * 10 + (s[p++] - '0');
+            return p > start;
         }
 
         // Counter-name engtype strings are driver-cased ("3d", "videoencode", "compute_0")

@@ -109,6 +109,26 @@ namespace task_monitor
         /// <summary>The step last recorded — read by the handlers that log a caught fault.</summary>
         public static string CurrentStep => _step ?? "(未标记)";
 
+        /// <summary>
+        /// Snapshot of the recent-message ring, oldest first ("0x111(w=0)" items, space-joined).
+        /// Read by App's stall watchdog: a thread blocked inside a call can never run the VEH
+        /// dump below, so "what was it doing" has to be pulled from the OTHER side. Lock-free
+        /// and best-effort — a mid-bump read just yields one torn slot.
+        /// </summary>
+        public static string RecentMessages()
+        {
+            var sb = new StringBuilder();
+            for (int k = 0; k < RecentCount; k++)
+            {
+                int i = (_recentNext + k) & (RecentCount - 1);
+                uint m = _recentMsg[i];
+                if (m == 0) continue;
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append("0x").Append(m.ToString("X")).Append("(w=").Append(_recentWParam[i]).Append(')');
+            }
+            return sb.Length == 0 ? "(空)" : sb.ToString();
+        }
+
         private static volatile string _step;
 
         /// <summary>
@@ -346,6 +366,85 @@ namespace task_monitor
 
         /// <summary>One 64-bit register out of the CONTEXT record (offsets per winnt.h AMD64).</summary>
         private static long ReadReg(IntPtr context, int offset) => Marshal.ReadIntPtr(context, offset).ToInt64();
+
+        /// <summary>Current thread's native id — public so the taskbar thread can stamp it
+        /// for the stall watchdog (GetThreadContext needs the NATIVE id, not the managed one).</summary>
+        public static uint CurrentNativeThreadId() => GetCurrentThreadId();
+
+        // ---- stall forensics: another thread's native stack (the stall watchdog) ----
+        // The 2026-09-30 卡死 left the step marker + message ring but still could not name
+        // the blocking call; the ring only proves WHICH WndProc message, not where inside.
+        // The next stall must answer with a real stack: suspend the taskbar thread for the
+        // context+stack COPY only (µs), resume, then classify offline — so the capture
+        // itself can never wedge behind whatever the thread is blocked in. Best-effort: a
+        // torn frame just gets skipped. Never throws.
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
+        [DllImport("kernel32.dll")]
+        private static extern uint SuspendThread(IntPtr hThread);
+        [DllImport("kernel32.dll")]
+        private static extern uint ResumeThread(IntPtr hThread);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetThreadContext(IntPtr hThread, IntPtr lpContext);
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr hObject);
+        private const uint ThreadSuspendResume = 0x0002;
+        private const uint ThreadGetContext = 0x0008;
+        private const uint ThreadQueryInformation = 0x0040;
+        private const int ContextBytes = 1232;                 // AMD64 CONTEXT
+        private const int ContextFlagsControlInteger = 0x100003;   // AMD64|CONTROL|INTEGER
+
+        /// <summary>One line: RIP (module+offset) + the raw stack scan, classified. "(…)"
+        /// parenthesised text on any failure — the caller logs the line regardless.</summary>
+        public static string CaptureStackOf(int nativeThreadId)
+        {
+            if (nativeThreadId <= 0 || IntPtr.Size != 8) return "(线程句柄不可用)";
+            IntPtr h = IntPtr.Zero;
+            try
+            {
+                h = OpenThread(ThreadSuspendResume | ThreadGetContext | ThreadQueryInformation, false, (uint)nativeThreadId);
+                if (h == IntPtr.Zero) return "(OpenThread 失败 err=" + Marshal.GetLastWin32Error() + ")";
+                if (SuspendThread(h) == 0xFFFFFFFF) return "(SuspendThread 失败)";
+                long rip, rsp;
+                var words = new long[64];
+                try
+                {
+                    IntPtr ctx = Marshal.AllocHGlobal(ContextBytes);
+                    try
+                    {
+                        Marshal.WriteInt32(ctx, 0x30, ContextFlagsControlInteger);   // ContextFlags @ +0x30
+                        if (!GetThreadContext(h, ctx)) return "(GetThreadContext 失败)";
+                        rip = ReadReg(ctx, 0xF8);
+                        rsp = ReadReg(ctx, 0x98);
+                    }
+                    finally { Marshal.FreeHGlobal(ctx); }
+                    for (int k = 0; k < words.Length; k++)
+                    {
+                        try { words[k] = Marshal.ReadIntPtr(new IntPtr(rsp + k * 8)).ToInt64(); }
+                        catch { words[k] = 0; }
+                    }
+                }
+                finally { ResumeThread(h); }
+                var sb = new StringBuilder(256);
+                sb.Append("RIP=").Append(Describe(new IntPtr(rip)));
+                sb.Append(" 栈=");
+                bool any = false;
+                for (int k = 0; k < words.Length; k++)
+                {
+                    long v = words[k];
+                    if (v < 0x10000 || (v & 0xF) != 0) continue;
+                    string d = DescribeCode(v);
+                    if (d == null) continue;
+                    if (any) sb.Append(" ← ");
+                    sb.Append(d);
+                    any = true;
+                }
+                if (!any) sb.Append("(无可归因帧)");
+                return sb.ToString();
+            }
+            catch (Exception ex) { return "(抓栈异常: " + ex.GetType().Name + ")"; }
+            finally { if (h != IntPtr.Zero) CloseHandle(h); }
+        }
 
         /// <summary>Describes a stack word ONLY if it plausibly is a code address in a module or
         /// in executable private memory (JIT/stub code) — otherwise null. Used by the raw stack

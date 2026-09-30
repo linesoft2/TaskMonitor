@@ -64,7 +64,9 @@ priming: [`gotchas.md` §25](gotchas.md#25-per-metric-sampling-switches-use-a-ma
 | Sampler state | `SystemSampler` volatile mode+index pairs |
 | WM_APP | **no** — the layout does not change |
 
-Per-tick hand-off to `DiskSampler.Sample(mode, index)` / `GpuSampler.Sample(mode, index)`.
+Per-tick hand-off to `DiskSampler.Sample(mode, index)` / `GpuSampler.Sample(mode, index, pdhEngines)`
+(the third argument is ProcessGpuSampler's per-(adapter, engine) PDH map — the Win10
+utilization/name fallback, gated by `GpuSampler.NeedsPdhEngineData`, gotchas §12).
 The samplers query every device each tick regardless; the mode only selects the headline,
 and a mode/index change **clears the history** so the chart never mixes semantics. Defaults
 and the missing-device fallback: [`gotchas.md` §28](gotchas.md#28-磁盘gpu-显示方式).

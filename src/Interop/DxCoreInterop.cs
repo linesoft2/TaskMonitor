@@ -12,6 +12,14 @@ namespace task_monitor
     /// (um/dxcore_interface.h). C++ <c>bool</c> returns are 1 byte — always
     /// <c>[return: MarshalAs(UnmanagedType.I1)]</c> (the default 4-byte BOOL marshaling
     /// would read garbage).
+    ///
+    /// Win10 reality check (measured on 22H2/19045): dxcore.dll exists since 1903, but
+    /// <see cref="IDXCoreAdapter1"/> is NOT implemented there (QI → E_NOINTERFACE, despite
+    /// the SDK docs' "Windows 10 2004+" claim — Win11-only in practice), and
+    /// CreateAdapterList only matches the runtime attributes (D3D11/D3D12 Graphics,
+    /// D3D12 Core Compute), never the Win11 hardware-type ones (GPU/NPU/…). Adapters are
+    /// therefore always fetched as the base <see cref="IDXCoreAdapter"/> and
+    /// IDXCoreAdapter1 is QI'd separately where it exists.
     /// </summary>
     internal enum DXCoreAdapterProperty : uint
     {
@@ -38,7 +46,7 @@ namespace task_monitor
     internal enum DXCoreAdapterState : uint
     {
         IsDriverUpdateInProgress = 0,
-        AdapterMemoryBudget = 1,
+        AdapterMemoryBudget = 1,                 // in: {nodeIndex, segmentGroup} (segmentGroup takes DXCoreMemoryType's values) → DXCoreAdapterMemoryBudget {budget, currentUsage, availableForReservation, currentReservation}
         AdapterMemoryUsageBytes = 2,                 // in: {physIdx, DXCoreMemoryType} → DXCoreMemoryUsage {committed, resident}
         AdapterMemoryUsageByProcessBytes = 3,
         AdapterEngineRunningTimeMicroseconds = 4,    // in: {physIdx, engineIdx, processId=0} → uint64 μs
@@ -91,8 +99,11 @@ namespace task_monitor
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IDXCoreAdapterList
     {
+        // GetAdapter outputs the BASE IDXCoreAdapter — implemented by every dxcore.dll
+        // since Win10 1903. Asking for IDXCoreAdapter1 here instead fails with
+        // E_NOINTERFACE on Win10 (it doesn't exist there) and would find zero adapters.
         [PreserveSig]
-        int GetAdapter(uint index, ref Guid riid, out IDXCoreAdapter1 ppvAdapter);
+        int GetAdapter(uint index, ref Guid riid, out IDXCoreAdapter ppvAdapter);
         [PreserveSig]
         uint GetAdapterCount();
         [PreserveSig]
@@ -187,11 +198,19 @@ namespace task_monitor
     {
         public static readonly Guid IID_IDXCoreAdapterFactory = new Guid("78ee5945-c36e-4b13-a669-005dd11c0f06");
         public static readonly Guid IID_IDXCoreAdapterList = new Guid("526c7776-40e9-459b-b711-f32ad76dfc28");
+        public static readonly Guid IID_IDXCoreAdapter = new Guid("f0db4c7f-fe5a-42a2-bd62-f2a6cf6fc83e");
         public static readonly Guid IID_IDXCoreAdapter1 = new Guid("a0783366-cfa3-43be-9d79-55b2da97c63c");
 
-        // Adapter-list filter attributes (Taskmgr enumerates five; we take the two that map
-        // to its "GPU" group — real GPUs + D3D12 compute-only devices — and dedupe by LUID).
+        // Adapter-list filter attributes (dxcore_interface.h). The first is a Win11
+        // HARDWARE_TYPE attribute — Win11's CreateAdapterList matches it, Win10's returns
+        // an empty list for it. The other three are runtime attributes matched on BOTH
+        // OS families (they're the passes that find GPUs on Win10 — a VMware SVGA 3D
+        // carries D3D12_GRAPHICS but not the hardware-type GPU one). Taskmgr enumerates
+        // five (these plus the ML/Media runtime attributes — not GPUs); the passes we
+        // run dedupe by LUID.
         public static readonly Guid AttributeGpu = new Guid("b69eb219-3ded-4464-979f-a00bd4687006");
+        public static readonly Guid AttributeD3D12Graphics = new Guid("0c9ece4d-2f6e-4f01-8c96-e89e331b47b1");
+        public static readonly Guid AttributeD3D11Graphics = new Guid("8c47866b-7583-450d-f0f0-6bada895af4b");
         public static readonly Guid AttributeD3D12CoreCompute = new Guid("248e2800-a793-4724-abaa-23a6de1be090");
 
         [DllImport("dxcore.dll", ExactSpelling = true)]

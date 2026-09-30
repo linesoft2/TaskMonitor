@@ -62,6 +62,20 @@ namespace task_monitor
         public static void Warn(string msg, Exception ex) => Write("WARN", msg, ex);
         public static void Error(string msg, Exception ex = null) => Write("ERROR", msg, ex);
 
+        /// <summary>Flush and drop the log handle. Called by the watchdog's zombie restart
+        /// right before spawning the successor: the writer is opened with FileShare.Read, so
+        /// while WE hold it the child's every write loses to a sharing violation and vanishes
+        /// silently (the 2026-09-30 restart looked "never started" for exactly this reason).
+        /// The next Write re-opens the file (this process still logs its last lines).</summary>
+        public static void ReleaseHandle()
+        {
+            lock (_sync)
+            {
+                try { _writer?.Dispose(); } catch { }
+                _writer = null;
+            }
+        }
+
         /// <summary>WARN only the first time per <paramref name="key"/> — for failure
         /// paths that run every sampling tick (a per-tick WARN would flood the file).</summary>
         public static void WarnOnce(string key, string msg, Exception ex = null)

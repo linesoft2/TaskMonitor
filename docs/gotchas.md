@@ -146,7 +146,8 @@ bit and never trusts the return value.
 *`src/App.xaml.cs`, `src/UI/DetailWindow.xaml.cs`, `src/Interop/WindowBackdropInterop.cs`*
 
 FluentWpfCore's `UseWindowComposition=True` drives acrylic on every **WPF** window — do not
-hand-roll DWM/Accent P/Invoke for one of those. The 悬浮模式 widget is the exception that
+hand-roll DWM/Accent P/Invoke for one of those (the one carve-out: DetailWindow **on Win10**
+carries NO material at all — §40). The 悬浮模式 widget is the exception that
 proves the rule: it is a NATIVE DirectComposition window, so FluentWpfCore (a WPF attached
 property) cannot reach it — `WindowBackdropInterop` makes the identical accent call with the
 identical tint constants instead (§36). The right-click menu's invisible host is `Activate()`d,
@@ -184,10 +185,20 @@ actual disk-column source, NOT SRUM (layout + fallback in the file). Icons:
 from Taskmgr.exe; math, quirks and the net48 COM traps live in those headers.
 
 **Disk handles are opened per query and closed immediately, never held** — a retained handle
-vetoes USB safe-eject. GPU adapter-level metrics never touch PDH; a missing `dxcore.dll`
-(pre-1903) degrades to the `--` overlay. `DiskInfo`/`GpuInfo` are long-lived
-`INotifyPropertyChanged` objects mutated from the taskbar thread — the tabs bind once and
-keep selection.
+vetoes USB safe-eject. A missing `dxcore.dll` (pre-1903) degrades to the `--` overlay.
+`DiskInfo`/`GpuInfo` are long-lived `INotifyPropertyChanged` objects mutated from the
+taskbar thread — the tabs bind once and keep selection.
+
+**Win10 GPU reality (measured on 22H2 + VMware SVGA 3D, the 2026-09-30 "未检测到 GPU"):**
+dxcore.dll exists since 1903 but Win10's build implements only the base `IDXCoreAdapter`
+(`IDXCoreAdapter1` QI → E_NOINTERFACE — SDK docs claim 2004+, wrong) and matches only the
+runtime attributes (D3D11/D3D12 GRAPHICS, D3D12 CORE_COMPUTE) in `CreateAdapterList`, never
+the Win11 hardware-type GPU attribute. So: always GetAdapter with the base IID, QI
+`IDXCoreAdapter1` per adapter with `as`; enumerate four attribute passes deduped by LUID.
+Older drivers (VMware) also report the running-time/memory-usage states unsupported —
+utilization then falls back to the per-process PDH engine map (§13, summed per engine),
+memory to the `AdapterMemoryBudget` state's `currentUsage`. All gates are capability-based
+(`IsQueryStateSupported` / the QI result), never OS-version checks.
 
 ## 13. Per-process GPU% is PDH, not DXCore
 
@@ -195,6 +206,9 @@ keep selection.
 
 `\GPU Engine(*)\Utilization Percentage` via `PdhAddEnglishCounterW`; instance-name encoding,
 MAX aggregation and `NormalizeEngineName` are in the file. No elevation needed, unlike SRUM.
+The same collect also builds the per-(adapter LUID, phys, eng) map (`EngineMap`, on request
+via `GpuSampler.NeedsPdhEngineData`) that backs §12's Win10 utilization/name fallback —
+PDH eng ordinals and DXCore engine indices are both D3DKMT node ordinals, matching 1:1.
 
 ## 14. Process-row tooltip = view-owned `Popup`, never a row `ToolTip`
 
@@ -895,3 +909,165 @@ a fullscreen foreground hides immediately, OFF restores unconditionally — and 
 carries it from there. The card greys out outside the floating form
 (`FloatingFullscreenHideCard`), the menu item mirrors it with the same `Opened` re-read,
 and an open settings page is pushed back via `SyncFloatingFullscreenHide`.
+
+## 40. Win10 的 DetailWindow：无亚克力，`AllowsTransparency` 分层窗口 + 自绘圆角卡片
+
+*`src/UI/DetailWindow.xaml.cs`（ctor 的 Win10 分支、`ApplyTheme`、`ShowColumn` 末尾的重呈）*
+
+症状（2026-09-29，Win10 实机）：detail 弹窗打开后顶部静态内容（"CPU" 标题、图标、pin 按钮）
+经常缺失，有时整窗空白，要等下一次采样刷新后动态内容才出现；且窗口始终是直角。
+
+根因有两层，都在 Win10 特有的 accent 路径上：
+
+1. **首帧被 DWM 丢掉。** FluentWpfCore 的 `WindowMaterial` 在 `SourceInitialized` 就一次性调
+   `SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)` + 透明重定向表面 —— 而此刻窗口
+   还停在 -10000,-10000 的离屏出生地（防未样式化首帧闪烁的设计）。这个未文档化 API 在 Win10 上
+   对"离屏创建、随后裸 `SetWindowPos` 挪上屏"的窗口有已知竞态：首次合成只出模糊底、WPF 内容不上屏。
+   之后 WPF 只按脏区域重绘 —— 每 tick 刷新的动态元素（大字百分比、图表、进程行、统计值所在的
+   TextBlock）逐个恢复，从不 invalidate 的静态元素（标题、图标、pin 按钮）就一直缺失。这精确解释了
+   "只有表头消失、刷新后数字回来"的截图形态。
+2. **圆角 API 不存在。** `WindowCorner="Round"` 只是
+   `DWMWA_WINDOW_CORNER_PREFERENCE=ROUND`，Win11 专有，Win10 上 `DwmSetWindowAttribute` 静默失败。
+   而 region 不能给 blur 塑形（§36 实测）——"保留亚克力 + 圆角"在 Win10 上根本无解。
+
+修复（仅 `TaskbarWindow.IsWin11OrLater` 为 false 时；Win11 路径逐字节不变）：
+
+- ctor 把 `windowMaterial.MaterialMode` 置为 `None` —— FluentWpfCore 的 `Apply()` 变成 no-op，
+  accent 整条路径（含其首帧竞态）不复存在；同时开 `AllowsTransparency`（分层窗口）——这是
+  Win10 上唯一真正的逐像素 alpha 通道。**别走"手动复刻 FluentWpfCore 的透明表面"
+  （`CompositionTarget.BackgroundColor=Transparent` + `DwmExtendFrameIntoClientArea`）那条路**：
+  第一版就是它，alpha-0 像素在没有 accent 托底时渲染成黑色——整窗像蒙了层黑纱
+  （0xCC 的 tint 叠在黑底上），圆角外一圈黑边（同日实机反馈）。分层窗口下圆角是带 AA 的
+  真透明，`RootBorder` 的 `CornerRadius=8` + 1px 描边直接生效。
+- 卡片由 WPF 自绘：Win10 下 `RootBorder` 拿共享 tint 常量（`LightAcrylicTint`/`DarkAcrylicTint`，
+  alpha 提到 0xFF —— **不透明**：没有模糊托底时半透明只会读成灰纱，2026-09-30 用户拍板），
+  描边按 `CardBorderAlpha*` 规则（浅色卡黑线 20%、深色卡白线 12%）——与悬浮小组件同一套常量、
+  同一个"无 blur 也要圆角"的取舍（§36）。`ApplyTheme` 按 OS 分流，主题切换两条路径都覆盖。
+- `ShowColumn` 定位完成后在 Render 优先级补一刀 `InvalidateVisual()` + `SWP_FRAMECHANGED`：
+  即使首帧仍被吞，也会在用户察觉前以最终屏上位置自愈（Win11 不补 —— 不碰在用的路径）。
+
+## 41. 启动预热 / sentinel 与优雅退出的竞态
+
+*`src/UI/DetailWindow.xaml.cs`（`Prewarm`）、`src/App.xaml.cs`（prewarm 排队的 `_stopping` 守卫、
+`ClearStaleShutdownSentinel` 调用点）、`src/UI/TaskbarWindow.cs`（`ConsumeShutdownSentinel` /
+`ClearStaleShutdownSentinel`）*
+
+2026-09-29 实机事故（Win10，崩溃对话框 + `logs/native-crash.log` 两条 VEH 记录）：新实例启动
+仅 2s 就"检测到 shutdown.sentinel——构建触发的优雅退出"，随后弹 UI 线程未处理异常
+（`System.NullReferenceException`，栈顶是 WPF 框架内部的
+`DeferredAppResourceReference.GetValue`，本进程帧是 `DetailWindow.Prewarm` 里的
+`ContentHost.Content = view`）。
+
+两层原因，对应两道修复：
+
+1. **残留 sentinel 杀死了新实例。** 构建流程连跑两次 `touch shutdown.sentinel` 而旧实例只消费了
+   第一个，剩下的文件躺在原地，被下一次启动的新实例的 1s tick 当成"立即退出"指令。修复：
+   `App.OnStartup` 在拿到单实例 mutex 之后调 `TaskbarWindow.ClearStaleShutdownSentinel()`。
+   放在 mutex 之后是关键：此刻能证明没有存活兄弟实例，磁盘上的文件只可能属于某个已退出的
+   上一实例（正常构建流里，旧实例永远在新实例启动前消费掉它自己的 sentinel）；而在
+   explorer-restart 的 `Start()` 重入路径上绝不清——那可能删掉一个正当的、针对本实例的
+   构建退出请求。
+2. **Background 优先级的 prewarm 在退出流程中才执行。** `OnExit` 用 `Thread.Join` 等任务栏线程
+   拆除 overlay，而 STA 线程的 Join 会继续泵消息——排队的 Background 级 DispatcherOperation
+   （启动时排的 `Prewarm`）就这样在 `退出` 日志之后 40ms 才被派发，撞上已在拆除的应用资源，
+   WPF 的延迟资源引用解析 NRE。修复是双保险：排队回调开头 `if (_stopping) return;`（常见情形
+   直接跳过），且 `Prewarm` 整体 try/catch 只记 `Logger.Warn`——它是纯优化，永远没有资格弹
+   崩溃框；try/catch 同时盖住"回调进入时还没 `_stopping`、循环内 `Dispatcher.Invoke` 的嵌套帧
+   泵又把 Shutdown 派发进来"这种重入形态。
+
+同类风险已知仍存在但不处理：若退出时恰好有开着的 detail 窗口，`RefreshDetails` 的排队刷新
+理论上也能在 OnExit 的 Join 泵里踩到同一个框架 NRE——尚未有实机报告，且窗口打开时用户本就
+在场，留待真出现再说。
+
+## 42. 经典任务栏(Win10)下覆盖层必须自画不透明底色，不能全透明
+
+*`src/UI/TaskbarWindow.cs`（`DrawHorizontal` / `DrawVertical` 的 CardBrush 全幅填充；
+`ApplyTaskbarTheme` 里 CardBrush 的 taskbar-form 角色注释）*
+
+症状（2026-09-30，Win10 实机，200% DPI 虚拟机）：覆盖层区域里**有时**长期显示一个程序图标
+样子的残影（半透明、位置固定、不随 tick 刷新变化），Win11 从没有。用户最初被误导的方向：
+是某个活动元素"透"了过来——逐一排除：资讯和兴趣（`DynamicContent2`，窗口虽在但永远隐藏、
+且用户已关闭）、托盘图标（位置对不上，托盘从 x=1419 开始）、桌面图标透出（枚举桌面 ListView
+全部 8 个图标，没有一个落在任务栏下方）、覆盖层自己画的（网络列只画 ↑↓ 和文本）。
+
+真正的机制是**残留像素**，而且是我们结构性无法清理的那种：
+
+- 覆盖层身体除文字/分隔线外全透明（DComposition premultiplied，每帧 `Clear()` 透明）。
+- 它身下是 `ReBarWindow32` 和 `Shell_TrayWnd` 的表面，而这两个窗口都带
+  `WS_CLIPCHILDREN`：凡是被子窗口盖住的区域，父窗口**永远不会在那里重绘**。
+- 于是覆盖层压住的那块父窗口表面，内容从被盖住的一刻起就被冻住——新表面重建
+  （explorer 重启）时可能带着表面池里回收来的旧像素（上个 explorer 的任务按钮/图标残片，
+  亮度不衰减，正好读作"某个程序的图标残影"）。"有的时候"= 取决于重建那一刻池子里有什么。
+- **没有任何办法擦干净**：被 clip 的区域连 `RedrawWindow`/`WM_ERASEBKGND` 都进不去，
+  唯一能变它的时机是表面重建——而重建正是带来下一批回收像素的时刻。任务按钮带收缩后、
+  覆盖层停靠前那个微秒级的空窗里理论上能对 ReBar 补一次重绘，但 Shell_TrayWnd 被 ReBar
+  整体盖住，那一层的脏永远够不着。
+
+修法因此只有一个：**遮盖**。经典任务栏形态（`!s.Floating && s.Classical`）下
+Draw 的第一步用 `CardBrush`（alpha 恒为 1）全幅填满窗口矩形，把身下的一切都盖死——与悬浮
+小组件的自绘卡片（§36）、Win10 detail 弹窗的不透明卡片（§40）同一套取舍：没有可靠托底
+时就不依赖别人的表面。Win11 路径不受影响，保持全透明。
+
+底色颜色**不能写死**：第一版用了共享 tint（深色 0x202020），用户当场打回"太黑了，还是要
+透明的效果"。移植 TrafficMonitor 的 `auto_set_background_color`
+（TrafficMonitorDlg.cpp）：每 tick 在任务按钮带与我们窗口边缘之间那 2px 缝隙处
+（`rc.left-1`/`rc.right+1`，竖直任务栏取上/下沿）用 `GetPixel(GetDC(NULL))` 读合成后的
+任务栏真实颜色，实时染给底色画刷（`SampleTaskbarBackdropColor`；纯黑=重启瞬态，忽略；
+颜色没变不动笔）。单像素裸读会被"操作任务栏"污染：explorer 会把按钮带瞬间重展压过缝隙，
+那一 tick 读到的是任务按钮的颜色，底色就跟着来回轮换（浅色模式下刺眼）。三重防护：
+3 像素平均（抗边缘抗锯齿）、逐通道阈值（近似色不动笔）、**稳定期**——新颜色必须连续
+3 个 tick 一致才采用，亚秒级的按钮带重展永远到不了画刷。观感=无缝融入任务栏（"透明"的
+效果），实质=不透明遮盖，残影再无可乘。
+停靠时在 `RepositionOverlay` 之后立即采样+重画一帧，第一帧可见画面就是无缝的；主题/壁纸/
+透明度变化靠每 tick 的采样自然跟上。
+
+附带事故（同日）：explorer 重启还暴露了一个独立 bug——任务栏线程在 explorer 死亡期间
+卡在某个阻塞调用里再没醒来（看门狗 17:45:02 报"覆盖层窗口已消失 6s 而 Start() 未返回"），
+覆盖层永久丢失且 sentinel 不再被消费，只能任务管理器杀进程。修复见 §43（跨线程探活 +
+停滞取证转储 + 45s 僵尸自愈重启）。
+
+## 43. 永不无保护地跨线程调用 explorer 的窗口；僵尸卡死要取证 + 自愈
+
+*`src/UI/TaskbarWindow.cs`（`BandResponsive`；`ClassicalReposition` / `RestoreMinWindow` 的探活；
+拆除路径的 `NoteStep`）、`src/App.xaml.cs`（`CheckOverlayHealth` 的取证转储与 45s 自愈重启）、
+`src/Interop/CrashTraceInterop.cs`（`RecentMessages`）*
+
+事故（2026-09-30，§42 同日）：explorer 莫名重启（pid 5128→1380，用户未操作——疑似崩溃后
+WER 拉起），任务栏线程随之**永久**卡住：心跳停、覆盖层 HWND 消失、`Start()` 不返回、
+重建循环死、sentinel 不消费，20+ 分钟无自愈，只能任务管理器杀进程。
+
+机制（最终确认版，取证过程本身就是教材）：`SetWindowPos`/`MoveWindow` 作用于别的线程
+拥有的窗口时会同步等应答，explorer 拆除中永不应答 → 调用永久阻塞——这是最初的理论。
+第一版（探活+worker）上线后用户复测**依旧卡死**，但看门狗新增的 `CaptureStackOf`（挂起
+线程抓原生栈）给出两次 `RIP=win32u 同偏移` + 消息环 `0x113(WM_TIMER)×7 + 0x82
+(WM_NCDESTROY)`——再对照 `_step`（从不清除的残留标记）才看出真相：**线程不是卡在调用
+里，而是卡在空队列的 `GetMessage` 上**。窗口被 explorer 拆除时，win32k 只派发了裸
+`WM_NCDESTROY`（没有先行的 `WM_DESTROY`——2026-09-30 19:40 实机复现确认），定时器随
+窗口死亡、队列变空，`PostQuitMessage`（只在我们的 WM_DESTROY 分支里发）从未发出，
+`Start()` 永不返回，重建循环、心跳、sentinel 全灭。此前把 `GetWindowRect` 当凶手是被
+`_step` 残留值误导（它停在 `经典重定位:测带矩形`）。
+
+最终四层处置：
+
+1. **源头——裸 `WM_NCDESTROY` 也走完整拆除**。`TeardownOverlay`（恢复按钮带 / SRUM
+   注销 / 杀定时器 / 释放设备管线，全部有界）从 WM_DESTROY 提取出来，两条消息都调用
+   并 `PostQuitMessage`（once-guard 幂等）。实测效果：explorer 一死，`Start()` 立即
+   返回、2s 后重建、~5s 内重新嵌入，进程不重启。
+2. **消息循环不做会同步进别人窗口的调用（硬化，保留）**。按钮带移动、对外部窗口的
+   `GetWindowRect`/`GetClientRect` 等一律经静态 worker 线程（IsBackground）执行，调用
+   方用 `WaitForSingleObject` 有界等待（**不用 CLR 的 STA 泵等待**——那正是消息环里
+   嵌套 WM_TIMER 的重入通道）。**例外：`SetParent` 必须留在消息循环上**——它调用中途
+   要给我们自己的窗口递消息，调用方必须能泵（放 worker 上必死锁，19:31 实机验证）。
+   已知残留洞：悬浮模式的 `SHQueryUserNotificationState`（到 explorer 的 RPC）未守护。
+3. **看门狗 5s 轻唤醒**。窗口消失超 5s：`PostThreadMessage(WM_QUIT)` 到任务栏线程——
+   空队列的 `GetMessage` 立即返回 0，`Start()` 返回即重建（~7s）；线程若真卡在调用
+   里，quit 在队列里等它返回，无副作用。
+4. **45s 僵尸判定 → 静默自愈重启（兜底，已验证）**。`Logger.ReleaseHandle()`（否则子
+   进程首批日志被 `FileShare.Read` 冲突吃掉）+ **先处置单实例 mutex 句柄**（否则子进程
+   在父进程死前做存在性检测，把自己当第二实例静默退出——PID=368 之死）→
+   `Process.Start(UseShellExecute=false)` 拉起**静默提权**新实例（父提权→子提权，无
+   UAC，也不依赖可能正在重启的 explorer 的 shell 启动）→ `Environment.Exit(0)`（不等
+   挂起的前台线程）。每次进程生命只触发一次。
+
+另：重建间隙（拆除→2s 退避→探测→首个 tick）是**合法的** tick 空窗，探测循环和
+App 重建循环里现在都打心跳点，看门狗不再误报（19:40:30 的假停滞）。

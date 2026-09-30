@@ -13,7 +13,8 @@ namespace task_monitor
     /// The settings window — a WinUI-look shell (iNKORE modern window style + Mica)
     /// holding ONE scrollable page (Win11 Settings style, cards grouped by 类别
     /// TextBlock headers): 通用 (开机自启动 / 采样间隔 / 检查更新 / 更新源), 外观 (主题 / 靠左显示 — an
-    /// expander whose item is 靠左位置), 采样 (one expander per metric, the toggle in
+    /// expander whose item is 靠左位置, or a plain card where that item does not exist,
+    /// i.e. on the classical Win10 taskbar), 采样 (one expander per metric, the toggle in
     /// its content area enabling/disabling that metric's sampling; 磁盘's and GPU's
     /// expanders also hold 显示方式 + the specific-device picker, 网络's the 适配器
     /// picker, the 公网 IP lookup switch and the Clash/Mihomo integration (switch +
@@ -48,6 +49,9 @@ namespace task_monitor
         // Guards the event handlers while the ctor pushes the initial state into the
         // controls (setting IsOn / SelectedIndex fires Toggled / SelectionChanged).
         private bool _loaded;
+        // 靠左显示's host: the expander on Win11, the plain card on the classical (Win10)
+        // taskbar (see the ctor) — only the one actually shown gets enabled/disabled.
+        private readonly Control _onLeftHost;
 
         /// <param name="overlayOnLeft">Effective 靠左显示 state (yaml null = the left default).</param>
         /// <param name="snapToStart">Current overlaySnapToStart value (left-side anchor).</param>
@@ -175,13 +179,23 @@ namespace task_monitor
             AnchorCombo.SelectedIndex = snapToStart ? 1 : 0;
             AnchorCombo.IsEnabled = overlayOnLeft;   // the anchor only matters while 靠左 is on
             // Classical (Win10) taskbar: 靠左 has a single spot (the task-buttons band's
-            // end next to Start) — the anchor combo is Win11-only (far-left corner vs
-            // snapped to Start), and the Win11 fallback note in the description doesn't
-            // apply either.
+            // end next to Start), so 靠左位置 does not exist and the expander would offer
+            // a chevron opening onto nothing — 靠左显示 renders as a plain card instead
+            // (OnLeftCard). Its icon and its ToggleSwitch MOVE over, so there is exactly
+            // one switch and one piece of state; the expander's two properties are
+            // cleared first, or its template would claim the same children the moment it
+            // applies.
+            _onLeftHost = OnLeftExpander;
             if (!TaskbarWindow.IsWindows11Taskbar())
             {
-                AnchorCard.Visibility = Visibility.Collapsed;
-                OnLeftExpander.Description = "显示在任务栏左侧（任务按钮区靠开始按钮的一端）";
+                var icon = OnLeftExpander.HeaderIcon;
+                OnLeftExpander.HeaderIcon = null;
+                OnLeftExpander.Content = null;
+                OnLeftCard.HeaderIcon = icon;
+                OnLeftCard.Content = OnLeftSwitch;
+                OnLeftExpander.Visibility = Visibility.Collapsed;
+                OnLeftCard.Visibility = Visibility.Visible;
+                _onLeftHost = OnLeftCard;
             }
             AutoStartSwitch.IsOn = autoStartOn;
             ThemeCombo.SelectedIndex = themeIndex < 0 || themeIndex > 2 ? 0 : themeIndex;
@@ -206,7 +220,7 @@ namespace task_monitor
             FloatingOpacityCard.IsEnabled = floatingMode;
             // …and the two are mutually exclusive: a floating widget is positioned by dragging,
             // not by the taskbar anchors, so 靠左显示/靠左位置 do nothing while it is on.
-            OnLeftExpander.IsEnabled = !floatingMode;
+            _onLeftHost.IsEnabled = !floatingMode;
             IntervalCombo.SelectedIndex = IntervalToIndex(intervalMs);
             CpuSwitch.IsOn = (samplingMask & SystemSampler.MaskCpu) != 0;
             RamSwitch.IsOn = (samplingMask & SystemSampler.MaskRam) != 0;
@@ -345,7 +359,7 @@ namespace task_monitor
             FloatingEdgeHideCard.IsEnabled = on;
             FloatingFullscreenHideCard.IsEnabled = on;
             FloatingOpacityCard.IsEnabled = on;
-            OnLeftExpander.IsEnabled = !on;
+            _onLeftHost.IsEnabled = !on;
             _loaded = true;
         }
 
@@ -408,7 +422,7 @@ namespace task_monitor
             FloatingEdgeHideCard.IsEnabled = FloatingSwitch.IsOn;
             FloatingFullscreenHideCard.IsEnabled = FloatingSwitch.IsOn;
             FloatingOpacityCard.IsEnabled = FloatingSwitch.IsOn;
-            OnLeftExpander.IsEnabled = !FloatingSwitch.IsOn;   // anchors don't apply to a dragged widget
+            _onLeftHost.IsEnabled = !FloatingSwitch.IsOn;   // anchors don't apply to a dragged widget
             _floatingChanged?.Invoke(FloatingSwitch.IsOn);
         }
 

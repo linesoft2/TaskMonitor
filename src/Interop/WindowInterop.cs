@@ -139,6 +139,7 @@ namespace task_monitor
         // ---------- Window messages ----------
         public const uint WM_DESTROY = 0x0002;
         public const uint WM_CLOSE = 0x0010;
+        public const uint WM_NCDESTROY = 0x0082;
         public const uint WM_TIMER = 0x0113;
         public const uint WM_MOUSEMOVE = 0x0200;
         public const uint WM_LBUTTONDOWN = 0x0201;
@@ -250,6 +251,30 @@ namespace task_monitor
 
         [DllImport("user32.dll")]
         public static extern uint GetDpiForWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        public static extern uint GetPixel(IntPtr hdc, int x, int y);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam,
+            uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+        public const uint WM_NULL = 0x0000;
+        public const uint SMTO_BLOCK = 0x0001;
+        public const uint SMTO_ABORTIFHUNG = 0x0002;
+        public const uint WM_QUIT = 0x0012;
+
+        [DllImport("user32.dll")]
+        public static extern bool PostThreadMessageW(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll")]
         public static extern IntPtr LoadCursorW(IntPtr hInstance, int lpCursorName);

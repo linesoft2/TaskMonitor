@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -678,8 +679,13 @@ namespace task_monitor
         /// before Start() has run (_sampler still null, e.g. during Prewarm).</summary>
         public void RequestWifiDetails() => _sampler?.RequestWifiDetails();
 
+        /// <summary>The taskbar thread's NATIVE id, stamped at the top of Start() — the
+        /// stall watchdog needs it for CrashTrace.CaptureStackOf (a native context grab).</summary>
+        public int NativeThreadId;
+
         public void Start()
         {
+            NativeThreadId = (int)CrashTrace.CurrentNativeThreadId();
             // === Step 1: locate taskbar, query DPI, compute size ===
             // WAIT for a real taskbar rather than giving up: at boot the scheduled-task
             // logon trigger can fire BEFORE explorer has created (or laid out)
@@ -699,9 +705,14 @@ namespace task_monitor
             int probeWaits = 0;
             while (true)
             {
+                // Stamp the heartbeat on every probe pass — the rebuild gap (destroy →
+                // Start() return → 2s backoff → probe → first tick) is a LEGITIMATE
+                // several-second tick pause, and without stamps the watchdog reads it
+                // as a stall (the 19:40:30 false positive, gotchas §43).
+                LastTickTickCount = (long)SystemInfo.GetTickCount64();
                 taskbar = WindowInterop.FindWindowW("Shell_TrayWnd", null);
                 if (taskbar != IntPtr.Zero
-                    && WindowInterop.GetWindowRect(taskbar, out taskbarRect)
+                    && TryGetWindowRectGuarded(taskbar, 500, out taskbarRect)   // dying taskbar deadlocks a direct read (gotchas §43)
                     && taskbarRect.right - taskbarRect.left > 0
                     && taskbarRect.bottom - taskbarRect.top > 0)
                 break;
@@ -734,7 +745,7 @@ namespace task_monitor
                         break;
                 }
                     Thread.Sleep(1000);
-                    WindowInterop.GetWindowRect(taskbar, out taskbarRect);   // boot layout still settling
+                    TryGetWindowRectGuarded(taskbar, 500, out taskbarRect);   // boot layout still settling (guarded, gotchas §43)
                 }
             }
             if (!classical && !IsWindows11Taskbar(taskbar))
@@ -1026,7 +1037,12 @@ namespace task_monitor
             {
                 // Parent: the Win11 taskbar takes us directly; the classical one docks us in
                 // the ReBar (the band container), whose task-buttons toolbar is then shrunk
-                // to make room (TrafficMonitor's GetParentHwnd split).
+                // to make room (TrafficMonitor's GetParentHwnd split). SetParent stays ON
+                // this thread — it delivers messages to OUR window mid-call, so the caller
+                // must be able to pump (from the worker it deadlocks by construction:
+                // worker waits for us to pump, we're waiting for the worker — verified
+                // 2026-09-30, gotchas §43). Its dying-explorer risk is covered by the
+                // probe seconds above + the 45s zombie self-restart.
                 IntPtr prevParent = WindowInterop.SetParent(hwnd, classical ? hBar : taskbar);
                 if (prevParent == IntPtr.Zero)
                     Logger.Error($"SetParent 嵌入任务栏失败（目标={(classical ? "ReBarWindow32" : "Shell_TrayWnd")}）err={Marshal.GetLastWin32Error()}——覆盖层浮为顶层窗口");
@@ -1036,6 +1052,15 @@ namespace task_monitor
                 {
                     // Carve out our slot (shrink/shift the band) and dock into it.
                     RepositionOverlay(hwnd, state, force: true);
+                    // Match the opaque backdrop to the real taskbar colour at the final dock
+                    // rect NOW (the step-7 first frame still carried the fixed tint) and
+                    // repaint — the first visible frame is already seamless, and the tick
+                    // keeps it matched from here.
+                    if (!state.DeviceLost)
+                    {
+                        SampleTaskbarBackdropColor(hwnd, state);
+                        Draw(state);
+                    }
                 }
                 else
                 {
@@ -1051,7 +1076,7 @@ namespace task_monitor
             // Baseline placement-geometry dump (see LogGeometry) — later per-tick
             // dumps are change-gated against these rects.
             LogGeometry(taskbar, hwnd, floating ? "悬浮" : "嵌入");
-            if (WindowInterop.GetWindowRect(taskbar, out var diagTb)) state.DiagTaskbarRect = diagTb;
+            if (TryGetWindowRectGuarded(taskbar, 300, out var diagTb)) state.DiagTaskbarRect = diagTb;   // foreign window (gotchas §43)
             if (WindowInterop.GetWindowRect(hwnd, out var diagOv)) state.DiagOverlayRect = diagOv;
             state.DiagLogged = true;
 
@@ -1138,6 +1163,26 @@ namespace task_monitor
             float top = pad;
             float bottom = s.LogicalHeight - pad;
             float mid = (top + bottom) / 2f;
+
+            // 经典任务栏(Win10): the OPAQUE BACKDROP — the form paints its own background
+            // instead of letting the taskbar show through. Beneath us sit the ReBar's and
+            // Shell_TrayWnd's surfaces, and both carry WS_CLIPCHILDREN: the region our
+            // child window covers can never be repainted again, so whatever those surfaces
+            // happen to hold there — recycled pixels from an explorer restart's freed
+            // surfaces, e.g. a task button's or flyout's ICON — stays FROZEN and shows
+            // through the transparent body as a permanent 残影 (no repaint can ever reach
+            // the clipped region to clean it; only a surface recreate changes it — and the
+            // recreate is exactly what brings the next batch of garbage). The only cure is
+            // to occlude: a fully opaque fill, full-bleed and square (the window IS a
+            // taskbar segment). The fill colour is SAMPLED from the live taskbar every tick
+            // (SampleTaskbarBackdropColor — TrafficMonitor's auto_set_background_color),
+            // so the strip reads as the taskbar itself rather than a fixed dark block;
+            // until the first sample it is the shared tint. Win11 keeps true transparency
+            // — its taskbar paints under us.
+            if (!s.Floating && s.Classical && s.CardBrush != null)
+                ctx.FillRectangle(
+                    new D2D_RECT_F { left = 0f, top = 0f, right = layout.Width, bottom = s.LogicalHeight },
+                    s.CardBrush);
 
             // 悬浮模式: the CARD — the widget's own background, because it has no material and
             // no system frame any more (WindowBackdropInterop carries the why). Drawn as a
@@ -1246,6 +1291,13 @@ namespace task_monitor
         private static void DrawVertical(RenderState s, OverlayLayout layout)
         {
             var ctx = s.D2dContext;
+
+            // The classical opaque backdrop (the 残影 cure — see DrawHorizontal). Vertical
+            // mode only exists on the classical family, but keep the same guard shape.
+            if (!s.Floating && s.Classical && s.CardBrush != null)
+                ctx.FillRectangle(
+                    new D2D_RECT_F { left = 0f, top = 0f, right = layout.Width, bottom = s.LogicalHeight },
+                    s.CardBrush);
 
             // Highlight (selected) / hover fill, per hit slot (strips here, cells above).
             for (int i = 0; i < SlotCount; i++)
@@ -1449,9 +1501,10 @@ namespace task_monitor
             s.HighlightBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.15f });
             s.HoverBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.07f });
             s.SeparatorBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 0.12f });
-            // 悬浮模式's card fill — the widget's own background (the taskbar forms never draw
-            // it: their surface IS the taskbar). Created black like the rest and re-tinted by
-            // ApplyTaskbarTheme, which is the live theme flip.
+            // 悬浮模式's card fill — the widget's own background. The Win11 taskbar form never
+            // draws it (its surface IS the taskbar); the 经典任务栏(Win10) form draws it as the
+            // opaque backdrop (the 残影 cure — DrawHorizontal). Created black like the rest
+            // and re-tinted by ApplyTaskbarTheme, which is the live theme flip.
             s.CardBrush = s.D2dContext.CreateSolidColorBrush(new _D3DCOLORVALUE { r = 0f, g = 0f, b = 0f, a = 1f });
             // The card's outline brush — the edge DWM's window border used to draw (it left with
             // the frame), re-tinted by ApplyTaskbarTheme with the rest.
@@ -1722,7 +1775,7 @@ namespace task_monitor
                     // Snap just left of the Start button — follows the centred icon
                     // group as icons come and go (tracked by the per-tick poll).
                     IntPtr start = WindowInterop.FindWindowExW(taskbar, IntPtr.Zero, "Start", null);
-                    if (start != IntPtr.Zero && WindowInterop.GetWindowRect(start, out var startRect))
+                    if (start != IntPtr.Zero && TryGetWindowRectGuarded(start, 300, out var startRect))
                         xrel = startRect.left - taskbarLeft - windowWidth - spacing;
                 }
                 else
@@ -1741,7 +1794,7 @@ namespace task_monitor
             int xs;
             int xr;
             IntPtr tray = WindowInterop.FindWindowExW(taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
-            if (tray != IntPtr.Zero && WindowInterop.GetWindowRect(tray, out var trayRect))
+            if (tray != IntPtr.Zero && TryGetWindowRectGuarded(tray, 300, out var trayRect))
             {
                 xs = trayRect.left - windowWidth - spacing;
                 xr = trayRect.left - taskbarLeft - windowWidth - spacing;
@@ -1931,9 +1984,11 @@ namespace task_monitor
             SetBrushColor(s.HighlightBrush, c, 0.15f);
             SetBrushColor(s.HoverBrush, c, 0.07f);
             SetBrushColor(s.SeparatorBrush, c, 0.12f);
-            // The floating widget's card — the detail popup's material TINT RGB (0xF3F3F3
-            // light / 0x202020 dark, the shared constants), alpha = k itself (see above).
-            // Unused by the taskbar forms; CardAlpha remains the POPUP's.
+            // The card tint — the detail popup's material TINT RGB (0xF3F3F3 light /
+            // 0x202020 dark, the shared constants), alpha = k itself (see above). It is the
+            // 悬浮模式 card fill AND the 经典任务栏 form's opaque backdrop (the 残影 cure —
+            // DrawHorizontal/DrawVertical). On the Win11 taskbar form it stays unused.
+            // CardAlpha remains the POPUP's.
             SetBrushColor(s.CardBrush, light ? WindowBackdropInterop.CardRgbLight : WindowBackdropInterop.CardRgbDark,
                 k);
             // Its outline: the colour DWM's window border used to paint (a dark line over the
@@ -1947,6 +2002,19 @@ namespace task_monitor
             // Every brush is solid-colour (Start's step 8), so the As<> QI is a same-object
             // cast and SetColor mutates in place — a theme flip needs no brush recreation.
             var color = new _D3DCOLORVALUE { r = rgb, g = rgb, b = rgb, a = a };
+            brush.As<ID2D1SolidColorBrush>().SetColor(ref color);
+        }
+
+        // Same mutation from a GDI COLORREF (0x00BBGGRR — what GetPixel returns), opaque.
+        private static void SetBrushColor(IComObject<ID2D1Brush> brush, uint colorref)
+        {
+            var color = new _D3DCOLORVALUE
+            {
+                r = (colorref & 0xFF) / 255f,
+                g = ((colorref >> 8) & 0xFF) / 255f,
+                b = ((colorref >> 16) & 0xFF) / 255f,
+                a = 1f,
+            };
             brush.As<ID2D1SolidColorBrush>().SetColor(ref color);
         }
 
@@ -2263,9 +2331,10 @@ namespace task_monitor
                     out WindowInterop.RECT bounds, Marshal.SizeOf(typeof(WindowInterop.RECT))) != 0)
             {
                 // No DWM answer (dead handle, pre-DWM path): raw rect, but a maximized window
-                // would overshoot its monitor by the invisible border — skip those.
+                // would overshoot its monitor by the invisible border — skip those. Guarded:
+                // the raw rect read is a foreign-window call (gotchas §43).
                 if (WindowInterop.IsZoomed(fg)) return false;
-                if (!WindowInterop.GetWindowRect(fg, out bounds)) return false;
+                if (!TryGetWindowRectGuarded(fg, 100, out bounds)) return false;
             }
             const int slack = 4;   // physical px — DPI rounding, not a real gap
             return bounds.left <= mi.rcMonitor.left + slack && bounds.top <= mi.rcMonitor.top + slack
@@ -2377,9 +2446,11 @@ namespace task_monitor
             foreach (var h in hwnds)
             {
                 // The HWNDs are captured on the UI thread; one may already be destroyed by the
-                // time this runs (GetWindowRect on a dead handle just fails).
+                // time this runs (GetWindowRect on a dead handle just fails). Guarded all the
+                // same (gotchas §43): they're ANOTHER thread's windows while that thread
+                // (the WPF UI) may itself be mid-teardown on exit.
                 if (h == IntPtr.Zero || !WindowInterop.IsWindow(h)) continue;
-                if (!WindowInterop.GetWindowRect(h, out var r)) continue;
+                if (!TryGetWindowRectGuarded(h, 100, out var r)) continue;
                 if (r.right <= x || r.left >= right || r.bottom <= y || r.top >= bottom) continue;
                 if (!any) { covered = r; any = true; continue; }
                 if (r.left < covered.left) covered.left = r.left;
@@ -2479,7 +2550,7 @@ namespace task_monitor
                 ClassicalReposition(hwnd, s, force);
                 return;
             }
-            if (!WindowInterop.GetWindowRect(s.TaskbarHwnd, out var taskbarRect)) return;
+            if (!TryGetWindowRectGuarded(s.TaskbarHwnd, 300, out var taskbarRect)) return;
 
             // Track the taskbar's HEIGHT too, not just the anchors. Start() sizes the
             // buffers from a rect probed once — that probe can catch a transient taller
@@ -2582,19 +2653,32 @@ namespace task_monitor
         private static void LogGeometry(IntPtr taskbar, IntPtr overlayHwnd, string context)
         {
             string msg = $"几何（{context}）：";
-            if (WindowInterop.GetWindowRect(taskbar, out var tr))
+            if (TryGetWindowRectGuarded(taskbar, 300, out var tr))   // foreign window (gotchas §43)
             {
                 msg += $"任务栏窗口=({tr.left},{tr.top})-({tr.right},{tr.bottom}) {tr.right - tr.left}x{tr.bottom - tr.top}px";
                 TaskbarBand(taskbar, tr, out int bandH, out int bandY);
                 if (bandH != tr.bottom - tr.top || bandY != 0)
                     msg += $"。系统保留带=高{bandH}px y偏移{bandY}（窗口比保留区域高，覆盖层底对齐保留带）";
             }
-            if (WindowInterop.GetClientRect(taskbar, out var cr))
+            WindowInterop.RECT cr = default;
+            var pt = new WindowInterop.POINT { x = 0, y = 0 };
+            bool clientOk = false;
+            RunOnNativeWorker(() =>
             {
-                var pt = new WindowInterop.POINT { x = 0, y = 0 };
-                WindowInterop.ClientToScreen(taskbar, ref pt);
+                // captured locals can't be out/ref targets (CS1628) — bounce through lambda-locals
+                if (WindowInterop.GetClientRect(taskbar, out var t))
+                {
+                    cr = t;
+                    var p = new WindowInterop.POINT { x = 0, y = 0 };
+                    if (WindowInterop.ClientToScreen(taskbar, ref p))
+                    {
+                        pt = p;
+                        clientOk = true;
+                    }
+                }
+            }, 300);
+            if (clientOk)
                 msg += $"，任务栏客户区={cr.right - cr.left}x{cr.bottom - cr.top}px 原点=({pt.x},{pt.y})";
-            }
             IntPtr mon = WindowInterop.MonitorFromWindow(taskbar, WindowInterop.MONITOR_DEFAULTTONEAREST);
             var mi = new WindowInterop.MONITORINFO { cbSize = (uint)Marshal.SizeOf<WindowInterop.MONITORINFO>() };
             bool hasMon = mon != IntPtr.Zero && WindowInterop.GetMonitorInfoW(mon, ref mi);
@@ -2631,8 +2715,11 @@ namespace task_monitor
             // shrink — re-measuring a still-shrunk band would shrink it further every
             // time (explorer only re-expands it on its own layout events).
             if (force) RestoreMinWindow(s);
-            if (!WindowInterop.GetWindowRect(s.MinHwnd, out var rcMin)) return;
-            if (!WindowInterop.GetWindowRect(s.BarHwnd, out var rcBar)) return;
+            CrashTrace.NoteStep("经典重定位:测带矩形");
+            // Foreign-window rect reads go through the worker (gotchas §43) — a dying
+            // explorer's band/ReBar deadlocks a direct GetWindowRect (CaptureStackOf).
+            if (!TryGetWindowRectGuarded(s.MinHwnd, 300, out var rcMin)) return;
+            if (!TryGetWindowRectGuarded(s.BarHwnd, 300, out var rcBar)) return;
 
             if (!s.Vertical)
             {
@@ -2645,16 +2732,30 @@ namespace task_monitor
                 s.MinSpace = rcMin.left - rcBar.left;
                 s.LastMinLength = bandW - s.PhysicalWidth;
                 int x;
+                // The band move is a cross-thread call into explorer — OFF the message
+                // loop, via the worker's bounded wait (the 卡死 root fix, gotchas §43).
+                // A timeout skips this round; our window stays put until the band does.
                 if (!s.Owner._onLeft)
                 {
-                    WindowInterop.MoveWindow(s.MinHwnd, s.MinSpace, 0, Math.Max(0, bandW - s.PhysicalWidth), rcMin.bottom - rcMin.top, true);
+                    CrashTrace.NoteStep("经典重定位:带移动(横,远)");
+                    if (!BandMoveAndWait(s.MinHwnd, s.MinSpace, 0, Math.Max(0, bandW - s.PhysicalWidth), rcMin.bottom - rcMin.top, 300))
+                    {
+                        Logger.WarnOnce("band-move-timeout", "任务按钮带移动超时（explorer 无响应/卡死）——本轮经典重定位跳过");
+                        return;
+                    }
                     x = s.MinSpace + bandW - s.PhysicalWidth + 2;   // TrafficMonitor's +2px nudge toward the tray
                 }
                 else
                 {
-                    WindowInterop.MoveWindow(s.MinHwnd, s.MinSpace + s.PhysicalWidth, 0, Math.Max(0, bandW - s.PhysicalWidth), rcMin.bottom - rcMin.top, true);
+                    CrashTrace.NoteStep("经典重定位:带移动(横,近)");
+                    if (!BandMoveAndWait(s.MinHwnd, s.MinSpace + s.PhysicalWidth, 0, Math.Max(0, bandW - s.PhysicalWidth), rcMin.bottom - rcMin.top, 300))
+                    {
+                        Logger.WarnOnce("band-move-timeout", "任务按钮带移动超时（explorer 无响应/卡死）——本轮经典重定位跳过");
+                        return;
+                    }
                     x = s.MinSpace;
                 }
+                CrashTrace.NoteStep("经典重定位:移本窗(横)");
                 int y = Math.Max(0, (rcBar.bottom - rcBar.top - s.PhysicalHeight) / 2);   // centred in the ReBar
                 WindowInterop.MoveWindow(hwnd, x, y, s.PhysicalWidth, s.PhysicalHeight, true);
                 Logger.Debug($"经典重定位{(force ? "（强制）" : "")}：任务按钮带 {bandW}→{Math.Max(0, bandW - s.PhysicalWidth)}px，覆盖层 ({x},{y}) {s.PhysicalWidth}x{s.PhysicalHeight}");
@@ -2670,18 +2771,223 @@ namespace task_monitor
                 int y;
                 if (!s.Owner._onLeft)
                 {
-                    WindowInterop.MoveWindow(s.MinHwnd, 0, s.MinSpace, rcMin.right - rcMin.left, Math.Max(0, bandH - s.PhysicalHeight), true);
+                    CrashTrace.NoteStep("经典重定位:带移动(竖,远)");
+                    if (!BandMoveAndWait(s.MinHwnd, 0, s.MinSpace, rcMin.right - rcMin.left, Math.Max(0, bandH - s.PhysicalHeight), 300))
+                    {
+                        Logger.WarnOnce("band-move-timeout", "任务按钮带移动超时（explorer 无响应/卡死）——本轮经典重定位跳过");
+                        return;
+                    }
                     y = s.MinSpace + bandH - s.PhysicalHeight + 2;
                 }
                 else
                 {
-                    WindowInterop.MoveWindow(s.MinHwnd, 0, s.MinSpace + s.PhysicalHeight, rcMin.right - rcMin.left, Math.Max(0, bandH - s.PhysicalHeight), true);
+                    CrashTrace.NoteStep("经典重定位:带移动(竖,近)");
+                    if (!BandMoveAndWait(s.MinHwnd, 0, s.MinSpace + s.PhysicalHeight, rcMin.right - rcMin.left, Math.Max(0, bandH - s.PhysicalHeight), 300))
+                    {
+                        Logger.WarnOnce("band-move-timeout", "任务按钮带移动超时（explorer 无响应/卡死）——本轮经典重定位跳过");
+                        return;
+                    }
                     y = s.MinSpace;
                 }
+                CrashTrace.NoteStep("经典重定位:移本窗(竖)");
                 int x = Math.Max(DpiScaleInt(2, s.Dpi), (rcMin.right - rcMin.left - s.PhysicalWidth) / 2);
                 WindowInterop.MoveWindow(hwnd, x, y, s.PhysicalWidth, s.PhysicalHeight, true);
                 Logger.Debug($"经典重定位（竖直{(force ? "，强制" : "")}）：任务按钮带 {bandH}→{Math.Max(0, bandH - s.PhysicalHeight)}px，覆盖层 ({x},{y}) {s.PhysicalWidth}x{s.PhysicalHeight}");
             }
+        }
+
+        // TrafficMonitor's auto_set_background_color (TrafficMonitorDlg.cpp), ported: the
+        // 经典 taskbar form's backdrop must stay opaque (the 残影 cure — DrawHorizontal),
+        // but a FIXED tint can never match the user's real taskbar (the reported 太黑).
+        // Sample the COMPOSED taskbar colour in the 2px gap between the shrunk task-buttons
+        // band and our own edge — a point that shows bare taskbar — and tint the backdrop
+        // brush with it: visually seamless, still opaque. Runs on the tick (the taskbar
+        // colour changes with theme/wallpaper/transparency) and once at dock time.
+        // The raw single-pixel read is NOT trusted, though — operating the taskbar makes
+        // explorer briefly re-expand the band ACROSS the gap, and a sample taken in that
+        // instant reads a task BUTTON's colour, flipping the backdrop until the next
+        // sample (the reported 浅色模式下底色来回轮换). Three guards: a 3-pixel average
+        // around the point (antialiasing noise), a per-channel threshold (near-identical
+        // colours never re-tint), and a STABILITY GATE — a new colour must survive
+        // BACKDROP_STABLE_TICKS consecutive samples before it is adopted, so a sub-second
+        // band re-expansion can never reach the brush. Pure black is ignored, like
+        // TrafficMonitor's `color != 0` guard (a transient mid-explorer-restart read).
+        private const int BACKDROP_STABLE_TICKS = 3;
+        private const uint BACKDROP_DELTA_THRESHOLD = 8;   // per RGB channel, of 255
+
+        private static void SampleTaskbarBackdropColor(IntPtr hwnd, RenderState s)
+        {
+            if (s.Floating || !s.Classical || s.CardBrush == null) return;
+            if (!WindowInterop.GetWindowRect(hwnd, out var rc)) return;
+            int x, y;
+            if (!s.Vertical)
+            {
+                x = s.Owner._onLeft ? rc.right + 1 : rc.left - 1;   // the gap beside the band
+                y = (rc.top + rc.bottom) / 2;                       // mid row, off the edge lines
+            }
+            else
+            {
+                x = (rc.left + rc.right) / 2;
+                y = s.Owner._onLeft ? rc.bottom + 1 : rc.top - 1;   // the gap above/below the band
+            }
+            IntPtr dc = WindowInterop.GetDC(IntPtr.Zero);   // dpiAware → physical pixels, GetWindowRect's space
+            if (dc == IntPtr.Zero) return;
+            uint c = s.Vertical
+                ? Avg3(WindowInterop.GetPixel(dc, x - 1, y), WindowInterop.GetPixel(dc, x, y), WindowInterop.GetPixel(dc, x + 1, y))
+                : Avg3(WindowInterop.GetPixel(dc, x, y - 1), WindowInterop.GetPixel(dc, x, y), WindowInterop.GetPixel(dc, x, y + 1));
+            WindowInterop.ReleaseDC(IntPtr.Zero, dc);
+            if (c == 0 || c == 0xFFFFFFFF) { s.PendingBackdropCount = 0; return; }   // CLR_INVALID / black transient
+
+            // First valid sample ever: adopt at once (the dock-time call needs no warm-up).
+            bool adopt = s.LastBackdropColor == 0xFFFFFFFF;
+            if (!adopt)
+            {
+                if (ColorDelta(c, s.LastBackdropColor) <= BACKDROP_DELTA_THRESHOLD)
+                {
+                    s.PendingBackdropCount = 0;   // back at (near) the current colour — cancel any pending flip
+                    return;
+                }
+                if (c != s.PendingBackdropColor) { s.PendingBackdropColor = c; s.PendingBackdropCount = 1; }
+                else s.PendingBackdropCount++;
+                adopt = s.PendingBackdropCount >= BACKDROP_STABLE_TICKS;
+            }
+            if (!adopt) return;
+            s.LastBackdropColor = c;
+            s.PendingBackdropCount = 0;
+            SetBrushColor(s.CardBrush, c);
+        }
+
+        private static uint Avg3(uint a, uint b, uint c)
+        {
+            if (a == 0xFFFFFFFF || b == 0xFFFFFFFF || c == 0xFFFFFFFF) return 0xFFFFFFFF;
+            uint r = ((a & 0xFF) + (b & 0xFF) + (c & 0xFF)) / 3;
+            uint g = (((a >> 8) & 0xFF) + ((b >> 8) & 0xFF) + ((c >> 8) & 0xFF)) / 3;
+            uint bl = (((a >> 16) & 0xFF) + ((b >> 16) & 0xFF) + ((c >> 16) & 0xFF)) / 3;
+            return (bl << 16) | (g << 8) | r;
+        }
+
+        private static uint ColorDelta(uint a, uint b)
+        {
+            uint dr = (uint)Math.Abs((int)(a & 0xFF) - (int)(b & 0xFF));
+            uint dg = (uint)Math.Abs((int)((a >> 8) & 0xFF) - (int)((b >> 8) & 0xFF));
+            uint db = (uint)Math.Abs((int)((a >> 16) & 0xFF) - (int)((b >> 16) & 0xFF));
+            return Math.Max(dr, Math.Max(dg, db));
+        }
+
+        // ---- the foreign-window-call worker (the 2026-09-30 卡死 root fix — gotchas §43) ----
+        // ANY potentially-synchronizing call into ANOTHER thread's window can block forever
+        // while that window's owner is mid-teardown — not just MoveWindow (which SENDs
+        // WM_WINDOWPOSCHANGING): the stall stack capture caught GetWindowRect (RIP=win32u)
+        // dead on the dying band. Worse, the block is CIRCULAR: win32k's teardown of the
+        // ReBar waits for OUR child window's destruction — which only a PUMPING message
+        // loop delivers — while the loop is parked inside the foreign call and cannot pump.
+        // So this loop never makes such calls: they all go to a sacrificial worker (the ONE
+        // thread allowed to block, IsBackground) and the caller collects the result with a
+        // BOUNDED, non-pumping wait (WaitForSingleObject — a CLR STA wait would pump and
+        // re-enter). If the worker deadlocks, this loop keeps pumping: the teardown
+        // completes, and the worker's call eventually returns — the circle cannot close.
+        // IsWindow / GetWindowLong / FindWindow / own-window calls stay inline (no sync) —
+        // and SetParent MUST stay inline too: it delivers messages to OUR window mid-call,
+        // so the caller must be able to pump (from the worker it deadlocks by construction
+        // — the worker waits for this loop to pump while this loop waits for the worker).
+        private sealed class NativeCallRequest
+        {
+            public Action Run;
+            public ManualResetEventSlim Done;
+        }
+        private const int NATIVE_CALL_QUEUE_CAP = 16;
+        private static readonly Queue<NativeCallRequest> _nativeCalls = new Queue<NativeCallRequest>();
+        private static readonly AutoResetEvent _nativeCallReady = new AutoResetEvent(false);
+        private static Thread _nativeWorker;
+
+        // Run `work` on the worker and wait for it (bounded, non-pumping). False = timed
+        // out: the target's owner is dead/dying, or the worker is stuck on an earlier one —
+        // every caller treats that as "skip this round" (the poll/tick/probe all retry).
+        private static bool RunOnNativeWorker(Action work, int timeoutMs)
+        {
+            if (_nativeWorker == null)
+            {
+                lock (_nativeCalls)
+                {
+                    if (_nativeWorker == null)
+                    {
+                        _nativeWorker = new Thread(NativeWorkerLoop) { IsBackground = true, Name = "native-worker" };
+                        _nativeWorker.Start();
+                    }
+                }
+            }
+            using (var done = new ManualResetEventSlim(false))
+            {
+                lock (_nativeCalls)
+                {
+                    _nativeCalls.Enqueue(new NativeCallRequest { Run = work, Done = done });
+                    while (_nativeCalls.Count > NATIVE_CALL_QUEUE_CAP)
+                    {
+                        // Superseded (the worker is stuck): releasing its waiter is the
+                        // only dequeue that must not leak one.
+                        var dropped = _nativeCalls.Dequeue();
+                        try { dropped.Done?.Set(); } catch { }
+                    }
+                }
+                _nativeCallReady.Set();
+                return WindowInterop.WaitForSingleObject(
+                    done.WaitHandle.SafeWaitHandle.DangerousGetHandle(), (uint)timeoutMs) == 0;   // WAIT_OBJECT_0
+            }
+        }
+
+        private static void NativeWorkerLoop()
+        {
+            while (true)
+            {
+                _nativeCallReady.WaitOne();
+                NativeCallRequest req;
+                lock (_nativeCalls) req = _nativeCalls.Count > 0 ? _nativeCalls.Dequeue() : null;
+                if (req == null) continue;
+                try { req.Run(); }
+                catch { /* the worker lives on regardless */ }
+                finally { try { req.Done?.Set(); } catch { } }
+            }
+        }
+
+        // A band move (cross-thread into explorer's toolbar) via the worker.
+        private static bool BandMoveAndWait(IntPtr h, int x, int y, int w, int ht, int timeoutMs)
+            => RunOnNativeWorker(() =>
+            {
+                if (WindowInterop.IsWindow(h) && BandResponsive(h))
+                    WindowInterop.MoveWindow(h, x, y, w, ht, true);
+            }, timeoutMs);
+
+        // GetWindowRect on a FOREIGN window via the worker — the exact call the 卡死 died
+        // in (CaptureStackOf: RIP=win32u inside GetWindowRect on the mid-teardown band).
+        // False = timed out; rc is then default and the caller skips the round.
+        private static bool TryGetWindowRectGuarded(IntPtr h, int timeoutMs, out WindowInterop.RECT rc)
+        {
+            WindowInterop.RECT tmp = default;
+            bool ok = h != IntPtr.Zero && RunOnNativeWorker(() =>
+            {
+                // a captured local can't be an `out` target (CS1628) — bounce through a lambda-local
+                if (WindowInterop.GetWindowRect(h, out var t)) tmp = t;
+            }, timeoutMs);
+            rc = tmp;
+            return ok;
+        }
+
+        // The band (and every taskbar window) belongs to EXPLORER's thread, and any
+        // SetWindowPos/MoveWindow into another thread's window synchronises with that
+        // thread — it SENDs WM_WINDOWPOSCHANGING and waits for the answer. A healthy
+        // explorer answers at once; a dying one (explorer restart mid-teardown) never
+        // pumps again, and the call then blocks FOREVER, taking our whole taskbar thread
+        // — message loop, tick, sentinel — with it (the 2026-09-30 卡死: watchdog saw
+        // the overlay HWND vanish while Start() never returned). Probe the owner's
+        // responsiveness first: SMTO_ABORTIFHUNG declines a thread the window manager
+        // already knows is hung, and the 150ms timeout bounds the probe itself. Every
+        // band move is best-effort (the 100ms poll retries; the exit-restore just
+        // fails), so a false negative costs nothing.
+        private static bool BandResponsive(IntPtr h)
+        {
+            if (h == IntPtr.Zero) return false;
+            return WindowInterop.SendMessageTimeoutW(h, WindowInterop.WM_NULL, IntPtr.Zero, IntPtr.Zero,
+                WindowInterop.SMTO_ABORTIFHUNG | WindowInterop.SMTO_BLOCK, 150, out _) != IntPtr.Zero;
         }
 
         // Return the task-buttons band to its original rect (TrafficMonitor's
@@ -2692,13 +2998,21 @@ namespace task_monitor
         {
             if (!s.MinOriValid || s.MinHwnd == IntPtr.Zero || !WindowInterop.IsWindow(s.MinHwnd)) return;
             Logger.Debug($"恢复任务按钮带原始尺寸 {s.MinOriRect.right - s.MinOriRect.left}x{s.MinOriRect.bottom - s.MinOriRect.top}（{(s.Vertical ? "竖直" : "水平")}轴）");
+            // Via the worker like every band move (gotchas §43) — a dying explorer just
+            // costs the 500ms timeout, and the band stays shrunk until explorer's own
+            // next layout pass re-expands it.
+            CrashTrace.NoteStep("恢复按钮带:带移动");
+            bool ok;
             if (!s.Vertical)
-                WindowInterop.MoveWindow(s.MinHwnd, s.MinSpace, 0,
-                    s.MinOriRect.right - s.MinOriRect.left, s.MinOriRect.bottom - s.MinOriRect.top, true);
+                ok = BandMoveAndWait(s.MinHwnd, s.MinSpace, 0,
+                    s.MinOriRect.right - s.MinOriRect.left, s.MinOriRect.bottom - s.MinOriRect.top, 500);
             else
-                WindowInterop.MoveWindow(s.MinHwnd, 0, s.MinSpace,
-                    s.MinOriRect.right - s.MinOriRect.left, s.MinOriRect.bottom - s.MinOriRect.top, true);
-            s.MinOriValid = false;
+                ok = BandMoveAndWait(s.MinHwnd, 0, s.MinSpace,
+                    s.MinOriRect.right - s.MinOriRect.left, s.MinOriRect.bottom - s.MinOriRect.top, 500);
+            if (!ok)
+                Logger.WarnOnce("band-restore-timeout", "恢复任务按钮带超时（explorer 无响应/卡死）——放弃，交由 explorer 下次布局自行恢复");
+            else
+                s.MinOriValid = false;
         }
 
         // A taskbar dragged to another screen edge flips orientation (horizontal grid ⟷
@@ -2735,13 +3049,13 @@ namespace task_monitor
             bandW = 0; bandH = 0;
             if (s.Vertical)
             {
-                if (WindowInterop.GetWindowRect(s.MinHwnd, out var rcMin))
+                if (TryGetWindowRectGuarded(s.MinHwnd, 300, out var rcMin))
                     bandW = rcMin.right - rcMin.left;
             }
             else
             {
                 IntPtr band = s.Classical ? s.BarHwnd : s.TaskbarHwnd;
-                if (WindowInterop.GetWindowRect(band, out var rc))
+                if (TryGetWindowRectGuarded(band, 300, out var rc))
                 {
                     bandW = rc.right - rc.left;
                     bandH = s.Classical ? rc.bottom - rc.top : TaskbarBandHeight(band, rc);
@@ -2790,9 +3104,9 @@ namespace task_monitor
             if (hMin == IntPtr.Zero)
                 hMin = WindowInterop.FindWindowExW(hBar, IntPtr.Zero, "MSTaskListWClass", null);
             if (hMin == IntPtr.Zero) return false;
-            return WindowInterop.GetWindowRect(hBar, out rcBar)
+            return TryGetWindowRectGuarded(hBar, 500, out rcBar)
                 && rcBar.right - rcBar.left > 0 && rcBar.bottom - rcBar.top > 0
-                && WindowInterop.GetWindowRect(hMin, out rcMin)
+                && TryGetWindowRectGuarded(hMin, 500, out rcMin)
                 && rcMin.right - rcMin.left > 0 && rcMin.bottom - rcMin.top > 0;
         }
 
@@ -2850,7 +3164,7 @@ namespace task_monitor
                 int above = wr.top - miF.rcWork.top;
                 return below >= above ? 1 : 0;
             }
-            if (!WindowInterop.GetWindowRect(taskbar, out var r)) return 0;
+            if (!TryGetWindowRectGuarded(taskbar, 300, out var r)) return 0;   // foreign window (gotchas §43)
             IntPtr mon = WindowInterop.MonitorFromWindow(taskbar, WindowInterop.MONITOR_DEFAULTTONEAREST);
             var mi = new WindowInterop.MONITORINFO { cbSize = (uint)Marshal.SizeOf<WindowInterop.MONITORINFO>() };
             if (mon == IntPtr.Zero || !WindowInterop.GetMonitorInfoW(mon, ref mi)) return 0;
@@ -3326,10 +3640,12 @@ namespace task_monitor
                         // Classical family only: re-dock against the band (TIMER_ID_POS).
                         // A taskbar dragged to another screen edge flips orientation —
                         // reconfigure (transpose + resize + re-dock), don't just move.
+                        CrashTrace.NoteStep("经典轮询(TIMER_ID_POS)");
                         var ps = StateOf(hwnd);
                         if (ps != null && ps.Classical)
                         {
-                            if (WindowInterop.GetWindowRect(ps.TaskbarHwnd, out var rcT))
+                            CrashTrace.NoteStep("轮询:测任务栏矩形");
+                            if (TryGetWindowRectGuarded(ps.TaskbarHwnd, 300, out var rcT))
                             {
                                 bool vert = rcT.right - rcT.left < rcT.bottom - rcT.top;
                                 if (vert != ps.Vertical)
@@ -3338,6 +3654,7 @@ namespace task_monitor
                                     return IntPtr.Zero;
                                 }
                             }
+                            CrashTrace.NoteStep("轮询:RepositionOverlay");
                             RepositionOverlay(hwnd, ps, force: false);
                         }
                         return IntPtr.Zero;
@@ -3374,6 +3691,7 @@ namespace task_monitor
                             Logger.Warn(s.Floating
                                 ? "任务栏窗口已失效（explorer 重启）——悬浮窗自毁，等待任务栏就绪后按记忆位置重建"
                                 : "任务栏父窗口已失效（explorer 重启且 SetParent 竞速落败，覆盖层浮为顶层窗口）——自毁，等待重建");
+                            CrashTrace.NoteStep("自毁(DestroyWindow)");
                             WindowInterop.DestroyWindow(hwnd);
                             return IntPtr.Zero;
                         }
@@ -3428,6 +3746,14 @@ namespace task_monitor
                         CrashTrace.NoteStep("RepositionOverlay");
                         RepositionOverlay(hwnd, s, force: false);
 
+                        // 经典任务栏: keep the opaque backdrop's colour matched to the live
+                        // taskbar (SampleTaskbarBackdropColor; change-gated inside).
+                        if (s.Classical && !s.Floating)
+                        {
+                            CrashTrace.NoteStep("底色采样");
+                            SampleTaskbarBackdropColor(hwnd, s);
+                        }
+
                         SamplePublishDraw(s);
                     }
                     return IntPtr.Zero;
@@ -3435,43 +3761,89 @@ namespace task_monitor
 
             case WindowInterop.WM_DESTROY:
                 {
-                    // Classical path: give the task-buttons band its size back BEFORE we
-                    // disappear (RestoreMinWindow) — nothing else re-expands it promptly.
-                    // Explorer-restart: the band is already dead, IsWindow skips it.
-                    Logger.Debug("WM_DESTROY——覆盖层销毁，释放 D3D/D2D/DComp 资源");
-                    var dying = StateOf(hwnd);
-                    if (dying != null)
-                    {
-                        RestoreMinWindow(dying);
-                        // The sampler holds a NATIVE SRUM registration whose callback pointer must
-                        // not survive this sampler (the 卡死 crash: a leaked registration + a
-                        // collected delegate = srumapi calling a freed stub). Shutdown before the
-                        // state — and with it the sampler — becomes garbage.
-                        try { dying.Sampler?.Shutdown(); }
-                        catch (Exception ex) { Logger.Warn("注销 SRUM 实时 API 失败（忽略）", ex); }
-                    }
-                    WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID);
-                    WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID_POS);
-                    WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID_FLOAT_SLIDE);
-                    IntPtr ptr = WindowInterop.GetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA);
-                    if (ptr != IntPtr.Zero)
-                    {
-                        var handle = GCHandle.FromIntPtr(ptr);
-                        var s = handle.Target as RenderState;
-                        // The pipeline may be mid-rebuild (or half-built after a failed init):
-                        // ReleaseDeviceResources disposes whatever exists and tolerates a dead
-                        // device, and the handle is freed even if something in there throws.
-                        try { if (s != null) ReleaseDeviceResources(s); }
-                        catch (Exception ex) { Logger.Warn("覆盖层退出时释放 D3D/D2D/DComp 资源失败（进程即将退出，忽略）", ex); }
-                        handle.Free();
-                        WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, IntPtr.Zero);
-                    }
+                    Logger.Debug("WM_DESTROY——覆盖层销毁，拆除并退出消息循环");
+                    TeardownOverlay(hwnd);
                     WindowInterop.PostQuitMessage(0);
                     return IntPtr.Zero;
                 }
 
+            case WindowInterop.WM_NCDESTROY:
+                {
+                    // win32k can deliver a bare WM_NCDESTROY with NO preceding WM_DESTROY
+                    // when explorer tears the ReBar down while this thread is mid-work (the
+                    // 2026-09-30 卡死's end state — the ring held 0x82 and no 0x2). Timers
+                    // die with the window, the queue empties, and without this the loop
+                    // parks in GetMessage FOREVER — the quit that only the destroy path
+                    // posts never comes (the watchdog's CaptureStackOf: RIP=win32u =
+                    // NtUserGetMessage). Run the SAME bounded teardown + post the quit;
+                    // TeardownOverlay is once-guarded, so the normal WM_DESTROY →
+                    // WM_NCDESTROY pair stays idempotent.
+                    Logger.Debug("WM_NCDESTROY（无 WM_DESTROY 先行）——覆盖层已死，拆除并退出消息循环");
+                    TeardownOverlay(hwnd);
+                    WindowInterop.PostQuitMessage(0);
+                    return WindowInterop.DefWindowProcW(hwnd, msg, wParam, lParam);
+                }
+
                 default:
                     return WindowInterop.DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+        }
+
+        // The full overlay teardown, runnable from EITHER WM_DESTROY or a bare
+        // WM_NCDESTROY (see its case): restore the band (bounded worker wait; a dead band
+        // IsWindow-skips), unregister SRUM (bounded pool wait), kill the timers, release
+        // the D3D/D2D/DComp pipeline and free the state handle. Every step tolerates a
+        // dead explorer/device; the once-guard makes the two-message path idempotent.
+        private static void TeardownOverlay(IntPtr hwnd)
+        {
+            var dying = StateOf(hwnd);
+            if (dying == null || dying.TeardownRan) return;
+            dying.TeardownRan = true;
+            // Classical path: give the task-buttons band its size back BEFORE we
+            // disappear (RestoreMinWindow) — nothing else re-expands it promptly.
+            // Explorer-restart: the band is already dead, IsWindow skips it.
+            CrashTrace.NoteStep("恢复按钮带");
+            RestoreMinWindow(dying);
+            // The sampler holds a NATIVE SRUM registration whose callback pointer must
+            // not survive this sampler (the 卡死 crash: a leaked registration + a
+            // collected delegate = srumapi calling a freed stub). Shutdown before the
+            // state — and with it the sampler — becomes garbage.
+            CrashTrace.NoteStep("SRUM注销");
+            // SRUM's unregister is an undocumented API that may block (an RPC
+            // or an in-flight-callback drain) — on the message loop it would
+            // hang the teardown exactly the way the band move hung the poll
+            // (gotchas §43). Bounded: a pool thread runs it and we wait at most
+            // 500ms; the Retired list keeps the delegate rooted meanwhile, and
+            // a leaked pool thread is background by construction.
+            try
+            {
+                var sampler = dying.Sampler;
+                if (sampler != null)
+                {
+                    var unreg = System.Threading.Tasks.Task.Run((Action)sampler.Shutdown);
+                    // Same raw-wait rule as BandMoveAndWait: no CLR pumping
+                    // wait on this STA thread (gotchas §43).
+                    WindowInterop.WaitForSingleObject(
+                        ((System.IAsyncResult)unreg).AsyncWaitHandle.SafeWaitHandle.DangerousGetHandle(), 500);
+                }
+            }
+            catch (Exception ex) { Logger.Warn("注销 SRUM 实时 API 失败（忽略）", ex); }
+            WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID);
+            WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID_POS);
+            WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID_FLOAT_SLIDE);
+            IntPtr ptr = WindowInterop.GetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA);
+            if (ptr != IntPtr.Zero)
+            {
+                var handle = GCHandle.FromIntPtr(ptr);
+                var s = handle.Target as RenderState;
+                // The pipeline may be mid-rebuild (or half-built after a failed init):
+                // ReleaseDeviceResources disposes whatever exists and tolerates a dead
+                // device, and the handle is freed even if something in there throws.
+                CrashTrace.NoteStep("释放设备资源");
+                try { if (s != null) ReleaseDeviceResources(s); }
+                catch (Exception ex) { Logger.Warn("覆盖层退出时释放 D3D/D2D/DComp 资源失败（进程即将退出，忽略）", ex); }
+                handle.Free();
+                WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, IntPtr.Zero);
             }
         }
 
@@ -3485,6 +3857,9 @@ namespace task_monitor
         // ---------- shutdown sentinel (lets a non-elevated build step exit this elevated process) ----------
         private const string ShutdownSentinelName = "shutdown.sentinel";
 
+        private static string SentinelPath => System.IO.Path.Combine(
+            System.AppDomain.CurrentDomain.BaseDirectory, ShutdownSentinelName);
+
         // Returns true (and deletes the sentinel) if a "shutdown.sentinel" file sits next to
         // the exe. A non-elevated build step writes it, this 1s tick notices it within ~1s
         // and the caller shuts the app down — avoiding the right-click → 退出 dance every
@@ -3493,16 +3868,31 @@ namespace task_monitor
         {
             try
             {
-                string path = System.IO.Path.Combine(
-                    System.AppDomain.CurrentDomain.BaseDirectory, ShutdownSentinelName);
-                if (System.IO.File.Exists(path))
+                if (System.IO.File.Exists(SentinelPath))
                 {
-                    System.IO.File.Delete(path);
+                    System.IO.File.Delete(SentinelPath);
                     return true;
                 }
             }
             catch { /* never let the sentinel check disrupt the timer tick */ }
             return false;
+        }
+
+        /// <summary>
+        /// Startup-only counterpart of <see cref="ConsumeShutdownSentinel"/>: deletes a sentinel
+        /// left behind by an earlier run (a double touch, or a touch with no instance running —
+        /// 2026-09-29: the leftover file made a freshly started instance self-exit 2s in).
+        /// Called from App.OnStartup AFTER the single-instance mutex, so the file can only be
+        /// stale here — the instance it targeted has exited, and the build flow's own touch is
+        /// always consumed by the still-running old instance before the new one starts.
+        /// </summary>
+        internal static void ClearStaleShutdownSentinel()
+        {
+            try
+            {
+                if (System.IO.File.Exists(SentinelPath)) System.IO.File.Delete(SentinelPath);
+            }
+            catch { /* a stale file must never block startup */ }
         }
 
         private static D2D1_BITMAP_PROPERTIES1 BitmapProps(uint dpi) => new D2D1_BITMAP_PROPERTIES1
@@ -3590,7 +3980,8 @@ namespace task_monitor
             public IComObject<ID2D1Brush> HighlightBrush;
             public IComObject<ID2D1Brush> HoverBrush;
             public IComObject<ID2D1Brush> SeparatorBrush;
-            // 悬浮模式's card fill (the widget's own background) — see ApplyTaskbarTheme.
+            // 悬浮模式's card fill AND the 经典任务栏 form's opaque backdrop (the 残影 cure —
+            // DrawHorizontal/DrawVertical) — see ApplyTaskbarTheme.
             public IComObject<ID2D1Brush> CardBrush;
             // …and its outline: the 1px edge DWM's window border used to paint, which went away
             // with the frame that carried the drop shadow. Drawn by us instead (same section).
@@ -3631,6 +4022,9 @@ namespace task_monitor
             public bool MinOriValid;
             public int MinSpace;                // the band's left/top offset inside the ReBar at last apply
             public int LastMinLength;           // the band width/height we left behind (explorer re-expansion detector)
+            public uint LastBackdropColor = 0xFFFFFFFF;  // the taskbar colour last sampled into the backdrop (SampleTaskbarBackdropColor)
+            public uint PendingBackdropColor;   // a candidate colour waiting out the stability gate
+            public int PendingBackdropCount;    // …its consecutive-sample count so far
             public int PhysicalWidth;
             public int PhysicalHeight;
             public int LastXRelative;   // taskbar-relative x last applied by MoveWindow (Win11 path)
@@ -3640,6 +4034,7 @@ namespace task_monitor
             public bool DiagLogged;
             public WindowInterop.RECT DiagTaskbarRect;
             public WindowInterop.RECT DiagOverlayRect;
+            public bool TeardownRan;        // TeardownOverlay's once-guard (WM_DESTROY / bare WM_NCDESTROY — gotchas §43)
             public float LogicalHeight;
             public uint Dpi;
             public int Hovered;

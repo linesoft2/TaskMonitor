@@ -102,7 +102,7 @@ namespace task_monitor
     /// <summary>
     /// Samples per-GPU overall utilization / temperature / memory the way Task Manager's
     /// <c>WdcGpuMonitor</c> does (reversed from Taskmgr.exe — every metric comes from the
-    /// DXCore COM API, dxcore.dll; PDH is NOT involved):
+    /// DXCore COM API, dxcore.dll; PDH only backs the Win10 fallbacks listed at the bottom):
     ///
     ///   per engine:  QueryState(AdapterEngineRunningTimeMicroseconds, {physIdx, engineIdx})
     ///                → cumulative busy μs;  engine% = Δbusy / Δwall(QPC) × 100
@@ -123,12 +123,26 @@ namespace task_monitor
     /// integrated adapter with zero dedicated usage reports a 0 total (its memory is all
     /// shared), matching Task Manager's "0.0 / 0.0 GB".
     ///
-    /// Enumeration (every 30 ticks, like the disk probe): CreateAdapterList over the
-    /// GPU + D3D12_CORE_COMPUTE attributes, deduped by InstanceLuid, software adapters
-    /// (IsHardware=false, e.g. Microsoft Basic Render) excluded. Each adapter expands to
-    /// PhysicalAdapterCount nodes (LDA) — one GpuInfo per (LUID, physicalIndex), engines
-    /// per node via AdapterEngineCount/AdapterEngineName. DXCore's event notifications
-    /// exist but a periodic re-probe is simpler and covers the same hot-plug surface.
+    /// Enumeration (every 30 ticks, like the disk probe): CreateAdapterList over four
+    /// attributes — the Win11 hardware-type GPU one plus the D3D12/D3D11 GRAPHICS and
+    /// D3D12_CORE_COMPUTE runtime ones (Win10's dxcore matches only the runtime kind;
+    /// a VMware SVGA 3D carries GRAPHICS/CORE_COMPUTE but not the HW-type one) — deduped
+    /// by InstanceLuid, software adapters (IsHardware=false, e.g. Microsoft Basic Render)
+    /// excluded. Each adapter expands to PhysicalAdapterCount nodes (LDA) — one GpuInfo
+    /// per (LUID, physicalIndex). DXCore's event notifications exist but a periodic
+    /// re-probe is simpler and covers the same hot-plug surface.
+    ///
+    /// Win10 fallbacks (dxcore.dll there has no IDXCoreAdapter1 — GetPropertyWithInput —
+    /// and older drivers report the running-time/usage states unsupported; measured on
+    /// 22H2 + VMware SVGA 3D): adapters are fetched as the base IDXCoreAdapter and
+    /// IDXCoreAdapter1 is QI'd per adapter where present; engine count falls back to
+    /// probing the running-time state (indices are contiguous from 0), engine names to
+    /// "Engine N" placeholders that ProcessGpuSampler's PDH engine map backfills with
+    /// real engtypes; utilization falls back to that same PDH map (the per-process
+    /// percentages summed per engine) when the running-time state is unsupported;
+    /// memory falls back to the AdapterMemoryBudget state's currentUsage when the
+    /// memory-usage state is unsupported. <see cref="NeedsPdhEngineData"/> tells
+    /// SystemSampler when the map is needed (Win11 machines never build it).
     ///
     /// Degrades silently to Available=false when dxcore.dll is missing (pre-1903) or the
     /// factory can't be created. Single-threaded (taskbar STA thread), sampled every 1s.
@@ -143,6 +157,7 @@ namespace task_monitor
         private sealed class EngineEntry
         {
             public string Name;
+            public bool NameIsFallback;         // "Engine N" placeholder — PDH's engtype backfills it
             public ulong PrevRunningTimeUs;
             public double PrevClockUs;
             public bool HasBaseline;
@@ -151,13 +166,15 @@ namespace task_monitor
 
         private sealed class AdapterEntry
         {
-            public IDXCoreAdapter1 Adapter;         // RCW, released on removal
+            public IDXCoreAdapter Adapter;      // RCW, released on removal
             public GpuInfo Info;
+            public long Luid;                   // InstanceLuid — keys into the PDH engine map
             public int PhysicalIndex;
             public int SortOrder;                   // stable tab ordering (GPU 0, GPU 1, …)
             public List<EngineEntry> Engines = new List<EngineEntry>();
             public bool EngineTimeSupported;
             public bool MemoryUsageSupported;
+            public bool MemoryBudgetSupported;
             public bool TemperatureSupported;
             public bool IsIntegrated;
             public long DedicatedCapBytes;          // DedicatedAdapterMemory + DedicatedSystemMemory + Taskmgr headroom
@@ -184,6 +201,14 @@ namespace task_monitor
         private IDXCoreAdapterFactory _factory;
         private long _qpcFreq;
 
+        /// <summary>Set at enumeration: any adapter needs the per-tick PDH engine map
+        /// (ProcessGpuSampler.EngineMap) — because its driver predates DXCore's
+        /// engine-running-time state (utilization fallback), or Win10's dxcore lacks
+        /// GetPropertyWithInput so its engines carry fallback names (name backfill).
+        /// Read by SystemSampler on the same thread before it samples the process GPU
+        /// counters.</summary>
+        public bool NeedsPdhEngineData { get; private set; }
+
         /// <param name="mode">Headline source (设置 → 采样项目 → GPU → 显示方式): the MAX
         /// (the GPU default) or mean of per-adapter utilization, or one specific
         /// adapter's.</param>
@@ -191,7 +216,11 @@ namespace task_monitor
         /// <see cref="MetricDisplayMode.Specific"/>; ignored otherwise. A specific adapter
         /// that isn't currently present falls back to the remaining adapters' max (the GPU
         /// default — the pick survives, its own values resume when it returns).</param>
-        public GpuSample Sample(MetricDisplayMode mode, int specificIndex)
+        /// <param name="pdhEngines">ProcessGpuSampler's per-(adapter, engine) totals —
+        /// the utilization/name fallback for adapters without the DXCore running-time
+        /// state. null when <see cref="NeedsPdhEngineData"/> is false.</param>
+        public GpuSample Sample(MetricDisplayMode mode, int specificIndex,
+            IReadOnlyDictionary<(long luid, int phys, int eng), GpuEngineSlice> pdhEngines)
         {
             if (mode != _lastMode || specificIndex != _lastSpecificIndex)
             {
@@ -212,7 +241,7 @@ namespace task_monitor
                 // view's per-adapter tabs need all of them live; the mode only picks the
                 // headline.
                 foreach (var entry in _adapters.Values)
-                    SampleAdapter(entry);
+                    SampleAdapter(entry, pdhEngines);
 
                 // Failed adapters are removed AFTER the loop (removing mid-iteration would
                 // invalidate the dictionary enumerator).
@@ -271,7 +300,8 @@ namespace task_monitor
         }
 
         // ---------- per-tick: engine running-time deltas + temperature + memory ----------
-        private void SampleAdapter(AdapterEntry entry)
+        private void SampleAdapter(AdapterEntry entry,
+            IReadOnlyDictionary<(long luid, int phys, int eng), GpuEngineSlice> pdhEngines)
         {
             var adapter = entry.Adapter;
             try
@@ -283,6 +313,9 @@ namespace task_monitor
                 string topEngine = null;
                 if (entry.EngineTimeSupported)
                 {
+                    // The PDH map also backfills the fallback "Engine N" names that
+                    // Win10's dxcore (no GetPropertyWithInput) left behind.
+                    if (pdhEngines != null) ApplyPdhEngineData(entry, pdhEngines, false);
                     for (int e = 0; e < entry.Engines.Count; e++)
                     {
                         var engine = entry.Engines[e];
@@ -307,6 +340,17 @@ namespace task_monitor
                         if (engine.Util > maxUtil) { maxUtil = engine.Util; topEngine = engine.Name; }
                     }
                 }
+                else
+                {
+                    // The driver predates DXCore's engine-running-time state (Win10's
+                    // dxcore + e.g. VMware SVGA 3D report it unsupported): utilization
+                    // falls back to the per-process PDH \GPU Engine percentages summed
+                    // per engine — the same counter set that feeds the process list.
+                    foreach (var engine in entry.Engines) engine.Util = 0;
+                    if (pdhEngines != null) ApplyPdhEngineData(entry, pdhEngines, true);
+                    foreach (var engine in entry.Engines)
+                        if (engine.Util > maxUtil) { maxUtil = engine.Util; topEngine = engine.Name; }
+                }
                 entry.Info.UtilPercent = maxUtil;
                 entry.Info.TopEngineText = topEngine == null ? "--" : topEngine;
 
@@ -324,6 +368,13 @@ namespace task_monitor
                 {
                     QueryMemoryUsage(adapter, entry.PhysicalIndex, DXCoreMemoryType.Dedicated, out dedicatedUsed);
                     QueryMemoryUsage(adapter, entry.PhysicalIndex, DXCoreMemoryType.Shared, out sharedUsed);
+                }
+                else if (entry.MemoryBudgetSupported)
+                {
+                    // Drivers predating the memory-usage state (same Win10 set as above):
+                    // the budget state's currentUsage is the closest committed figure.
+                    QueryMemoryBudget(adapter, entry.PhysicalIndex, DXCoreMemoryType.Dedicated, out dedicatedUsed);
+                    QueryMemoryBudget(adapter, entry.PhysicalIndex, DXCoreMemoryType.Shared, out sharedUsed);
                 }
                 long dedicatedTotal = entry.IsIntegrated && dedicatedUsed == 0 ? 0 : entry.DedicatedCapBytes;
                 entry.Info.DedicatedText = $"{ToGb(dedicatedUsed)} / {ToGb(dedicatedTotal)} GB";
@@ -345,7 +396,7 @@ namespace task_monitor
         }
 
         // ---------- DXCore scalar queries (small reusable buffers, no per-call allocation) ----------
-        private bool QueryEngineRunningTime(IDXCoreAdapter1 adapter, int physIndex, int engineIndex, out ulong runningTimeUs)
+        private bool QueryEngineRunningTime(IDXCoreAdapter adapter, int physIndex, int engineIndex, out ulong runningTimeUs)
         {
             runningTimeUs = 0;
             Marshal.WriteInt32(_inBuf, 0, physIndex);
@@ -358,7 +409,7 @@ namespace task_monitor
             return true;
         }
 
-        private bool QueryMemoryUsage(IDXCoreAdapter1 adapter, int physIndex, DXCoreMemoryType type, out long residentBytes)
+        private bool QueryMemoryUsage(IDXCoreAdapter adapter, int physIndex, DXCoreMemoryType type, out long residentBytes)
         {
             residentBytes = 0;
             Marshal.WriteInt32(_inBuf, 0, physIndex);
@@ -373,7 +424,21 @@ namespace task_monitor
             return true;
         }
 
-        private bool QueryTemperature(IDXCoreAdapter1 adapter, int physIndex, out float celsius)
+        private bool QueryMemoryBudget(IDXCoreAdapter adapter, int physIndex, DXCoreMemoryType type, out long currentUsage)
+        {
+            currentUsage = 0;
+            Marshal.WriteInt32(_inBuf, 0, physIndex);   // DXCoreAdapterMemoryBudgetNodeSegmentGroup.nodeIndex
+            Marshal.WriteInt32(_inBuf, 4, (int)type);   // segmentGroup — DXCoreMemoryType's values
+            int hr = adapter.QueryState(DXCoreAdapterState.AdapterMemoryBudget,
+                (UIntPtr)8, _inBuf, (UIntPtr)32, _outBuf);
+            if (hr < 0) return false;
+            // DXCoreAdapterMemoryBudget { budget, currentUsage, availableForReservation, currentReservation }
+            currentUsage = Marshal.ReadInt64(_outBuf, 8);
+            if (currentUsage < 0) currentUsage = 0;
+            return true;
+        }
+
+        private bool QueryTemperature(IDXCoreAdapter adapter, int physIndex, out float celsius)
         {
             celsius = 0;
             Marshal.WriteInt32(_inBuf, 0, physIndex);
@@ -390,6 +455,31 @@ namespace task_monitor
             DxCoreInterop.QueryPerformanceCounter(out long qpc);
             // μs, as a double (53-bit mantissa ≈ 285 years at μs resolution — no overflow).
             return qpc * 1_000_000.0 / _qpcFreq;
+        }
+
+        // Applies the PDH per-(adapter, engine) map (ProcessGpuSampler.EngineMap) to one
+        // adapter: backfills the fallback "Engine N" names (Win10's dxcore has no
+        // GetPropertyWithInput, so enumeration couldn't fetch real names), and — for
+        // drivers without the engine-running-time state — sets the utilization itself
+        // (fillUtils). PDH eng ordinals and DXCore engine indices are both D3DKMT node
+        // ordinals, so they match 1:1.
+        private static void ApplyPdhEngineData(AdapterEntry entry,
+            IReadOnlyDictionary<(long luid, int phys, int eng), GpuEngineSlice> pdhEngines, bool fillUtils)
+        {
+            foreach (var kv in pdhEngines)
+            {
+                if (kv.Key.luid != entry.Luid || kv.Key.phys != entry.PhysicalIndex) continue;
+                int eng = kv.Key.eng;
+                while (entry.Engines.Count <= eng)
+                    entry.Engines.Add(new EngineEntry { Name = $"Engine {entry.Engines.Count}", NameIsFallback = true });
+                var engine = entry.Engines[eng];
+                if (engine.NameIsFallback && !string.IsNullOrEmpty(kv.Value.Name))
+                {
+                    engine.Name = kv.Value.Name;
+                    engine.NameIsFallback = false;
+                }
+                if (fillUtils) engine.Util = kv.Value.Util;
+            }
         }
 
         // ---------- enumeration: two attribute lists, deduped by LUID ----------
@@ -411,7 +501,13 @@ namespace task_monitor
                 }
 
                 var seen = new HashSet<(long, int)>();
+                // Four passes, deduped by LUID: the hardware-type GPU attribute matches
+                // on Win11 only (Win10's CreateAdapterList returns an empty list for it),
+                // so the D3D runtime attributes are what finds GPUs on Win10 — e.g. a
+                // VMware SVGA 3D carries D3D12_GRAPHICS/CORE_COMPUTE but not HW-type GPU.
                 EnumerateList(DxCoreInterop.AttributeGpu, seen);
+                EnumerateList(DxCoreInterop.AttributeD3D12Graphics, seen);
+                EnumerateList(DxCoreInterop.AttributeD3D11Graphics, seen);
                 EnumerateList(DxCoreInterop.AttributeD3D12CoreCompute, seen);
 
                 // Drop adapters that vanished since the last enumeration.
@@ -430,6 +526,16 @@ namespace task_monitor
                     entry.Info.TabTitle = $"GPU {i}";
                     entry.Info.Index = i;   // the 显示方式 "特定 GPU" setting picks by this number
                 }
+
+                // Whether ProcessGpuSampler must build its per-(adapter, engine) PDH map:
+                // an adapter without the running-time state draws utilization from it,
+                // and one enumerated without IDXCoreAdapter1 (Win10) takes engine names
+                // from it. Recomputed here (not per tick) — the need only changes with
+                // the adapter set.
+                bool need = false;
+                foreach (var e in _adapters.Values)
+                    if (!e.EngineTimeSupported || e.Engines.Exists(en => en.NameIsFallback)) { need = true; break; }
+                NeedsPdhEngineData = need;
             }
             catch (Exception ex) when (ex is DllNotFoundException || ex is EntryPointNotFoundException)
             {
@@ -460,8 +566,12 @@ namespace task_monitor
                 uint count = list.GetAdapterCount();
                 for (uint i = 0; i < count; i++)
                 {
-                    var adapterIid = DxCoreInterop.IID_IDXCoreAdapter1;
-                    IDXCoreAdapter1 probe = null;
+                    // Always fetch the BASE IDXCoreAdapter: Win10's dxcore.dll does not
+                    // implement IDXCoreAdapter1 (QI → E_NOINTERFACE — fetching it directly
+                    // here found zero adapters on every Win10 machine). GetPropertyWithInput
+                    // (engine count/names) is QI'd separately in CreateEntry where present.
+                    var adapterIid = DxCoreInterop.IID_IDXCoreAdapter;
+                    IDXCoreAdapter probe = null;
                     try
                     {
                         int hr = list.GetAdapter(i, ref adapterIid, out probe);
@@ -481,7 +591,7 @@ namespace task_monitor
                             // Every entry owns its OWN RCW (one fresh GetAdapter reference) so
                             // RemoveAdapter can release it independently — matters for LDA
                             // devices where several entries share one underlying adapter.
-                            IDXCoreAdapter1 owned = null;
+                            IDXCoreAdapter owned = null;
                             hr = list.GetAdapter(i, ref adapterIid, out owned);
                             if (hr < 0 || owned == null) continue;
                             try
@@ -505,7 +615,7 @@ namespace task_monitor
             }
         }
 
-        private AdapterEntry CreateEntry(IDXCoreAdapter1 adapter, long luid, int phys)
+        private AdapterEntry CreateEntry(IDXCoreAdapter adapter, long luid, int phys)
         {
             string name = GetStringProperty(adapter, DXCoreAdapterProperty.DriverDescription);
             if (string.IsNullOrEmpty(name)) name = $"GPU (LUID {luid:X})";
@@ -518,18 +628,47 @@ namespace task_monitor
             var entry = new AdapterEntry
             {
                 Adapter = adapter,
+                Luid = luid,
                 Info = new GpuInfo(name, Math.Max(0, shared)),
                 PhysicalIndex = phys,
                 EngineTimeSupported = adapter.IsQueryStateSupported(DXCoreAdapterState.AdapterEngineRunningTimeMicroseconds),
                 MemoryUsageSupported = adapter.IsQueryStateSupported(DXCoreAdapterState.AdapterMemoryUsageBytes),
+                MemoryBudgetSupported = adapter.IsQueryStateSupported(DXCoreAdapterState.AdapterMemoryBudget),
                 TemperatureSupported = adapter.IsQueryStateSupported(DXCoreAdapterState.AdapterTemperatureCelsius),
                 IsIntegrated = GetByteProperty(adapter, DXCoreAdapterProperty.IsIntegrated),
                 DedicatedCapBytes = cap,
             };
 
-            int engineCount = GetEngineCount(adapter, phys);
-            for (int e = 0; e < engineCount; e++)
-                entry.Engines.Add(new EngineEntry { Name = GetEngineName(adapter, phys, e) });
+            // Engine count + names: GetPropertyWithInput lives on IDXCoreAdapter1, which
+            // Win10's dxcore.dll doesn't implement — null there (the `as` QI fails with
+            // E_NOINTERFACE; same RCW, released with the entry, never separately).
+            // Without it, count engines by probing the running-time state (indices are
+            // contiguous from 0) and let the PDH map backfill real names at sample time.
+            // If even that state is unsupported (e.g. VMware SVGA 3D), the engines show
+            // up via the PDH map once sampling starts.
+            var adapter1 = adapter as IDXCoreAdapter1;
+            if (adapter1 != null)
+            {
+                int engineCount = GetEngineCount(adapter1, phys);
+                for (int e = 0; e < engineCount; e++)
+                    entry.Engines.Add(new EngineEntry { Name = GetEngineName(adapter1, phys, e) });
+            }
+            else if (entry.EngineTimeSupported)
+            {
+                const int maxProbeEngines = 64;   // bounds a driver that never errors
+                for (int e = 0; e < maxProbeEngines; e++)
+                {
+                    if (!QueryEngineRunningTime(adapter, phys, e, out _)) break;
+                    entry.Engines.Add(new EngineEntry { Name = $"Engine {e}", NameIsFallback = true });
+                }
+            }
+            // One line per adapter per process lifetime (enumeration only ADDs new keys) —
+            // same discovery-log contract as DiskSampler's PhysicalDrive line; the source
+            // note names the Win10 fallback in play so future log reads explain the data.
+            string source = adapter1 != null ? "DXCore"
+                : entry.EngineTimeSupported ? "DXCore（无 IDXCoreAdapter1，引擎名经 PDH 回填）"
+                : "PDH 引擎映射（驱动不支持 DXCore 运行时间状态）";
+            Logger.Info($"发现 GPU（{name}，引擎 {entry.Engines.Count} 个，利用率源 {source}）——纳入每 tick 采样");
             return entry;
         }
 
@@ -541,26 +680,26 @@ namespace task_monitor
         }
 
         // ---------- DXCore property helpers (enumeration-time only) ----------
-        private long GetInt64Property(IDXCoreAdapter1 adapter, DXCoreAdapterProperty property)
+        private long GetInt64Property(IDXCoreAdapter adapter, DXCoreAdapterProperty property)
         {
             int hr = adapter.GetProperty(property, (UIntPtr)8, _outBuf);
             return hr < 0 ? 0 : Marshal.ReadInt64(_outBuf);
         }
 
         // uint32 properties (PhysicalAdapterCount) — queried with their exact size, like Taskmgr.
-        private int GetInt32Property(IDXCoreAdapter1 adapter, DXCoreAdapterProperty property)
+        private int GetInt32Property(IDXCoreAdapter adapter, DXCoreAdapterProperty property)
         {
             int hr = adapter.GetProperty(property, (UIntPtr)4, _outBuf);
             return hr < 0 ? 0 : Marshal.ReadInt32(_outBuf);
         }
 
-        private bool GetByteProperty(IDXCoreAdapter1 adapter, DXCoreAdapterProperty property)
+        private bool GetByteProperty(IDXCoreAdapter adapter, DXCoreAdapterProperty property)
         {
             int hr = adapter.GetProperty(property, (UIntPtr)1, _outBuf);
             return hr >= 0 && Marshal.ReadByte(_outBuf) != 0;
         }
 
-        private string GetStringProperty(IDXCoreAdapter1 adapter, DXCoreAdapterProperty property)
+        private string GetStringProperty(IDXCoreAdapter adapter, DXCoreAdapterProperty property)
         {
             int hr = adapter.GetPropertySize(property, out UIntPtr size);
             if (hr < 0 || size == UIntPtr.Zero || (ulong)size > 4096) return null;

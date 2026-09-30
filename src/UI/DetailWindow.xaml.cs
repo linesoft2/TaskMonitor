@@ -20,7 +20,10 @@ namespace task_monitor
     /// destroyed on dismiss so each appearance is "born active" (no inactive→active
     /// acrylic flash). Styled via FluentWpfCore <c>WindowMaterial</c> (persistent acrylic)
     /// + <c>WindowStyle="None"</c> + rounded corners. Each metric's actual content lives
-    /// in its own detail view.
+    /// in its own detail view. On Win10 the acrylic is replaced by a LAYERED window
+    /// (<c>AllowsTransparency</c>) painting its own rounded tint card (gotchas §40): the
+    /// corner-rounding API is Win11-only, and the offscreen-applied accent is what lost
+    /// the window's first frame there.
     ///
     /// Pinning turns the flyout into a little window with an iNKORE-drawn title bar: a
     /// Mica-filled band (caption title, caption ✕, drag surface) "grows out of the top" — the window
@@ -75,6 +78,24 @@ namespace task_monitor
             AddHandler(MouseLeftButtonDownEvent,
                 new MouseButtonEventHandler(Window_MouseLeftButtonDown), handledEventsToo: true);
 
+            // Win10 (pre-Win11): NO acrylic. DWMWA_WINDOW_CORNER_PREFERENCE (the rounding the
+            // material relies on) doesn't exist there, a window region can't shape the blur
+            // (§36's measurement), and the accent applied at SourceInitialized — while the
+            // window is still parked offscreen — is what lost the first frame to Win10's DWM
+            // (the "detail opens blank / header missing until the next tick" report, §40).
+            // Instead the window goes LAYERED (AllowsTransparency — the only Win10 path to
+            // TRUE per-pixel alpha: the extended-frame "transparent surface" recipe renders
+            // alpha-0 pixels BLACK once no accent sits behind them — the reported dark veil
+            // and black corner fringe) and paints its own rounded tint card — the floating
+            // widget's trade-off (§36); tint/outline brushes in ApplyTheme.
+            if (!TaskbarWindow.IsWin11OrLater)
+            {
+                windowMaterial.MaterialMode = FluentWpfCore.Interop.MaterialType.None;
+                AllowsTransparency = true;
+                RootBorder.CornerRadius = new CornerRadius(8);
+                RootBorder.BorderThickness = new Thickness(1);
+            }
+
             // Resolve the theme once: tint the persistent acrylic, and pass dark to the view.
             // (A live switch re-runs this via ApplyTheme — App hooks the ThemeManager's
             // ActualApplicationThemeChanged.)
@@ -98,10 +119,27 @@ namespace task_monitor
             // widget's CARD is painted with the very same values, which is what keeps the
             // widget's background the same colour as this popup's (the widget has no blur of
             // its own; see that file for why).
-            windowMaterial.CompositonColor = TintColor(_dark
+            var tint = TintColor(_dark
                 ? WindowBackdropInterop.DarkAcrylicTint
                 : WindowBackdropInterop.LightAcrylicTint);
-            windowMaterial.IsDarkMode = _dark;
+            if (TaskbarWindow.IsWin11OrLater)
+            {
+                windowMaterial.CompositonColor = tint;
+                windowMaterial.IsDarkMode = _dark;
+            }
+            else
+            {
+                // Win10 (no material — see the ctor): the same tint as an OPAQUE card fill
+                // (no blur behind it, so translucency only ever read as a grey veil — user
+                // call, 2026-09-30), plus the 1px edge DWM's frame would have painted, by
+                // the CardBorderAlpha* rule — a dark line on a light card, a light one on
+                // dark.
+                tint.A = 255;
+                RootBorder.Background = new SolidColorBrush(tint);
+                RootBorder.BorderBrush = new SolidColorBrush(_dark
+                    ? Color.FromArgb((byte)(WindowBackdropInterop.CardBorderAlphaDark * 255), 255, 255, 255)
+                    : Color.FromArgb((byte)(WindowBackdropInterop.CardBorderAlphaLight * 255), 0, 0, 0));
+            }
             _current?.ApplyTheme(_dark);
         }
 
@@ -130,31 +168,43 @@ namespace task_monitor
         /// </summary>
         internal void Prewarm()
         {
-            ShowActivated = false;
-            Show();
-            // Every view is built and laid out once — each has its own BAML, chart
-            // controls and style set, so warming only one would leave the other
-            // columns' first opens slightly cold.
-            foreach (var view in new IDetailView[]
+            // A pure optimization, so it must NEVER crash the app it warms up: the caller
+            // already skips it when stopping, but a mid-shutdown run is still possible from
+            // here (Dispatcher.Invoke below pumps nested frames, which can dispatch a
+            // queued Shutdown — leaving WPF's app resources half-torn-down under us;
+            // 2026-09-29's DeferredAppResourceReference NRE came from exactly that race).
+            try
             {
-                new CpuDetailView(_dark),
-                new RamDetailView(_dark),
-                new DiskDetailView(_dark),
-                new GpuDetailView(_dark),
-                new NetDetailView(_dark),
-            })
-            {
-                ContentHost.Content = view;
-                // Expand templates, realize styles and format text now, then queue
-                // behind the pending render pass so it commits before we move on.
-                UpdateLayout();
-                Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Render);
+                ShowActivated = false;
+                Show();
+                // Every view is built and laid out once — each has its own BAML, chart
+                // controls and style set, so warming only one would leave the other
+                // columns' first opens slightly cold.
+                foreach (var view in new IDetailView[]
+                {
+                    new CpuDetailView(_dark),
+                    new RamDetailView(_dark),
+                    new DiskDetailView(_dark),
+                    new GpuDetailView(_dark),
+                    new NetDetailView(_dark),
+                })
+                {
+                    ContentHost.Content = view;
+                    // Expand templates, realize styles and format text now, then queue
+                    // behind the pending render pass so it commits before we move on.
+                    UpdateLayout();
+                    Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Render);
+                }
+                ContentHost.Content = null;
+                // Throwaway: make Closing/Deactivated no-ops (they would ask the overlay
+                // to deselect a column this window never selected).
+                _dismissed = true;
+                Close();
             }
-            ContentHost.Content = null;
-            // Throwaway: make Closing/Deactivated no-ops (they would ask the overlay
-            // to deselect a column this window never selected).
-            _dismissed = true;
-            Close();
+            catch (Exception ex)
+            {
+                Logger.Warn("启动预热失败（仅首次点击会慢一些，已跳过）", ex);
+            }
         }
 
         // ---------- Bottom-anchored growth (unpinned flyout on a BOTTOM taskbar only) ----------
@@ -230,6 +280,21 @@ namespace task_monitor
             if (hwnd != IntPtr.Zero) WindowInterop.SetForegroundWindow(hwnd);
             PositionNearTaskbar(column);
             EnsureTopmost();
+            // Win10: force one more present now that the window sits at its final on-screen
+            // spot — the first frame of a window born offscreen can still be dropped by
+            // Win10's DWM (the "blank until the next tick" half of §40; a tick's refresh only
+            // ever re-dirtied the DYNAMIC elements, which is why the static header stayed
+            // missing while the numbers came back).
+            if (!TaskbarWindow.IsWin11OrLater)
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Render, new Action(() =>
+                {
+                    InvalidateVisual();
+                    var h = new WindowInteropHelper(this).Handle;
+                    if (h != IntPtr.Zero)
+                        WindowInterop.SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0,
+                            WindowInterop.SWP_NOMOVE | WindowInterop.SWP_NOSIZE | WindowInterop.SWP_NOZORDER
+                            | WindowInterop.SWP_NOACTIVATE | WindowInterop.SWP_FRAMECHANGED);
+                }));
         }
 
         // The silent-no-op failure mode above is verified, not trusted: after positioning,

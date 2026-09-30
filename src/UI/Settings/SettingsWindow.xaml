@@ -127,7 +127,10 @@
                 </ui:SettingsCard>
 
                 <!-- 靠左显示: the switch lives in the expander's content area; its only
-                     sub-setting (靠左位置) is an item inside, enabled only while on. -->
+                     sub-setting (靠左位置) is an item inside, enabled only while on.
+                     On the classical (Win10) taskbar 靠左位置 does not exist, so the
+                     expander would be a chevron opening onto nothing — the ctor hides it
+                     and uses OnLeftCard below instead. -->
                 <ui:SettingsExpander x:Name="OnLeftExpander" Header="靠左显示"
                                      Description="显示在任务栏左侧（任务栏左对齐时自动回退到右侧）。"
                                      Margin="0,0,0,4">
@@ -136,7 +139,7 @@
                     </ui:SettingsExpander.HeaderIcon>
                     <ui:ToggleSwitch x:Name="OnLeftSwitch" Toggled="OnLeftSwitch_Toggled" />
                     <ui:SettingsExpander.Items>
-                        <ui:SettingsCard x:Name="AnchorCard" Header="靠左位置">
+                        <ui:SettingsCard Header="靠左位置">
                             <ComboBox x:Name="AnchorCombo" MinWidth="140" SelectionChanged="AnchorCombo_SelectionChanged">
                                 <ComboBoxItem Content="任务栏最左端" />
                                 <ComboBoxItem Content="贴近开始按钮" />
@@ -144,6 +147,17 @@
                         </ui:SettingsCard>
                     </ui:SettingsExpander.Items>
                 </ui:SettingsExpander>
+
+                <!-- 靠左显示 on the classical (Win10) taskbar: the same setting as a plain
+                     card — 靠左位置 means nothing there (its single spot is the task-buttons
+                     band's end next to Start), so the expander would be a chevron opening
+                     onto nothing. The ctor moves the expander's icon and its ToggleSwitch
+                     in here, so the switch exists exactly once and both forms share one
+                     piece of state. -->
+                <ui:SettingsCard x:Name="OnLeftCard" Header="靠左显示"
+                                 Description="显示在任务栏左侧（任务按钮区靠开始按钮的一端）。"
+                                 Visibility="Collapsed"
+                                 Margin="0,0,0,4" />
 
                 <!-- 悬浮模式: the overlay leaves the taskbar entirely and lives on the
                      desktop as a draggable acrylic widget (the detail popup's material).

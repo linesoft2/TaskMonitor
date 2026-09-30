@@ -73,7 +73,9 @@ namespace task_monitor
         public double[] DiskHistory = Array.Empty<double>(); // 60-tick rolling headline (oldest→newest)
         public List<DiskInfo> Disks = new List<DiskInfo>();
 
-        // GPU (per-adapter, Task Manager style — DXCore QueryState deltas). The headline
+        // GPU (per-adapter, Task Manager style — DXCore QueryState deltas; on Win10 the
+        // utilization/names may fall back to the per-process PDH engine map, see
+        // GpuSampler). The headline
         // percent is per the 显示方式 setting: the MAX across adapters by default (Task
         // Manager's sidebar rule), the MEAN, or one specific "GPU N". GpuAvailable is
         // false when no GPU adapter is present (or dxcore.dll is missing) — the overlay then
@@ -128,6 +130,8 @@ namespace task_monitor
         // Per-process GPU utilization (PDH \GPU Engine(*)\Utilization Percentage, Task
         // Manager's Processes-page GPU column) — DXCore has no per-process engine data,
         // which is why this is a PDH sampler, separate from the adapter-level DXCore one.
+        // Its per-(adapter, engine) totals (EngineMap) double as the adapter-level
+        // utilization/name fallback on Win10 (see GpuSampler.NeedsPdhEngineData).
         private readonly ProcessGpuSampler _procGpu = new ProcessGpuSampler();
         // svchost → 服务 naming for the five per-process lists (one SCM service enumeration
         // per tick; applied to each FINAL list at the end of Sample(), after the samplers'
@@ -418,9 +422,13 @@ namespace task_monitor
 
             if (gpuOn)
             {
-                var gpu = Timed("GPU(DXCore QueryState)", () => _gpu.Sample((MetricDisplayMode)_gpuDisplayMode, _gpuDisplayIndex));
-                // Per-process GPU% (PDH) — same PID→ImageName hand-off as the network sampler.
-                var procGpu = Timed("进程 GPU(PDH)", () => _procGpu.Sample(pidToName, mergeByPath));
+                // Per-process GPU% (PDH) runs FIRST: when GpuSampler flagged
+                // NeedsPdhEngineData (Win10 — no IDXCoreAdapter1, and drivers like VMware
+                // SVGA 3D report DXCore's engine-running-time state unsupported), the
+                // collect below also publishes the per-(adapter, engine) map that
+                // GpuSampler.Sample then reads as its utilization/name fallback.
+                var procGpu = Timed("进程 GPU(PDH)", () => _procGpu.Sample(pidToName, mergeByPath, _gpu.NeedsPdhEngineData));
+                var gpu = Timed("GPU(DXCore QueryState)", () => _gpu.Sample((MetricDisplayMode)_gpuDisplayMode, _gpuDisplayIndex, _procGpu.EngineMap));
                 if (!gpuPrime)
                 {
                     snapshot.GpuAvailable = gpu.Available;
