@@ -150,6 +150,7 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 6. **The overlay must never steal focus** — full no-activate set, incl. `SWP_NOACTIVATE` on every `SetWindowPos`; sole exception: 悬浮模式 with 置顶显示 OFF (§36).
 7. **`SetWindowPos(HWND_TOPMOST)` no-ops when not foreground** — activate first; `EnsureTopmost` verifies the exstyle bit.
 8. **Acrylic** — FluentWpfCore `UseWindowComposition=True` on every WPF window, never hand-rolled Accent P/Invoke (carve-out: DetailWindow on Win10, §40); the native floating overlay has NO material (§36); the menu host needs `WS_EX_TOOLWINDOW`.
+44. **竖直（侧边停靠）任务栏与任务栏族无关** — the orientation probe is the taskbar rect's aspect, never `classical` (Win11 26H2's native 左侧/右侧 taskbar is still the Win11 family). Missing it sizes the horizontal grid (~200 DIP) to the 48-DIP column, which covers the WHOLE taskbar and swallows its clicks; a side taskbar always takes the strip stack + the tray-end/top-corner anchor, and a strip narrower than `STRIP_TWO_LINE_MIN_W` renders two-line (label over value).
 
 **Samplers / metrics**
 

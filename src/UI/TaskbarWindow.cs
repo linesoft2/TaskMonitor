@@ -21,9 +21,12 @@ namespace task_monitor
     /// child window): the WIN11 taskbar (parent = Shell_TrayWnd, anchored left of
     /// TrayNotifyWnd / near Start) and the CLASSICAL one (Windows 10, or an
     /// ExplorerPatcher-restored classic taskbar on Win11 — parent = ReBarWindow32,
-    /// docked by shrinking the MSTaskSwWClass task-buttons band, vertical taskbars
-    /// included; TrafficMonitor's CClassicalTaskbarDlg path). The family is fixed
-    /// per <see cref="Start"/> run.
+    /// docked by shrinking the MSTaskSwWClass task-buttons band; TrafficMonitor's
+    /// CClassicalTaskbarDlg path). The family is fixed per <see cref="Start"/> run.
+    /// ORTHOGONAL to the family is the taskbar's ORIENTATION: a side-docked (vertical)
+    /// taskbar — the classical one since Win10, and on Win11 26H2 the native 左侧/右侧
+    /// 任务栏位置 — transposes both families' overlay into the strip stack (see the
+    /// STRIP_H block below).
     ///
     /// Runs on whatever thread calls <see cref="Start"/> — the caller (App)
     /// is expected to spin up a dedicated STA thread, since this method ends
@@ -64,24 +67,45 @@ namespace task_monitor
         private static readonly float[] GroupWidths = { 70f, 70f, 84f }; // stacked cell, stacked cell, 网络 (DIPs at 96 DPI)
         private const int GroupCount = 3;                  // two stacked cells + 网络
         private const int SlotCount = 5;                   // hit slots: CPU/内存/磁盘/GPU/网络
-        // VERTICAL taskbar (a side-docked classical taskbar): the grid transposes into a
-        // stack of full-width strips — one per visible stacked metric, two for 网络
-        // (↑ over ↓). Text stays horizontal (TrafficMonitor's vertical mode; no rotated
-        // text). Strip height = its TASKBAR_WND_HEIGHT/2.
-        private const float STRIP_H = 16f;                 // one vertical-mode strip (DIPs at 96 DPI)
+        // VERTICAL taskbar (a SIDE-docked taskbar of EITHER family — Start()'s orientation
+        // probe is about the taskbar's shape, never about which family it is): the grid
+        // transposes into a stack of full-width strips — one per visible stacked metric,
+        // two for 网络 (↑ over ↓). Text stays horizontal (TrafficMonitor's vertical mode;
+        // no rotated text).
+        //
+        // A side taskbar is only as thick as a horizontal one is tall (~48 DIP), while the
+        // single-line "label … value" strip wants ~72 DIP of width, so below that width every
+        // metric becomes a TWO-LINE BLOCK: its label on a small dim line over its value
+        // (DrawVertical's two-line form; the 2026-09-30 Win11 26H2 left taskbar is 48 DIP).
+        // Such a block is STRIP_BLOCK_H tall = 2 lines + the gap between them + STRIP_BLOCK_PAD
+        // above and below. The padding is NOT optional: at the first, tight version (2×STRIP_H
+        // = 32 DIP, no padding) the label and its value read as one collided lump and the
+        // hairline between blocks looked like it belonged to neither (the 2026-09-30 布局不合理
+        // report); 48 DIP was the roomy answer, 44 the "稍微紧凑一点" follow-up — the block height
+        // is the one knob, everything inside it is derived (DrawStripLines).
+        private const float STRIP_H = 16f;                 // one vertical-mode strip LINE (DIPs at 96 DPI)
         private const int STRIP_H_I = 16;                  // the same, for integer DPI scaling
+        private const float STRIP_TWO_LINE_MIN_W = 72f;    // narrower strips (DIP) take the two-line form
+        private const float STRIP_BLOCK_H = 44f;           // one two-line metric BLOCK (DIPs at 96 DPI)
+        private const float STRIP_BLOCK_PAD = 4f;          // …of which this much sits above and below the pair
+        private const float STRIP_LINE_GAP = 1f;           // …and this much between a label and its value
+                                                           // (the pair's own gap — ~17px at 200% here, against
+                                                           // ~27px of block separation; the 2026-09-30
+                                                           // "文案和数值再近一点点" trim, 4 → 1 DIP)
 
         // The geometry of one visibility mask. Flat fields (no arrays) — computed per
         // Draw/HitTest call, incl. per mouse-move, so it must not allocate.
         private struct OverlayLayout
         {
-            public bool Vertical;               // side-docked classical taskbar (strips), false = the two-row grid
+            public bool Vertical;               // side-docked taskbar (strips), false = the two-row grid
+            public bool TwoLine;                // vertical ONLY: strip too narrow for one-line rows → label line over value line
             public float Width;                 // total logical width (0 when every metric is off)
             public float Height;                // total logical height — VERTICAL mode only (horizontal: the band owns the height, 0 here)
             public float Left0, Left1, Left2;   // per-group left edge in DIPs (-1 = group gone); vertical: 0/-1 visibility sentinels only
             // The slot packed at each stacked row position [g0-top, g0-bottom, g1-top,
             // g1-bottom]; -1 = the trailing empty position of an odd count. Vertical mode:
-            // the same packing, but each position is one full-width strip.
+            // the same packing, but each position is one full-width strip (two-line form:
+            // one strip BLOCK of two lines).
             public int Pos0, Pos1, Pos2, Pos3;
             public int SlotMask;                // the sampling mask this layout was derived from
 
@@ -95,8 +119,40 @@ namespace task_monitor
         // Visible stacked metrics (slots 0–3) count — the vertical mode's strip-order base.
         private static int PackedStackedCount(int mask) => (mask & 1) + ((mask >> 1) & 1) + ((mask >> 2) & 1) + ((mask >> 3) & 1);
 
-        // Derive all geometry from the sampling mask (bit per slot, SystemSampler.Mask*).
-        private static OverlayLayout ComputeLayout(int mask, bool vertical)
+        // Height of one vertical ROW (DIPs): a single-line strip, or a two-line metric block.
+        private static float VerticalRowH(bool twoLine) => twoLine ? STRIP_BLOCK_H : STRIP_H;
+
+        // Rows in the vertical stack: one per visible stacked metric, two for 网络 (↑ over ↓).
+        // The stack's height is just rows × VerticalRowH — no unit arithmetic to keep in sync.
+        private static int VerticalRows(int packed, bool net) => packed + (net ? 2 : 0);
+
+        // A vertical slot's rect in the stack (top/height in DIPs, x always spans the strip).
+        // False = the slot has no strip under this layout (sampling off).
+        private static bool VerticalSlotRect(OverlayLayout l, int slot, out float top, out float height)
+        {
+            top = 0f;
+            height = 0f;
+            float rowH = VerticalRowH(l.TwoLine);
+            if (slot == 4)
+            {
+                if (l.Left2 < 0f) return false;
+                top = PackedStackedCount(l.SlotMask) * rowH;
+                height = 2f * rowH;                // both ↑/↓ rows — one hit slot
+                return true;
+            }
+            int pos = l.PositionOf(slot);
+            if (pos < 0) return false;
+            top = pos * rowH;
+            height = rowH;
+            return true;
+        }
+
+        // Derive all geometry from the sampling mask (bit per slot, SystemSampler.Mask*) and —
+        // in VERTICAL mode — the strip width the window ends up with, because that width
+        // decides the strip FORM (one line vs two) and with it the whole stack height.
+        // ComputeTargetSize is the one caller that has to solve that circularity (band clamp
+        // first, layout second); pass 0 for "not measured yet" → the natural cell width.
+        private static OverlayLayout ComputeLayout(int mask, bool vertical, float stripWidthDip)
         {
             var l = new OverlayLayout
             {
@@ -121,8 +177,9 @@ namespace task_monitor
                 l.Left2 = net ? 0f : -1f;
                 float cw = pos > 0 ? GroupWidths[0] : 0f;
                 if (net) cw = Math.Max(cw, GroupWidths[2]);
-                l.Width = cw;
-                l.Height = (pos + (net ? 2 : 0)) * STRIP_H;
+                l.Width = cw <= 0f ? 0f : stripWidthDip > 0f ? stripWidthDip : cw;
+                l.TwoLine = l.Width < STRIP_TWO_LINE_MIN_W;
+                l.Height = VerticalRows(pos, net) * VerticalRowH(l.TwoLine);
                 l.Vertical = true;
                 return l;
             }
@@ -139,24 +196,15 @@ namespace task_monitor
         // Logical rect of a hit slot under a layout, or false when the slot is hidden.
         // Horizontal: a stacked slot's row comes from its PACKED position (positions 0/2 =
         // the top row of their cell, 1/3 = the bottom row); slot 4 (网络) spans the whole
-        // height. Vertical: a stacked slot is its packed-position strip; slot 4 is the
-        // two-strip ↑/↓ block after the last stacked strip (top/mid/bottom go unused).
+        // height. Vertical: the stack's running order (VerticalSlotRect) — a stacked slot is
+        // its packed strip (one line, or the two-line block), slot 4 the two-strip ↑/↓ block.
         private static bool TrySlotRect(OverlayLayout l, float top, float mid, float bottom, int slot, out D2D_RECT_F r)
         {
             r = default;
             if (l.Vertical)
             {
-                if (slot == 4)
-                {
-                    if (l.Left2 < 0f) return false;
-                    float top4 = PackedStackedCount(l.SlotMask) * STRIP_H;
-                    r = new D2D_RECT_F { left = 0f, top = top4, right = l.Width, bottom = top4 + 2f * STRIP_H };
-                    return true;
-                }
-                int vpos = l.PositionOf(slot);
-                if (vpos < 0) return false;
-                float vtop = vpos * STRIP_H;
-                r = new D2D_RECT_F { left = 0f, top = vtop, right = l.Width, bottom = vtop + STRIP_H };
+                if (!VerticalSlotRect(l, slot, out float vtop, out float vheight)) return false;
+                r = new D2D_RECT_F { left = 0f, top = vtop, right = l.Width, bottom = vtop + vheight };
                 return true;
             }
             if (slot == 4)
@@ -579,19 +627,41 @@ namespace task_monitor
             return true;
         }
 
-        // Taskbar-thread mirror of RenderState.Vertical for the UI-thread layout accessors
-        // below (they can't touch the HWND-bound state). Written in Start() and on an
-        // orientation flip (ReconfigureOrientation); read on the WPF UI thread.
+        // Taskbar-thread mirrors of RenderState.Vertical / the overlay's width for the
+        // UI-thread layout accessors below (they can't touch the HWND-bound state). The
+        // WIDTH is part of it because in vertical mode it picks the strip form (one line vs
+        // two) and the stack height, which the accessors cannot derive from the mask alone.
+        // Both are written together by PublishLayout — Start, every resize, an orientation
+        // flip; read on the WPF UI thread.
         private volatile bool _layoutVertical;
+        private volatile float _layoutStripW;
+
+        // Mirror the taskbar thread's geometry for the accessors below (width → DIPs).
+        private void PublishLayout(bool vertical, int physicalWidth, uint dpi)
+        {
+            _layoutStripW = physicalWidth > 0 && dpi > 0
+                ? physicalWidth * (float)USER_DEFAULT_SCREEN_DPI / dpi
+                : 0f;
+            _layoutVertical = vertical;
+        }
 
         // Current overlay geometry (layout follows the sampling mask — hidden slots are
         // gone, not blank). Read by DetailWindow to centre its popup over a column.
-        internal float LogicalWidth => ComputeLayout(_samplingEnabledMask, _layoutVertical).Width;
+        internal float LogicalWidth
+        {
+            get
+            {
+                if (_layoutVertical) return _layoutStripW;   // the strips span the window
+                return ComputeLayout(_samplingEnabledMask, false, 0f).Width;
+            }
+        }
 
         // Total layout height in DIPs — meaningful only in VERTICAL mode (horizontal
         // layouts take the band's height; the layout owns none). DetailWindow reads it
         // for the centre ratio when the taskbar is docked left/right.
-        internal float LogicalHeight => ComputeLayout(_samplingEnabledMask, _layoutVertical).Height;
+        internal float LogicalHeight => _layoutVertical
+            ? ComputeLayout(_samplingEnabledMask, true, _layoutStripW).Height
+            : 0f;
 
         // X centre of a hit slot — used to centre the detail popup over its column. A
         // stacked slot's centre is its PACKED cell's centre (the cell it shifted into);
@@ -599,12 +669,13 @@ namespace task_monitor
         // clicked or pinned into existence. Vertical mode: the strip's horizontal centre.
         internal float ColumnCenter(int slot)
         {
-            var l = ComputeLayout(_samplingEnabledMask, _layoutVertical);
-            if (l.Vertical)
+            if (_layoutVertical)
             {
-                bool vis = slot == 4 ? l.Left2 >= 0f : l.PositionOf(slot) >= 0;
-                return vis ? l.Width / 2f : 0f;
+                var lv = ComputeLayout(_samplingEnabledMask, true, _layoutStripW);
+                bool vis = slot == 4 ? lv.Left2 >= 0f : lv.PositionOf(slot) >= 0;
+                return vis ? lv.Width / 2f : 0f;
             }
+            var l = ComputeLayout(_samplingEnabledMask, false, 0f);
             if (slot == 4)
                 return l.Left2 >= 0f ? l.Left2 + GroupWidths[2] / 2f : 0f;
             int pos = l.PositionOf(slot);
@@ -612,16 +683,13 @@ namespace task_monitor
         }
 
         // Y centre of a hit slot — VERTICAL mode only (0 otherwise, unused there): the
-        // strip's vertical centre; slot 4 (网络) centres over its two-strip ↑/↓ block.
-        // Same hidden-slot-returns-0 contract as ColumnCenter.
+        // strip's (or strip block's) vertical centre; slot 4 (网络) centres over its
+        // two-strip ↑/↓ block. Same hidden-slot-returns-0 contract as ColumnCenter.
         internal float ColumnCenterY(int slot)
         {
-            var l = ComputeLayout(_samplingEnabledMask, _layoutVertical);
-            if (!l.Vertical) return 0f;
-            if (slot == 4)
-                return l.Left2 >= 0f ? (PackedStackedCount(l.SlotMask) + 1) * STRIP_H : 0f;
-            int pos = l.PositionOf(slot);
-            return pos >= 0 ? (pos + 0.5f) * STRIP_H : 0f;
+            if (!_layoutVertical) return 0f;
+            var l = ComputeLayout(_samplingEnabledMask, true, _layoutStripW);
+            return VerticalSlotRect(l, slot, out float top, out float height) ? top + height / 2f : 0f;
         }
 
         /// <summary>
@@ -749,29 +817,44 @@ namespace task_monitor
             // (WM_APP_SET_FLOATING), so it cannot change under us here.
             bool floating = _floating;
 
-            // Vertical = a side-docked classical taskbar (TrafficMonitor's
-            // CheckTaskbarOnTopOrBottom: width >= height → horizontal). A side taskbar
-            // transposes the overlay into the strips layout. The FLOATING form has no taskbar
-            // surface to transpose into, so it is always the horizontal grid.
-            bool vertical = !floating && classical && (taskbarRect.right - taskbarRect.left) < (taskbarRect.bottom - taskbarRect.top);
-            _layoutVertical = vertical;   // mirror for the UI-thread layout accessors
+            // Vertical = a SIDE-docked taskbar, EITHER family (TrafficMonitor's
+            // CheckTaskbarOnTopOrBottom: width >= height → horizontal). Windows 11 26H2
+            // ships a native left/right taskbar whose XAML taskbar is still the Win11
+            // family, and the classical family has been side-dockable since Win10 — the
+            // probe is about the taskbar's SHAPE, so gating it on the family is wrong. The
+            // mistake is not cosmetic: the horizontal grid is ~200 DIP wide, so in a
+            // 48-DIP column it covers the whole taskbar AND eats its clicks (the
+            // 2026-09-30 report: 任务栏整个点不了了). A side taskbar transposes the overlay
+            // into the strips layout. The FLOATING form has no taskbar surface to transpose
+            // into, so it is always the horizontal grid.
+            bool vertical = !floating && (taskbarRect.right - taskbarRect.left) < (taskbarRect.bottom - taskbarRect.top);
 
             uint dpi = WindowInterop.GetDpiForWindow(taskbar);
             if (dpi == 0) dpi = USER_DEFAULT_SCREEN_DPI;
             // Win11: size to the taskbar band explorer actually RESERVES (work-area
             // strip), bottom-aligned inside the window — a taskbar-height mod can
             // leave Shell_TrayWnd taller than the reservation (TaskbarBand remarks).
+            // A side-docked taskbar has the same reservation along its own axis
+            // (TaskbarBandCross), and the classical family carves the band itself.
             TaskbarBand(taskbar, taskbarRect, out int taskbarBandH, out int taskbarBandY);
+            int taskbarBandW = TaskbarBandCross(taskbar, taskbarRect, out int taskbarBandX);
             ComputeTargetSize(_samplingEnabledMask, vertical, dpi,
-                vertical ? rcMin.right - rcMin.left : 0,
+                vertical ? (classical ? rcMin.right - rcMin.left : taskbarBandW) : 0,
                 classical ? rcBar.bottom - rcBar.top : taskbarBandH,
                 out int physicalWidth, out int physicalHeight);
-            Logger.Info($"任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical} DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms{AnchorDiag()}");
+            var startupLayout = ComputeLayout(_samplingEnabledMask, vertical,
+                physicalWidth * (float)USER_DEFAULT_SCREEN_DPI / dpi);
+            Logger.Info($"任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical}"
+                + (vertical ? $"（任务栏 {taskbarRect.right - taskbarRect.left}x{taskbarRect.bottom - taskbarRect.top}px，条带宽 {taskbarBandW}px，{(startupLayout.TwoLine ? "双行" : "单行")}条带）" : "")
+                + $" DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms{AnchorDiag()}");
             // DXGI can't create 0-sized buffers — a 1px stub draws nothing (Draw skips
             // an empty layout) and resizes out the moment a metric comes back.
             physicalWidth = Math.Max(1, physicalWidth);
             physicalHeight = Math.Max(1, physicalHeight);
             float logicalHeight = physicalHeight * (float)USER_DEFAULT_SCREEN_DPI / dpi;
+            // Mirror for the UI-thread layout accessors (DetailWindow's popup placement) —
+            // the taskbar thread re-publishes it on every later resize/flip.
+            PublishLayout(vertical, physicalWidth, dpi);
 
             // Start's phase markers for the native-crash tracer: the name only. The per-step
             // MILLISECOND timings that used to live here were dropped (the numbers they produced
@@ -782,7 +865,7 @@ namespace task_monitor
             // dock is applied relative to the parent after SetParent in step 11). The
             // Win11 path computes its anchor now; the classical path lands anywhere sane
             // and lets the forced RepositionOverlay in step 11 place it precisely.
-            int xScreen, xRelative = 0, yScreen = taskbarRect.top + (classical ? 0 : taskbarBandY);
+            int xScreen, xRelative = 0, yScreen = taskbarRect.top + (classical ? 0 : taskbarBandY), yRelative = 0;
             // 贴边隐藏: the dock is re-derived from the home at creation. A home saved at
             // an edge reopens HIDDEN — the creation coords are the hidden position itself,
             // so the widget is born docked with no flash and no visible slide (the strip is
@@ -813,7 +896,18 @@ namespace task_monitor
                 }
             }
             else if (!classical)
-                (xScreen, xRelative) = CalcPosition(taskbar, taskbarRect, taskbarRect.right - taskbarRect.left, physicalWidth, dpi, _onLeft, _snapToStart);
+            {
+                if (vertical)
+                {
+                    // Side taskbar: the anchor runs along the taskbar's own axis (tray end /
+                    // top corner), the strip stack is centred across the band.
+                    (yScreen, yRelative, xRelative) = CalcPositionVertical(taskbar, taskbarRect,
+                        taskbarBandW, taskbarBandX, physicalWidth, physicalHeight, dpi, _onLeft, _snapToStart);
+                    xScreen = taskbarRect.left + xRelative;
+                }
+                else
+                    (xScreen, xRelative) = CalcPosition(taskbar, taskbarRect, taskbarRect.right - taskbarRect.left, physicalWidth, dpi, _onLeft, _snapToStart);
+            }
             else
                 xScreen = taskbarRect.left;
             step("坐标(CalcPosition)");
@@ -954,12 +1048,26 @@ namespace task_monitor
             netFormat.Object.SetTextAlignment(DWRITE_TEXT_ALIGNMENT.DWRITE_TEXT_ALIGNMENT_TRAILING);
             netFormat.Object.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             netFormat.Object.SetWordWrapping(DWRITE_WORD_WRAPPING.DWRITE_WORD_WRAPPING_NO_WRAP);
+            // The VERTICAL two-line form's pair (a side taskbar's strips are ~46 DIP wide —
+            // STRIP_TWO_LINE_MIN_W): label and value both CENTRED across the strip, the label
+            // a size smaller and dimmed (LabelBrush) so the value stays the headline. A
+            // side taskbar is the only place these are used.
+            var stripLabelFormat = dwrite.CreateTextFormat("Segoe UI", 11f);
+            stripLabelFormat.Object.SetTextAlignment(DWRITE_TEXT_ALIGNMENT.DWRITE_TEXT_ALIGNMENT_CENTER);
+            stripLabelFormat.Object.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            stripLabelFormat.Object.SetWordWrapping(DWRITE_WORD_WRAPPING.DWRITE_WORD_WRAPPING_NO_WRAP);
+            var stripValueFormat = dwrite.CreateTextFormat("Segoe UI", 13f);
+            stripValueFormat.Object.SetTextAlignment(DWRITE_TEXT_ALIGNMENT.DWRITE_TEXT_ALIGNMENT_CENTER);
+            stripValueFormat.Object.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            stripValueFormat.Object.SetWordWrapping(DWRITE_WORD_WRAPPING.DWRITE_WORD_WRAPPING_NO_WRAP);
             // Device-INDEPENDENT (they come from the DWrite factory, not the D3D device):
             // created once here and kept across a device loss — RecoverDevice only rebuilds
             // the pipeline, never the text formats.
             state.LabelFormat = labelFormat;
             state.ValueFormat = valueFormat;
             state.NetFormat = netFormat;
+            state.StripLabelFormat = stripLabelFormat;
+            state.StripValueFormat = stripValueFormat;
 
             // === Step 6: the device pipeline (D3D11 → DXGI swap chain → D2D1 → DComp) ===
             // CreateDeviceResources is the SAME method the post-device-loss recovery runs
@@ -1052,9 +1160,12 @@ namespace task_monitor
                 }
                 else
                 {
-                    WindowInterop.MoveWindow(hwnd, xRelative, taskbarBandY, physicalWidth, physicalHeight, true);
-                    state.LastXRelative = xRelative;
-                    state.LastBandY = taskbarBandY;
+                    // Parent-relative dock: the horizontal form bottom-aligns into the
+                    // reserved band, the side form takes the anchor's (x, y).
+                    int placeX = xRelative, placeY = vertical ? yRelative : taskbarBandY;
+                    WindowInterop.MoveWindow(hwnd, placeX, placeY, physicalWidth, physicalHeight, true);
+                    state.LastPlaceX = placeX;
+                    state.LastPlaceY = placeY;
                 }
             }
             WindowInterop.SetWindowPos(hwnd, WindowInterop.HWND_TOP, 0, 0, 0, 0,
@@ -1110,7 +1221,8 @@ namespace task_monitor
             // Draw calls harmless while the device is down.
             if (s.DeviceLost) return;
 
-            var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Vertical);
+            var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Vertical,
+                s.PhysicalWidth * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi);
             if (layout.Width <= 0f) return;   // every metric off — the overlay is a stub
 
             var ctx = s.D2dContext;
@@ -1273,15 +1385,21 @@ namespace task_monitor
             }
         }
 
-        // The transposed layout for a side-docked classical taskbar: full-width strips —
-        // one per visible stacked metric, two for 网络 (↑ over ↓) — with hairlines
-        // between strips. Text stays horizontal (TrafficMonitor's vertical mode).
+        // The transposed layout for a SIDE-docked taskbar (either family): full-width strips —
+        // one per visible stacked metric, two for 网络 (↑ over ↓) — with hairlines between
+        // them. Text stays horizontal (TrafficMonitor's vertical mode). A NARROW side taskbar
+        // (~48 DIP: the Win11 26H2 left bar) cannot hold the single-line "label … value" pair,
+        // so layout.TwoLine turns every metric into a padded label-over-value BLOCK
+        // (DrawStripLines) — the same stack, one STRIP_BLOCK_H-tall block per metric. The 网络 block
+        // is two such blocks there (↑ label over its rate, then ↓), which keeps the long rates
+        // inside the strip: its rates are drawn in the compact form
+        // (NetRateFormatter.FormatCompact).
         private static void DrawVertical(RenderState s, OverlayLayout layout)
         {
             var ctx = s.D2dContext;
 
-            // The classical opaque backdrop (the 残影 cure — see DrawHorizontal). Vertical
-            // mode only exists on the classical family, but keep the same guard shape.
+            // The classical opaque backdrop (the 残影 cure — see DrawHorizontal). Win11 keeps
+            // true transparency (its taskbar paints under us) in this orientation too.
             if (!s.Floating && s.Classical && s.CardBrush != null)
                 ctx.FillRectangle(
                     new D2D_RECT_F { left = 0f, top = 0f, right = layout.Width, bottom = s.LogicalHeight },
@@ -1300,33 +1418,86 @@ namespace task_monitor
                     brush);
             }
 
-            // Hairlines between strips (the transposed mid line; 网络's ↑/↓ split included).
+            // Hairlines on every row boundary (the transposed mid line; 网络's ↑/↓ split
+            // included). A row IS the unit here — a single-line strip, or a whole two-line
+            // block — so no line ever cuts a metric's label off its own value.
             const float lineHalf = 0.5f;
-            int strips = PackedStackedCount(layout.SlotMask) + (layout.Left2 >= 0f ? 2 : 0);
-            for (int i = 1; i < strips; i++)
+            int rows = VerticalRows(PackedStackedCount(layout.SlotMask), layout.Left2 >= 0f);
+            float rowH = VerticalRowH(layout.TwoLine);
+            for (int i = 1; i < rows; i++)
             {
-                float y = i * STRIP_H;
+                float y = i * rowH;
                 ctx.FillRectangle(new D2D_RECT_F { left = 0f, top = y - lineHalf, right = layout.Width, bottom = y + lineHalf }, s.SeparatorBrush);
             }
 
-            DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 0, "CPU", $"{s.Snapshot.CpuPercent:F0}%");
-            DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 1, "内存", $"{s.Snapshot.RamPercent:F0}%");
-            DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 2, "磁盘", $"{s.Snapshot.DiskPercent:F0}%");
-            DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 3, "GPU", s.Snapshot.GpuAvailable ? $"{s.Snapshot.GpuPercent:F0}%" : "--");
-
-            // 网络's two strips: ↑/↓ flush-left labels, rates flush-right — the same
-            // split as the horizontal column, two strips instead of two half-rows.
-            if (TrySlotRect(layout, 0f, 0f, 0f, 4, out var netRect))
+            if (!layout.TwoLine)
             {
-                const float netInset = 5f;
-                float midY = netRect.top + STRIP_H;
-                var netUp   = new D2D_RECT_F { left = netRect.left + netInset, top = netRect.top, right = netRect.right - netInset, bottom = midY };
-                var netDown = new D2D_RECT_F { left = netRect.left + netInset, top = midY, right = netRect.right - netInset, bottom = netRect.bottom };
-                ctx.DrawText("↑", s.LabelFormat, netUp, s.LabelBrush);
-                ctx.DrawText(NetRateFormatter.Format(s.Snapshot.NetUpBytesPerSec), s.NetFormat, netUp, s.TextBrush);
-                ctx.DrawText("↓", s.LabelFormat, netDown, s.LabelBrush);
-                ctx.DrawText(NetRateFormatter.Format(s.Snapshot.NetDownBytesPerSec), s.NetFormat, netDown, s.TextBrush);
+                DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 0, "CPU", $"{s.Snapshot.CpuPercent:F0}%");
+                DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 1, "内存", $"{s.Snapshot.RamPercent:F0}%");
+                DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 2, "磁盘", $"{s.Snapshot.DiskPercent:F0}%");
+                DrawSlotRow(ctx, s, layout, 0f, 0f, 0f, 3, "GPU", s.Snapshot.GpuAvailable ? $"{s.Snapshot.GpuPercent:F0}%" : "--");
+
+                // 网络's two strips: ↑/↓ flush-left labels, rates flush-right — the same
+                // split as the horizontal column, two strips instead of two half-rows.
+                if (TrySlotRect(layout, 0f, 0f, 0f, 4, out var netRect))
+                {
+                    const float netInset = 5f;
+                    float midY = netRect.top + STRIP_H;
+                    var netUp   = new D2D_RECT_F { left = netRect.left + netInset, top = netRect.top, right = netRect.right - netInset, bottom = midY };
+                    var netDown = new D2D_RECT_F { left = netRect.left + netInset, top = midY, right = netRect.right - netInset, bottom = netRect.bottom };
+                    ctx.DrawText("↑", s.LabelFormat, netUp, s.LabelBrush);
+                    ctx.DrawText(NetRateFormatter.Format(s.Snapshot.NetUpBytesPerSec), s.NetFormat, netUp, s.TextBrush);
+                    ctx.DrawText("↓", s.LabelFormat, netDown, s.LabelBrush);
+                    ctx.DrawText(NetRateFormatter.Format(s.Snapshot.NetDownBytesPerSec), s.NetFormat, netDown, s.TextBrush);
+                }
+                return;
             }
+
+            DrawStripBlock(ctx, s, layout, 0, "CPU", $"{s.Snapshot.CpuPercent:F0}%");
+            DrawStripBlock(ctx, s, layout, 1, "内存", $"{s.Snapshot.RamPercent:F0}%");
+            DrawStripBlock(ctx, s, layout, 2, "磁盘", $"{s.Snapshot.DiskPercent:F0}%");
+            DrawStripBlock(ctx, s, layout, 3, "GPU", s.Snapshot.GpuAvailable ? $"{s.Snapshot.GpuPercent:F0}%" : "--");
+            if (TrySlotRect(layout, 0f, 0f, 0f, 4, out var netBlock))
+            {
+                float half = netBlock.top + (netBlock.bottom - netBlock.top) / 2f;   // the ↑ block
+                DrawStripLines(ctx, s, netBlock.left, netBlock.top, netBlock.right, half,
+                    "↑", NetRateFormatter.FormatCompact(s.Snapshot.NetUpBytesPerSec));
+                DrawStripLines(ctx, s, netBlock.left, half, netBlock.right, netBlock.bottom,
+                    "↓", NetRateFormatter.FormatCompact(s.Snapshot.NetDownBytesPerSec));
+            }
+        }
+
+        // One metric's two-line block (the narrow side-taskbar form): its whole block rect —
+        // DrawStripLines owns the label/value split and the padding around it.
+        private static void DrawStripBlock(
+            IComObject<ID2D1DeviceContext> ctx, RenderState s, OverlayLayout layout,
+            int slot, string label, string value)
+        {
+            if (!TrySlotRect(layout, 0f, 0f, 0f, slot, out var r)) return;
+            DrawStripLines(ctx, s, r.left, r.top, r.right, r.bottom, label, value);
+        }
+
+        // The two lines of one strip ROW: a small dim label over a full-size value, both
+        // centred, STRIP_LINE_GAP apart and STRIP_BLOCK_PAD clear of the row's edges — a
+        // two-line row is STRIP_BLOCK_H tall while its pair needs only 2×STRIP_H, and the
+        // leftover is what makes a label read as belonging to the value beneath it rather than
+        // to the next row's (at the first, tight version the two lines collided: the 布局不合理
+        // report). The line height is DERIVED from the row, so STRIP_BLOCK_H is the one knob.
+        // Inset 2 DIP, not the single-line form's 5 — the strip is only ~46 DIP wide and the
+        // text is centred, so the padding keeps the glyphs off the neighbouring taskbar
+        // surface rather than separating a label from a value.
+        private static void DrawStripLines(
+            IComObject<ID2D1DeviceContext> ctx, RenderState s,
+            float left, float top, float right, float bottom, string label, string value)
+        {
+            const float inset = 2f;
+            float contentTop = top + STRIP_BLOCK_PAD;
+            float contentBottom = bottom - STRIP_BLOCK_PAD;
+            float lineH = (contentBottom - contentTop - STRIP_LINE_GAP) / 2f;
+            var labelRect = new D2D_RECT_F { left = left + inset, top = contentTop, right = right - inset, bottom = contentTop + lineH };
+            var valueRect = new D2D_RECT_F { left = left + inset, top = contentTop + lineH + STRIP_LINE_GAP, right = right - inset, bottom = contentBottom };
+            ctx.DrawText(label, s.StripLabelFormat, labelRect, s.LabelBrush);
+            ctx.DrawText(value, s.StripValueFormat, valueRect, s.TextBrush);
         }
 
         // One metric's row: label flush-left and value flush-right against the same cell
@@ -1742,6 +1913,10 @@ namespace task_monitor
         // including its Widgets-button reserve: with the Widgets button shown, the
         // far-left anchor shifts right by 160px, and the right-side position on a
         // left-aligned taskbar shifts left by the same reserve.
+        //
+        // A SIDE taskbar runs on the same rule turned 90° (CalcPositionVertical below),
+        // which is the only anchor the Win11 family has there — the classical one carves
+        // its slot out of the task-buttons band instead (ClassicalReposition).
         // --------------------------------------------------------------------
         private static (int screen, int relative) CalcPosition(IntPtr taskbar, WindowInterop.RECT taskbarRect, int taskbarWidth, int windowWidth, uint dpi, bool onLeft, bool snapToStart)
         {
@@ -1755,7 +1930,7 @@ namespace task_monitor
                 {
                     // Snap just left of the Start button — follows the centred icon
                     // group as icons come and go (tracked by the per-tick poll).
-                    IntPtr start = WindowInterop.FindWindowExW(taskbar, IntPtr.Zero, "Start", null);
+                    IntPtr start = FindClassChild(taskbar, "Start");
                     if (start != IntPtr.Zero && TryGetWindowRectGuarded(start, 300, out var startRect))
                         xrel = startRect.left - taskbarLeft - windowWidth - spacing;
                 }
@@ -1810,6 +1985,103 @@ namespace task_monitor
             xr = Math.Max(0, Math.Min(xr, taskbarWidth - windowWidth));
             xs = Math.Max(0, Math.Min(xs, taskbarRect.right - windowWidth));
             return (xs, xr);
+        }
+
+        // The vertical (side-docked taskbar) anchor: CalcPosition turned 90°, for the Win11
+        // family — a side taskbar there offers no band to shrink, only free space, and this
+        // is where it is. 靠左显示 OFF (the default, and the same "next to the notification
+        // area" end as the horizontal one): just ABOVE the tray. ON: the taskbar's far
+        // corner — its TOP on a side bar — or, with 贴靠开始按钮, just above the Start button.
+        // The top-corner request is honoured only while the icon cluster demonstrably starts
+        // below us (ClusterTop), which is the same shape as CalcPosition's "no room left of
+        // Start → fall back to the tray side"; the fallback here is the tray end. A
+        // side taskbar's Widgets button does not exist, so the 160px reserve has no analogue.
+        // Returns SCREEN y and the parent-relative (y, x); x centres the strip stack in the
+        // band, whose left edge is already bandX inside the taskbar window.
+        private static (int screenY, int relativeY, int relativeX) CalcPositionVertical(
+            IntPtr taskbar, WindowInterop.RECT taskbarRect, int bandW, int bandX,
+            int windowW, int windowH, uint dpi, bool onLeft, bool snapToStart)
+        {
+            int bandTop = taskbarRect.top;
+            int bandH = taskbarRect.bottom - taskbarRect.top;
+            int spacing = DpiScaleInt(2, dpi);
+            int xrel = bandX + Math.Max(0, (bandW - windowW) / 2);   // the stack centres in the band
+
+            if (onLeft && IsTaskbarCenterAligned())
+            {
+                int yrel = -1;
+                if (snapToStart)
+                {
+                    // Snap just above the Start button (the cluster's first item on a side
+                    // taskbar) — follows the centred icon group as it resizes.
+                    IntPtr start = FindClassChild(taskbar, "Start");
+                    if (start != IntPtr.Zero && TryGetWindowRectGuarded(start, 300, out var startRect))
+                        yrel = startRect.top - bandTop - windowH - spacing;
+                }
+                else
+                {
+                    // Far corner. The room check keeps us off a TOP-aligned taskbar's icon
+                    // cluster: without it the widget would land on the Start button.
+                    yrel = spacing;
+                    int clusterTop = ClusterTop(taskbar, bandTop, bandH);
+                    if (clusterTop - bandTop < yrel + windowH + spacing) yrel = -1;
+                }
+                if (yrel >= 0 && yrel + windowH <= bandH)
+                    return (bandTop + yrel, yrel, xrel);
+            }
+            // Tray end: our bottom edge just above the notification area (a missing tray
+            // falls back to a fixed reserve from the band's end, like CalcPosition's 88 DIP).
+            int y;
+            IntPtr tray = WindowInterop.FindWindowExW(taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
+            if (tray != IntPtr.Zero && TryGetWindowRectGuarded(tray, 300, out var trayRect))
+                y = trayRect.top - bandTop - windowH - spacing;
+            else
+                y = bandH - windowH - DpiScaleInt(88, dpi);
+            y = Math.Max(0, Math.Min(y, Math.Max(0, bandH - windowH)));
+            return (bandTop + y, y, xrel);
+        }
+
+        // The top edge of a side taskbar's icon cluster — the taskbar's own skeleton windows
+        // (Start, the app-buttons ReBar, the search host), whichever exist and are laid out;
+        // the band's bottom end when none does (the cluster then counts as the whole bar,
+        // which sends a 靠左 request to the tray-end fallback rather than onto the icons).
+        // The Win11 XAML content itself has no window of its own, so this is the best floor
+        // available — it covers Start, which is the cluster's first item on a side bar.
+        private static readonly string[] _clusterClasses = { "Start", "ReBarWindow32", "TrayDummySearchControl" };
+
+        private static int ClusterTop(IntPtr taskbar, int bandTop, int bandH)
+        {
+            int top = bandTop + bandH;
+            foreach (string cls in _clusterClasses)
+            {
+                IntPtr h = FindClassChild(taskbar, cls);
+                if (h == IntPtr.Zero) continue;
+                if (TryGetWindowRectGuarded(h, 300, out var r) && r.bottom > r.top && r.right > r.left)
+                    top = Math.Min(top, r.top);
+            }
+            return top;
+        }
+
+        // A taskbar child window looked up by CLASS. FindWindowEx with a class and NO title
+        // is not reliable for every one of explorer's taskbar skeleton windows on 26H2:
+        // measured 2026-09-30 on a left-docked 26300 taskbar, "Start" is missed (it IS found
+        // when its localized title is passed) while TrayNotifyWnd / ReBarWindow32 /
+        // TrayDummySearchControl are found — the same class-only lookup also fails for our own
+        // reparented child. This walk asks the question without depending on a localized
+        // title. It never blocks: GetWindow/GetClassNameW are USER-lock reads, not the
+        // cross-thread sends gotchas §43 is about.
+        private static IntPtr FindClassChild(IntPtr parent, string className)
+        {
+            IntPtr h = WindowInterop.FindWindowExW(parent, IntPtr.Zero, className, null);
+            if (h != IntPtr.Zero || parent == IntPtr.Zero) return h;
+            var sb = new System.Text.StringBuilder(64);
+            for (IntPtr c = WindowInterop.GetWindow(parent, WindowInterop.GW_CHILD); c != IntPtr.Zero;
+                 c = WindowInterop.GetWindow(c, WindowInterop.GW_HWNDNEXT))
+            {
+                if (WindowInterop.GetClassNameW(c, sb, sb.Capacity) <= 0) continue;
+                if (string.Equals(sb.ToString(), className, StringComparison.OrdinalIgnoreCase)) return c;
+            }
+            return IntPtr.Zero;
         }
 
         // TrafficMonitor's registry checks (WindowsSettingHelper.cpp), same key and same
@@ -2535,6 +2807,53 @@ namespace task_monitor
             }
             if (!TryGetWindowRectGuarded(s.TaskbarHwnd, 300, out var taskbarRect)) return;
 
+            // Orientation first: a taskbar dragged to another screen edge — or, on Win11
+            // 26H2, switched to the left/right 任务栏位置 in 设置 — flips the layout. Transpose,
+            // resize and re-dock (ReconfigureOrientation), never just move: the horizontal
+            // grid is ~200 DIP wide and would swamp a 48-DIP side bar. The classical family
+            // also watches for this on its 100ms TIMER_ID_POS; for the Win11 family this tick
+            // is the only watcher. A zero-sized rect (mid-restart/mid-layout) is NOT an
+            // orientation: the aspect is only read off a real rect.
+            bool verticalNow = taskbarRect.right > taskbarRect.left && taskbarRect.bottom > taskbarRect.top
+                && (taskbarRect.right - taskbarRect.left) < (taskbarRect.bottom - taskbarRect.top);
+            if (verticalNow != s.Vertical)
+            {
+                ReconfigureOrientation(hwnd, s);
+                return;
+            }
+
+            if (s.Vertical)
+            {
+                // Side taskbar: the anchor runs along the taskbar's axis (tray end / top
+                // corner) and the CLAMPED strip width owns the size — a wider/narrower bar
+                // (DPI or 缩放 change) also flips the strip form, so re-derive the target
+                // size every tick and resize on a real change. Same resize dance as
+                // HandleDpiChange, DPI unchanged.
+                int bandW = TaskbarBandCross(s.TaskbarHwnd, taskbarRect, out int bandX);
+                ComputeTargetSize(s.Owner._samplingEnabledMask, true, s.Dpi, bandW, 0, out int wantW, out int wantH);
+                if (wantW > 0 && wantH > 0 && (wantW != s.PhysicalWidth || wantH != s.PhysicalHeight))
+                {
+                    Logger.Info($"竖直任务栏条带变化 {s.PhysicalWidth}x{s.PhysicalHeight}→{wantW}x{wantH}px——覆盖层跟随重设");
+                    ResizeBackBuffer(s, wantW, wantH, s.Dpi);
+                    s.PhysicalWidth = wantW;
+                    s.PhysicalHeight = wantH;
+                    s.LogicalHeight = wantH * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi;
+                    s.DComp?.Object?.Commit();   // null while the device is down
+                    Draw(s);
+                }
+                DumpGeometryIfChanged(hwnd, s, taskbarRect);
+
+                var (_, yRel, xRelV) = CalcPositionVertical(s.TaskbarHwnd, taskbarRect, bandW, bandX,
+                    s.PhysicalWidth, s.PhysicalHeight, s.Dpi, s.Owner._onLeft, s.Owner._snapToStart);
+                s.Owner.PublishLayout(true, s.PhysicalWidth, s.Dpi);
+                if (!force && xRelV == s.LastPlaceX && yRel == s.LastPlaceY) return;
+                Logger.Debug($"重定位（竖直锚点{(force ? "，强制" : "")}）：({s.LastPlaceX},{s.LastPlaceY})→({xRelV},{yRel})，尺寸={s.PhysicalWidth}x{s.PhysicalHeight}");
+                s.LastPlaceX = xRelV;
+                s.LastPlaceY = yRel;
+                WindowInterop.MoveWindow(hwnd, xRelV, yRel, s.PhysicalWidth, s.PhysicalHeight, true);
+                return;
+            }
+
             // Track the taskbar's HEIGHT too, not just the anchors. Start() sizes the
             // buffers from a rect probed once — that probe can catch a transient taller
             // taskbar (boot layout settling, a tablet-optimized/taskbar-mod height that
@@ -2561,10 +2880,25 @@ namespace task_monitor
                 }
             }
 
-            // Placement diagnostics: dump the full geometry whenever the taskbar's or
-            // our own rect CHANGES (this runs every tick — change-gated so the steady
-            // state stays quiet). Catches external nudges (taskbar mods) and confirms
-            // the height-tracking resize above actually landed.
+            DumpGeometryIfChanged(hwnd, s, taskbarRect);
+
+            int taskbarWidth = taskbarRect.right - taskbarRect.left;
+            var (_, xRel) = CalcPosition(s.TaskbarHwnd, taskbarRect, taskbarWidth, s.PhysicalWidth, s.Dpi,
+                s.Owner._onLeft, s.Owner._snapToStart);
+            s.Owner.PublishLayout(false, s.PhysicalWidth, s.Dpi);
+            if (!force && xRel == s.LastPlaceX && bandY == s.LastPlaceY) return;
+            Logger.Debug($"重定位（Win11 锚点{(force ? "，强制" : "")}）：xRel {s.LastPlaceX}→{xRel}，y {s.LastPlaceY}→{bandY}，尺寸={s.PhysicalWidth}x{s.PhysicalHeight}");
+            s.LastPlaceX = xRel;
+            s.LastPlaceY = bandY;
+            WindowInterop.MoveWindow(hwnd, xRel, bandY, s.PhysicalWidth, s.PhysicalHeight, true);
+        }
+
+        // Placement diagnostics: dump the full geometry whenever the taskbar's or our own
+        // rect CHANGES (this runs every tick — change-gated so the steady state stays quiet).
+        // Catches external nudges (taskbar mods) and confirms the tracking resize above
+        // actually landed.
+        private static void DumpGeometryIfChanged(IntPtr hwnd, RenderState s, WindowInterop.RECT taskbarRect)
+        {
             if (WindowInterop.GetWindowRect(hwnd, out var overlayRect)
                 && (!s.DiagLogged
                     || !RectsEqual(taskbarRect, s.DiagTaskbarRect)
@@ -2575,15 +2909,6 @@ namespace task_monitor
                 s.DiagLogged = true;
                 LogGeometry(s.TaskbarHwnd, hwnd, "重定位");
             }
-
-            int taskbarWidth = taskbarRect.right - taskbarRect.left;
-            var (_, xRel) = CalcPosition(s.TaskbarHwnd, taskbarRect, taskbarWidth, s.PhysicalWidth, s.Dpi,
-                s.Owner._onLeft, s.Owner._snapToStart);
-            if (!force && xRel == s.LastXRelative && bandY == s.LastBandY) return;
-            Logger.Debug($"重定位（Win11 锚点{(force ? "，强制" : "")}）：xRel {s.LastXRelative}→{xRel}，y {s.LastBandY}→{bandY}，尺寸={s.PhysicalWidth}x{s.PhysicalHeight}");
-            s.LastXRelative = xRel;
-            s.LastBandY = bandY;
-            WindowInterop.MoveWindow(hwnd, xRel, bandY, s.PhysicalWidth, s.PhysicalHeight, true);
         }
 
         // The band of the taskbar window that explorer actually RESERVES — for a
@@ -2617,6 +2942,30 @@ namespace task_monitor
             }
         }
 
+        // The SIDE-docked mirror of TaskbarBand: the width of the strip between the work
+        // area's left edge and the monitor's left edge, intersected with the taskbar's rect;
+        // xOffset is that strip's left edge relative to the window (the strip stack centres
+        // inside it). Same reasoning and the same "only trust it when it is a real, smaller
+        // strip" guard as the horizontal one — a right-docked (or oddly shaped) taskbar comes
+        // out empty or oversized and simply gets the window's own width, offset 0.
+        private static int TaskbarBandCross(IntPtr taskbar, WindowInterop.RECT taskbarRect, out int xOffset)
+        {
+            int width = taskbarRect.right - taskbarRect.left;
+            xOffset = 0;
+            IntPtr mon = WindowInterop.MonitorFromWindow(taskbar, WindowInterop.MONITOR_DEFAULTTONEAREST);
+            var mi = new WindowInterop.MONITORINFO { cbSize = (uint)Marshal.SizeOf<WindowInterop.MONITORINFO>() };
+            if (mon == IntPtr.Zero || !WindowInterop.GetMonitorInfoW(mon, ref mi)) return width;
+            int bandLeft = Math.Min(mi.rcWork.left, taskbarRect.right);
+            int bandRight = Math.Max(mi.rcMonitor.left, taskbarRect.left);
+            int vis = bandLeft - bandRight;
+            if (vis > 0 && vis < width)
+            {
+                width = vis;
+                xOffset = bandRight - taskbarRect.left;
+            }
+            return width;
+        }
+
         private static bool RectsEqual(WindowInterop.RECT a, WindowInterop.RECT b)
             => a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
 
@@ -2638,9 +2987,19 @@ namespace task_monitor
             if (TryGetWindowRectGuarded(taskbar, 300, out var tr))   // foreign window (gotchas §43)
             {
                 msg += $"任务栏窗口=({tr.left},{tr.top})-({tr.right},{tr.bottom}) {tr.right - tr.left}x{tr.bottom - tr.top}px";
-                TaskbarBand(taskbar, tr, out int bandH, out int bandY);
-                if (bandH != tr.bottom - tr.top || bandY != 0)
-                    msg += $"。系统保留带=高{bandH}px y偏移{bandY}（窗口比保留区域高，覆盖层底对齐保留带）";
+                if (tr.right - tr.left < tr.bottom - tr.top)
+                {
+                    // Side taskbar: the reservation runs across it (width), not along it.
+                    int crossW = TaskbarBandCross(taskbar, tr, out int bandX);
+                    if (crossW != tr.right - tr.left || bandX != 0)
+                        msg += $"。系统保留带=宽{crossW}px x偏移{bandX}（覆盖层按此带宽居中）";
+                }
+                else
+                {
+                    TaskbarBand(taskbar, tr, out int bandH, out int bandY);
+                    if (bandH != tr.bottom - tr.top || bandY != 0)
+                        msg += $"。系统保留带=高{bandH}px y偏移{bandY}（窗口比保留区域高，覆盖层底对齐保留带）";
+                }
             }
             WindowInterop.RECT cr = default;
             var pt = new WindowInterop.POINT { x = 0, y = 0 };
@@ -3004,16 +3363,17 @@ namespace task_monitor
                 s.MinOriValid = false;
         }
 
-        // A taskbar dragged to another screen edge flips orientation (horizontal grid ⟷
-        // vertical strips): undo the old-axis dock, resize the buffers to the transposed
-        // layout and re-dock. Detected on the 100ms TIMER_ID_POS.
+        // A taskbar that changed orientation (dragged to another screen edge, or — Win11
+        // 26H2 — switched between 任务栏位置 底部/左侧/右侧) flips the layout (horizontal grid
+        // ⟷ vertical strips): undo the old-axis dock, resize the buffers to the transposed
+        // layout and re-dock. Watched by the classical family on the 100ms TIMER_ID_POS and
+        // by both on the tick's RepositionOverlay.
         private static void ReconfigureOrientation(IntPtr hwnd, RenderState s)
         {
             RestoreMinWindow(s);            // undo along the OLD axis
             s.LastMinLength = -1;
             s.Vertical = !s.Vertical;
-            Logger.Info($"任务栏拖到另一屏幕边缘——方向翻转为{(s.Vertical ? "竖直" : "水平")}，重排覆盖层");
-            s.Owner._layoutVertical = s.Vertical;   // mirror for the UI-thread accessors
+            Logger.Info($"任务栏方向翻转——重排覆盖层为{(s.Vertical ? "竖直条带" : "水平网格")}");
 
             GetBandSize(s, out int bandW, out int bandH);
             ComputeTargetSize(s.Owner._samplingEnabledMask, s.Vertical, s.Dpi, bandW, bandH,
@@ -3024,6 +3384,7 @@ namespace task_monitor
             s.PhysicalHeight = Math.Max(0, newHeight);
             s.LogicalHeight = s.PhysicalHeight * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi;
 
+            // …which re-docks and re-publishes the UI-thread layout mirror (PublishLayout).
             RepositionOverlay(hwnd, s, force: true);
             s.DComp?.Object?.Commit();   // null while the device is down
             Draw(s);
@@ -3031,48 +3392,62 @@ namespace task_monitor
 
         // The band measurement feeding ComputeTargetSize: horizontal modes need the parent
         // band's height (Win11: the taskbar itself; classical: the ReBar); vertical mode
-        // needs the task-buttons toolbar's width (the strips' x clamp — TrafficMonitor
-        // centres within rcMin the same way).
+        // needs the strip column's WIDTH — the classical task-buttons toolbar's, or (there
+        // is no band to shrink on the Win11 family) the taskbar's own reserved strip.
         private static void GetBandSize(RenderState s, out int bandW, out int bandH)
         {
             bandW = 0; bandH = 0;
             if (s.Vertical)
             {
-                if (TryGetWindowRectGuarded(s.MinHwnd, 300, out var rcMin))
-                    bandW = rcMin.right - rcMin.left;
-            }
-            else
-            {
-                IntPtr band = s.Classical ? s.BarHwnd : s.TaskbarHwnd;
-                if (TryGetWindowRectGuarded(band, 300, out var rc))
+                if (s.Classical)
                 {
-                    bandW = rc.right - rc.left;
-                    bandH = s.Classical ? rc.bottom - rc.top : TaskbarBandHeight(band, rc);
+                    if (TryGetWindowRectGuarded(s.MinHwnd, 300, out var rcMin))
+                        bandW = rcMin.right - rcMin.left;
+                    return;
                 }
+                if (TryGetWindowRectGuarded(s.TaskbarHwnd, 300, out var rcTb)
+                    && rcTb.right > rcTb.left && rcTb.bottom > rcTb.top)
+                    bandW = TaskbarBandCross(s.TaskbarHwnd, rcTb, out _);
+                return;
+            }
+            IntPtr band = s.Classical ? s.BarHwnd : s.TaskbarHwnd;
+            if (TryGetWindowRectGuarded(band, 300, out var rc))
+            {
+                bandW = rc.right - rc.left;
+                bandH = s.Classical ? rc.bottom - rc.top : TaskbarBandHeight(band, rc);
             }
         }
 
         // Target physical size for the current layout. Horizontal: width is layout-driven,
-        // height is the band's. Vertical: height is layout-driven (the strip stack),
-        // width is the content width clamped into the band (a narrower band clips text —
-        // TrafficMonitor clamps its item rects the same way). A 0 in the layout-driven
-        // dimension = the every-metric-off stub (the caller keeps the old buffers).
+        // height is the band's. Vertical: width is the content width clamped into the band (a
+        // narrower band clips text — TrafficMonitor clamps its item rects the same way), and
+        // that CLAMPED width then picks the strip form (one line vs two) and with it the
+        // stack height — which is why the layout is built twice here. A 0 in the
+        // layout-driven dimension = the every-metric-off stub (the caller keeps the old
+        // buffers).
         private static void ComputeTargetSize(int mask, bool vertical, uint dpi, int bandW, int bandH,
             out int width, out int height)
         {
-            var l = ComputeLayout(mask, vertical);
             if (!vertical)
             {
-                width = DpiScaleInt((int)l.Width, dpi);
+                width = DpiScaleInt((int)ComputeLayout(mask, false, 0f).Width, dpi);
                 height = bandH;
+                return;
             }
-            else
-            {
-                int contentW = DpiScaleInt((int)l.Width, dpi);
-                int maxW = bandW - DpiScaleInt(2, dpi);
-                width = maxW > 0 && contentW > maxW ? maxW : contentW;
-                height = DpiScaleInt((int)l.Height, dpi);
-            }
+            int contentW = DpiScaleInt((int)VerticalNaturalWidth(mask), dpi);
+            int maxW = bandW - DpiScaleInt(2, dpi);
+            width = maxW > 0 && contentW > maxW ? maxW : contentW;
+            var l = ComputeLayout(mask, true, width * (float)USER_DEFAULT_SCREEN_DPI / dpi);
+            height = DpiScaleInt((int)l.Height, dpi);
+        }
+
+        // The vertical layout's NATURAL width — the widest cell the horizontal grid would give
+        // the same metrics (网络's column is the widest of the three); the band clamps it.
+        private static float VerticalNaturalWidth(int mask)
+        {
+            float w = PackedStackedCount(mask) > 0 ? GroupWidths[0] : 0f;
+            if ((mask & (1 << 4)) != 0) w = Math.Max(w, GroupWidths[2]);
+            return w;
         }
 
         // TrafficMonitor's CClassicalTaskbarDlg::InitTaskbarWnd chain: Shell_TrayWnd →
@@ -3624,8 +3999,9 @@ namespace task_monitor
                     if (wParam == (IntPtr)TIMER_ID_POS)
                     {
                         // Classical family only: re-dock against the band (TIMER_ID_POS).
-                        // A taskbar dragged to another screen edge flips orientation —
-                        // reconfigure (transpose + resize + re-dock), don't just move.
+                        // A flip of the taskbar's orientation is reconfigured, not just
+                        // moved (transpose + resize + re-dock) — the Win11 family watches for
+                        // the same flip on the sample tick inside RepositionOverlay.
                         CrashTrace.NoteStep("经典轮询(TIMER_ID_POS)");
                         var ps = StateOf(hwnd);
                         if (ps != null && ps.Classical)
@@ -3902,19 +4278,23 @@ namespace task_monitor
         // covered); inside a stacked group, y picks the row POSITION, which maps to
         // whichever metric packed into it — the trailing empty position of an odd count
         // hits nothing (-1); the 网络 group is one whole-column slot regardless of y.
-        // Vertical: y picks the strip — a packed stacked metric, or either of 网络's two
-        // strips (one slot either way); x is free (the strips span the window's width).
+        // Vertical: y picks the strip — a packed stacked metric (its whole two-line block in
+        // the narrow form), or either of 网络's two strips (one slot either way); x is free
+        // (the strips span the window's width).
         private static int HitTestSlot(RenderState s, int x, int y)
         {
-            var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Vertical);
+            var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Vertical,
+                s.PhysicalWidth * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi);
             if (layout.Vertical)
             {
                 if (x < 0 || x >= s.PhysicalWidth || y < 0) return -1;
-                int stripH = DpiScaleInt(STRIP_H_I, s.Dpi);
-                if (stripH <= 0) return -1;
-                int idx = y / stripH;
+                // One ROW per hit region: a single-line strip, or a whole two-line block
+                // (label + value together — either line clicks the metric).
+                int rowH = DpiScaleInt(layout.TwoLine ? (int)STRIP_BLOCK_H : STRIP_H_I, s.Dpi);
+                if (rowH <= 0) return -1;
+                int idx = y / rowH;
                 int packed = PackedStackedCount(layout.SlotMask);
-                if (idx < packed) return layout.SlotAt(idx);
+                if (layout.Pos0 >= 0 && idx < packed) return layout.SlotAt(idx);
                 if (layout.Left2 >= 0f && idx >= packed && idx < packed + 2) return 4;
                 return -1;
             }
@@ -3961,6 +4341,8 @@ namespace task_monitor
             public IComObject<IDWriteTextFormat> LabelFormat;
             public IComObject<IDWriteTextFormat> ValueFormat;
             public IComObject<IDWriteTextFormat> NetFormat;   // flush-right (TRAILING), for the net rates
+            public IComObject<IDWriteTextFormat> StripLabelFormat;   // vertical two-line form: 11px, CENTRED
+            public IComObject<IDWriteTextFormat> StripValueFormat;   // vertical two-line form: 13px, CENTRED
             public IComObject<ID2D1Brush> TextBrush;
             public IComObject<ID2D1Brush> LabelBrush;   // dimmed TextBrush for metric labels / ↑↓
             public IComObject<ID2D1Brush> HighlightBrush;
@@ -3980,7 +4362,7 @@ namespace task_monitor
             public IntPtr TaskbarHwnd;
             // ---- classical taskbar family (Win10 / restored-classic taskbar on Win11) ----
             public bool Classical;              // false = the Win11 taskbar path
-            public bool Vertical;               // side-docked classical taskbar (strips layout)
+            public bool Vertical;               // SIDE-docked taskbar, either family (strips layout)
             // ---- 悬浮模式 (the floating form) ----
             public bool Floating;               // top-level self-drawn card widget instead of a taskbar child
             // The window region last applied to the floating widget (0×0 = none) — the
@@ -4013,8 +4395,9 @@ namespace task_monitor
             public int PendingBackdropCount;    // …its consecutive-sample count so far
             public int PhysicalWidth;
             public int PhysicalHeight;
-            public int LastXRelative;   // taskbar-relative x last applied by MoveWindow (Win11 path)
-            public int LastBandY;       // taskbar-relative y last applied (band bottom-alignment, Win11 path)
+            public int LastPlaceX;      // taskbar-relative x last applied by MoveWindow (Win11 path)
+            public int LastPlaceY;      // taskbar-relative y last applied (band bottom-alignment horizontal,
+                                        // the vertical anchor along the side taskbar's axis)
             // Placement diagnostics (LogGeometry): the rects at the last dump — the
             // per-tick dump is change-gated on these so the steady state stays quiet.
             public bool DiagLogged;

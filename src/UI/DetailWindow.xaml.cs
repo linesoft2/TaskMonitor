@@ -380,9 +380,10 @@ namespace task_monitor
             int w = wrect.right - wrect.left;
             int h = wrect.bottom - wrect.top;
             // Which screen edge the taskbar is docked to (0=bottom 1=top 2=left 3=right):
-            // the popup opens INWARD from that edge. Bottom is the only Win11 orientation;
-            // the rest are classical-taskbar (Win10) cases. Remembered for the SizeChanged
-            // anchor — only a bottom taskbar's flyout grows upward.
+            // the popup opens INWARD from that edge. Left/right are a SIDE-docked taskbar —
+            // the classical (Win10) family, or on Win11 26H2 the native 任务栏位置 左侧/右侧.
+            // Remembered for the SizeChanged anchor — only a bottom taskbar's flyout grows
+            // upward.
             int edge = TaskbarWindow.GetTaskbarEdge(overlay);
             _taskbarEdge = edge;
 

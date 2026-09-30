@@ -188,6 +188,18 @@ namespace task_monitor
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern IntPtr FindWindowExW(IntPtr hWndParent, IntPtr hWndChildAfter, string lpszClassName, string lpszWindowName);
 
+        // The child-list walk used to look up explorer's taskbar skeleton windows by CLASS
+        // alone (TaskbarWindow.FindClassChild): measured 2026-09-30 on a 26300 left-docked
+        // taskbar, FindWindowExW(parent, 0, "Start", NULL) does not find the Start window
+        // (it IS found when its localized title is passed), while TrayNotifyWnd /
+        // ReBarWindow32 / TrayDummySearchControl are found. The walk asks the same question
+        // without depending on a title.
+        public const uint GW_CHILD = 5;
+        public const uint GW_HWNDNEXT = 2;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 

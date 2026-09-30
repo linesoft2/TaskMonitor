@@ -130,7 +130,7 @@
                      expander would be a chevron opening onto nothing — the ctor hides it
                      and uses OnLeftCard below instead. -->
                 <ui:SettingsExpander x:Name="OnLeftExpander" Header="靠左显示"
-                                     Description="显示在任务栏左侧（任务栏左对齐时自动回退到右侧）。"
+                                     Description="显示在任务栏左侧（竖直任务栏为顶部；任务栏左对齐时自动回退到另一侧）。"
                                      Margin="0,0,0,4">
                     <ui:SettingsExpander.HeaderIcon>
                         <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.PanelLeft_20_Regular}" />
@@ -153,7 +153,7 @@
                      in here, so the switch exists exactly once and both forms share one
                      piece of state. -->
                 <ui:SettingsCard x:Name="OnLeftCard" Header="靠左显示"
-                                 Description="显示在任务栏左侧（任务按钮区靠开始按钮的一端）。"
+                                 Description="显示在任务栏靠开始按钮的一端（竖直任务栏为顶部）。"
                                  Visibility="Collapsed"
                                  Margin="0,0,0,4" />
 

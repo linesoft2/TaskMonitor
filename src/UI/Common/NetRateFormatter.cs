@@ -23,6 +23,23 @@ namespace task_monitor
             if (bps >= KB) return $"{bps / KB:F1} KB/s";
             return $"{bps:F0} B/s";
         }
+
+        /// <summary>
+        /// The narrow-strip form of <see cref="Format"/> for a SIDE-docked taskbar: no space
+        /// and no "/s" — such a strip is only ~46 DIP wide (a 48-DIP side bar minus its
+        /// margin), where "11.4 MB/s" (~56 DIP) cannot fit, while "11.4M" (37 DIP) does.
+        /// The unit letter carries the scale (K = KB/s, M = MB/s, B = B/s); the detail popup
+        /// keeps the full form. One decimal below 100M, none above (4 glyphs max).
+        /// </summary>
+        public static string FormatCompact(long bytesPerSec)
+        {
+            if (bytesPerSec < 0) bytesPerSec = 0;
+            double bps = bytesPerSec;
+            if (bps >= 100 * MB) return $"{bps / MB:F0}M";
+            if (bps >= MB) return $"{bps / MB:F1}M";
+            if (bps >= KB) return $"{bps / KB:F0}K";
+            return $"{bps:F0}B";
+        }
     }
 
     /// <summary>

@@ -1082,3 +1082,52 @@ WER 拉起），任务栏线程随之**永久**卡住：心跳停、覆盖层 HW
 
 另：重建间隙（拆除→2s 退避→探测→首个 tick）是**合法的** tick 空窗，探测循环和
 App 重建循环里现在都打心跳点，看门狗不再误报（19:40:30 的假停滞）。
+
+## 44. 竖直（侧边停靠）任务栏与任务栏族无关；窄条必须走双行条带
+
+*`src/UI/TaskbarWindow.cs`（`Start` 的方向探测、`ComputeLayout` / `VerticalSlotRect` /
+`ComputeTargetSize`、`DrawVertical` / `DrawStripLines`、`CalcPositionVertical` /
+`TaskbarBandCross`、`RepositionOverlay`、`GetBandSize`、`FindClassChild`）*
+
+事故（2026-09-30）：用户把任务栏切到 **Windows 11 26H2 新出的左侧竖直模式**，覆盖层仍按
+水平网格算 —— `Start()` 的竖直判定当时写成 `vertical = !floating && classical && …`，而
+Win11 原生竖直任务栏仍是 Win11 族（XAML `DesktopWindowContentBridge` 在，`classical=false`），
+于是 `vertical=false`，窗口按「带宽 = 任务栏**高**度」落成 **448×2168px**：既高出 96px 的
+任务栏列、压到桌面上，又因为子窗口矩形内所有点击都归自己，**整条任务栏点不动了**
+（日志里的证据：`任务栏族=Win11 竖直=False … 覆盖层=448x2168px`）。
+
+方向探针必须只看**任务栏窗口的宽高比**（TrafficMonitor 的 `CheckTaskbarOnTopOrBottom`：
+宽 ≥ 高 = 水平），族与方向是两个正交的维度：竖直的可能是经典族（Win10 起），水平的也可能是
+Win11 族（26H2 的 设置 → 任务栏位置）。
+
+竖直任务栏的几何（都是「水平那一套转 90°」）：
+
+- **尺寸**：宽 = 内容宽被 `TaskbarBandCross`（工作区左边到显示器左边、与任务栏矩形相交的
+  保留带）夹住；高 = 条带栈，由布局算。宽度反过来决定**条带形态**——这一步是循环的，
+  所以 `ComputeTargetSize` 先夹宽度、再用夹后的宽度建布局（`Draw`/`HitTestSlot` 也从
+  窗口实际宽度反推，三处必须一致）。
+- **窄条双行**：侧边任务栏只有 ~48 DIP 厚（= 水平任务栏的高度），而单行「标签 … 数值」
+  需要 ~72 DIP，所以 `STRIP_TWO_LINE_MIN_W` 以下的条带改成**双行块**：11px 标签居中在上、
+  13px 数值居中在下，速率用紧凑写法 `FormatCompact`（"11.4M"，完整写法 ~56 DIP 塞不进
+  46 DIP 的条）。块的几何是「一行一个 ROW」：`VerticalRows` × `VerticalRowH`（双行时
+  `STRIP_BLOCK_H`=44 DIP，单行时 `STRIP_H`=16 DIP），块内 = 上下各 `STRIP_BLOCK_PAD`(4) +
+  两行 + `STRIP_LINE_GAP`(1)，行高由 `DrawStripLines` 反推。**这个留白不是装饰**：最初按
+  2×STRIP_H=32 DIP 无留白实现，标签和数值挤成一坨、块间分隔线像是两边都不属于，用户直接
+  反馈「布局不合理」；48 DIP 是宽松版，44 DIP 是随后「稍微紧凑一点」的结果，`STRIP_LINE_GAP`
+  4→1 则是再之后「文案和数值之间间距少一点点」——`STRIP_BLOCK_H`（整体疏密）与
+  `STRIP_LINE_GAP`（标签↔数值）就是那两个旋钮。分隔线画在**行边界**（`i * VerticalRowH`），
+  所以永远不会把标签和它自己的数值切开；网络是上下两个这样的块（↑ 块 / ↓ 块）。
+- **锚点**：`CalcPositionVertical` = `CalcPosition` 转 90°。靠左显示 off（默认）→ 托盘上方
+  （通知区那一端）；on → 任务栏顶端，前提是图标簇确实在下方开始（`ClusterTop` 取
+  Start / ReBar / 搜索宿主里最靠上的那个），否则回退到托盘端——与水平版「Start 左边没地方
+  → 回退右侧」同构。Widgets 预留（160px）在竖直任务栏不存在，故不适用。
+- **每 tick 维护**：`RepositionOverlay` 现在两族共用——先比宽高比判定方向翻转
+  （`ReconfigureOrientation` 转置 + 重设缓冲 + 重锚），再纵向重算尺寸（缩放/DPI 变化会
+  改变条带形态）与锚点。Win11 族没有 100ms 的 `TIMER_ID_POS`，1s 采样 tick 是它唯一的观察者。
+
+顺带修掉一个观测到的坑：`FindWindowExW(parent, 0, "Start", NULL)` 在 26300 的左侧任务栏上
+**查不到** Start 窗口（传本地化标题才查得到；`TrayNotifyWnd` / `ReBarWindow32` /
+`TrayDummySearchControl` 则正常），导致「贴近开始按钮」静默失效。`FindClassChild` 先试
+`FindWindowEx`，失败再手工走 `GW_CHILD`/`GW_HWNDNEXT` 比对类名（USER 锁内读，不走 §43 的
+跨线程 worker）。
+

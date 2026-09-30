@@ -25,11 +25,20 @@ disagree, the code wins — fix this file.
     `MSTaskSwWClass` band is SHRUNK/SHIFTED to carve out the slot (`ClassicalReposition`),
     re-checked on a 100ms timer, and RESTORED on exit (`RestoreMinWindow`; invariants: gotchas
     §1). 靠左显示 picks the band's Start-side end vs tray-side end; `overlaySnapToStart` is
-    Win11-only (the settings page hides it there). **Side-docked (vertical) taskbars** transpose
-    the grid into full-width strips (`ComputeLayout(mask, vertical)` / `DrawVertical` /
-    `HitTestSlot`), `DetailWindow` anchors its popup to the taskbar's screen edge
-    (`GetTaskbarEdge`), and dragging the taskbar to another edge re-docks live
-    (`ReconfigureOrientation`).
+    Win11-only (the settings page hides it there).
+  - **Orientation is orthogonal to the family**: a **side-docked (vertical) taskbar** — the
+    classical one since Win10, and on Win11 26H2 the native 设置 → 任务栏位置 左侧/右侧 — transposes
+    EITHER family's overlay into the strip stack (`ComputeLayout(mask, vertical, stripWidth)` /
+    `DrawVertical` / `HitTestSlot`); the probe is the taskbar rect's aspect, never `classical`
+    (getting that wrong is the "覆盖层盖满整条任务栏、任务栏点不动" incident — gotchas §44).
+    A ~48-DIP side bar cannot hold the single-line "label … value" pair, so below
+    `STRIP_TWO_LINE_MIN_W` each metric becomes a padded label-over-value block
+    (rows × `VerticalRowH`: 44 DIP two-line / 16 DIP single-line; the padding is what keeps a
+    label with its own value — gotchas §44), and the Win11
+    family anchors along the taskbar's axis (`CalcPositionVertical`: tray end by default, the top
+    corner / above Start when 靠左显示) since it has no band to shrink. `DetailWindow` anchors its
+    popup to the taskbar's screen edge (`GetTaskbarEdge`), and an orientation flip re-docks live
+    at runtime (`ReconfigureOrientation`).
   - Lifetime: `Start()` first waits for a real taskbar, and ANY return from `Start()` makes App
     re-enter it after 2s to recreate the overlay (gotchas §2).
   - **悬浮模式 (设置 → 外观)**: the same window class, layout, drawing, hit-testing and sampler,
