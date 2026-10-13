@@ -75,13 +75,18 @@ namespace task_monitor
         // utilization/names may fall back to the per-process PDH engine map, see
         // GpuSampler). The headline
         // percent is per the 显示方式 setting: the MAX across adapters by default (Task
-        // Manager's sidebar rule), the MEAN, or one specific "GPU N". GpuAvailable is
+        // Manager's sidebar rule), the MEAN, or one specific "GPU N". The headline
+        // temperature is per the 温度来源 setting (the hottest adapter, or one specific
+        // "GPU N") and always Celsius — the 温度单位 setting converts at display time.
+        // GpuAvailable is
         // false when no GPU adapter is present (or dxcore.dll is missing) — the overlay then
         // keeps the "--" placeholder. The per-adapter GpuInfo objects are long-lived
         // (INotifyPropertyChanged), same contract as DiskInfo.
         public bool GpuAvailable;
         public double GpuPercent;              // 0–100, headline utilization (MetricDisplayMode)
         public double[] GpuHistory = Array.Empty<double>(); // 60-tick rolling headline (oldest→newest)
+        public bool GpuTempValid;              // false → the taskbar temperature row shows "--"
+        public double GpuTempCelsius;          // headline temperature in °C (per 温度来源); unit conversion is display-side
         public List<GpuInfo> Gpus = new List<GpuInfo>();
     }
 
@@ -201,6 +206,25 @@ namespace task_monitor
         {
             _gpuDisplayMode = mode;
             _gpuDisplayIndex = index;
+        }
+
+        // 设置 → 采样项目 → GPU → 任务栏显示（温度部分） — the 温度来源 pick and the 温度单位
+        // for the taskbar temperature row (GpuSampler also formats the detail popup's
+        // per-adapter texts with the unit). Same volatile single-writer contract as the
+        // 显示方式 pair above; the CONTENT (使用率/温度/两者) is layout, so it lives on
+        // TaskbarWindow, not here.
+        private volatile int _gpuTempIndex = -1;        // -1 = 最高温度 (the default)
+        private volatile bool _gpuTempFahrenheit;
+
+        /// <summary>Thread-safe: set the GPU temperature headline source (-1 = the hottest
+        /// adapter, ≥0 = that "GPU N") and its display unit (false = 摄氏度, the default).
+        /// Applied on the next tick; TaskbarWindow re-applies it to every fresh sampler,
+        /// like the mask.</summary>
+        public void SetGpuTempConfig(int index, bool fahrenheit)
+        {
+            _gpuTempIndex = index;
+            _gpuTempFahrenheit = fahrenheit;
+            _gpu.SetTempUnit(fahrenheit);
         }
 
         // 设置 → 采样项目 → 网络 → 适配器 — same volatile single-writer contract as the
@@ -442,12 +466,15 @@ namespace task_monitor
                 // collect below also publishes the per-(adapter, engine) map that
                 // GpuSampler.Sample then reads as its utilization/name fallback.
                 var procGpu = Timed("进程 GPU(PDH)", () => _procGpu.Sample(pidToName, mergeByPath, _gpu.NeedsPdhEngineData));
-                var gpu = Timed("GPU(DXCore QueryState)", () => _gpu.Sample((MetricDisplayMode)_gpuDisplayMode, _gpuDisplayIndex, _procGpu.EngineMap));
+                var gpu = Timed("GPU(DXCore QueryState)", () => _gpu.Sample(
+                    (MetricDisplayMode)_gpuDisplayMode, _gpuDisplayIndex, _gpuTempIndex, _procGpu.EngineMap));
                 if (!gpuPrime)
                 {
                     snapshot.GpuAvailable = gpu.Available;
                     snapshot.GpuPercent = gpu.HeadlinePercent;
                     snapshot.GpuHistory = gpu.History;
+                    snapshot.GpuTempValid = gpu.TempValid;
+                    snapshot.GpuTempCelsius = gpu.TempCelsius;
                     snapshot.Gpus = gpu.Gpus;
                     snapshot.TopGpuProcesses = procGpu;
                 }

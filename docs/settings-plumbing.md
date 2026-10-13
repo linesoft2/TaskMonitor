@@ -22,8 +22,9 @@ Conventions that hold for all of them:
 - **`Start()` re-apply is mandatory.** An explorer restart recreates the overlay and a
   brand-new `SystemSampler`; without the re-apply the recreate path silently reverts to
   defaults (that is how a disabled metric would come back to life).
-- **`WM_APP_SET_METRICS` only when the OVERLAY LAYOUT changes** (i.e. only the sampling
-  mask, §2). Everything else takes effect on the next tick — posting a WM_APP for a
+- **`WM_APP_SET_METRICS` only when the OVERLAY LAYOUT changes** — i.e. the sampling mask
+  (§2) and the GPU 任务栏显示 content (§4: its row count, and so the width, changes with
+  it). Everything else takes effect on the next tick — posting a WM_APP for a
   non-layout setting is pointless churn.
 - Each sampler's calibration/derivation lives at its own code site; this file only
   records the wiring. Field-by-field yaml semantics are in `src/AppSettings.cs`.
@@ -64,14 +65,35 @@ priming: [`gotchas.md` §25](gotchas.md#25-per-metric-sampling-switches-use-a-ma
 | Sampler state | `SystemSampler` volatile mode+index pairs |
 | WM_APP | **no** — the layout does not change |
 
-Per-tick hand-off to `DiskSampler.Sample(mode, index)` / `GpuSampler.Sample(mode, index, pdhEngines)`
-(the third argument is ProcessGpuSampler's per-(adapter, engine) PDH map — the Win10
-utilization/name fallback, gated by `GpuSampler.NeedsPdhEngineData`, gotchas §12).
-The samplers query every device each tick regardless; the mode only selects the headline,
+Per-tick hand-off to `DiskSampler.Sample(mode, index)` / `GpuSampler.Sample(mode, index,
+tempIndex, pdhEngines)` (the last argument is ProcessGpuSampler's per-(adapter, engine) PDH
+map — the Win10 utilization/name fallback, gated by `GpuSampler.NeedsPdhEngineData`,
+gotchas §12; `tempIndex` belongs to §4 below). The samplers query every device each tick
+regardless; the mode only selects the headline,
 and a mode/index change **clears the history** so the chart never mixes semantics. Defaults
 and the missing-device fallback: [`gotchas.md` §28](gotchas.md#28-磁盘gpu-显示方式).
 
-## 4. 网络适配器 — `NetAdapterId` + `NetAdapterName` (null = 自动)
+## 4. GPU 温度（任务栏显示 / 温度来源 / 温度单位）— `GpuTaskbarContent` + `GpuTempIndex` + `GpuTempUnit`
+
+| | |
+|---|---|
+| Setter | `TaskbarWindow.SetGpuTempDisplay(content, tempIndex, fahrenheit)` → `SystemSampler.SetGpuTempConfig(index, fahrenheit)` |
+| Sampler state | `SystemSampler` volatile index+unit; the CONTENT is TaskbarWindow layout state (`_gpuTaskbarContent`, read by every `ComputeLayout`) |
+| WM_APP | **YES — `WM_APP_SET_METRICS`**: slot 3's ROW COUNT changes with the content — 温度 swaps the utilization row for a temperature row, 两者 packs BOTH rows (a fifth stacked position, a third stacked group, a wider overlay). ResizeForLayout is a no-op when the width didn't move, so the source/unit combo changes reuse the same message harmlessly |
+
+Temperature itself is already sampled every tick for every adapter (DXCore
+`AdapterTemperatureCelsius`, driver-gated — the detail popup has always shown it); this
+chain only adds the numeric headline (`GpuSample.TempValid/TempCelsius`, always Celsius)
+and the taskbar row. `tempIndex` = -1/`null` picks the HOTTEST adapter (mirroring the
+utilization's 最高利用率 default); a specific "GPU N" that is absent falls back to the max,
+while a present-but-unsupported adapter stays "--". The unit is display-side only —
+`GpuTempText.Format` is the ONE formatter for the taskbar row and the detail popup's
+per-adapter texts alike. Orthogonal to: `GpuSamplingEnabled` (采样 gates the data, this
+gates the row) and `GpuDisplay` (显示方式 still picks the utilization headline). Layout
+consequences (5 packed positions, 4 groups, both rows are hit slot 3):
+`TaskbarWindow.ComputeLayout` and its ASCII table.
+
+## 5. 网络适配器 — `NetAdapterId` + `NetAdapterName` (null = 自动)
 
 | | |
 |---|---|
@@ -84,7 +106,7 @@ settings window opens (`App.EnumerateNetAdapters`, non-loopback, sorted) — a o
 ~275ms cost that must stay off the per-tick path. Pinned-adapter semantics:
 [`gotchas.md` §29](gotchas.md#29-网络适配器).
 
-## 5. 公网 IP — `PublicIpEnabled` (null = on, 仅写关闭态)
+## 6. 公网 IP — `PublicIpEnabled` (null = on, 仅写关闭态)
 
 | | |
 |---|---|
@@ -96,7 +118,7 @@ Gates the what-is-my-ip HTTP lookups and the 公网延迟 ICMP probe. Off drops 
 address and resets the next-try timestamp; re-enabling fetches immediately rather than
 waiting out the cadence. [`gotchas.md` §30](gotchas.md#30-公网-ip-开关).
 
-## 6. Clash/Mihomo — `ClashEnabled` (null = on) + `ClashApiAddress` + `ClashApiSecret`
+## 7. Clash/Mihomo — `ClashEnabled` (null = on) + `ClashApiAddress` + `ClashApiSecret`
 
 | | |
 |---|---|
@@ -114,7 +136,7 @@ Settings card behavior: the switch reports immediately; the two TextBoxes report
 **测试连接** is a separate one-shot `GET /version` probe on `Task.Run` (never the UI
 thread). Full design: [`gotchas.md` §31](gotchas.md#31-clashmihomo-代理流量).
 
-## 7. 更新检测 — `UpdateCheckEnabled` + `UpdateSource` + `IgnoredUpdateVersion`
+## 8. 更新检测 — `UpdateCheckEnabled` + `UpdateSource` + `IgnoredUpdateVersion`
 
 Not part of the sampler chain: `UpdateChecker.CheckOnce` runs **once at startup** from
 `OnStartup`, so a change takes effect on the next launch (no live plumbing). The one exception
@@ -123,7 +145,7 @@ live config, so switching 检查更新 off cancels it and a 更新源 change is 
 wire up, it reads the same `AppSettings` instance. See
 [`gotchas.md` §33](gotchas.md#33-更新检测).
 
-## 8. 悬浮模式 — `FloatingMode` + `FloatingX`/`FloatingY` + `FloatingTopmost` + `FloatingEdgeHide` + `FloatingFullscreenHide` + `FloatingOpacity`
+## 9. 悬浮模式 — `FloatingMode` + `FloatingX`/`FloatingY` + `FloatingTopmost` + `FloatingEdgeHide` + `FloatingFullscreenHide` + `FloatingOpacity`
 
 Not a sampler chain either — this one moves the WINDOW. The shape is still the same
 (field → volatile → WM_APP → re-applied on every fresh `Start()`), only the payload differs:

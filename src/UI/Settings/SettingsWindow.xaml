@@ -287,6 +287,28 @@
                         <ui:SettingsCard x:Name="GpuPickCard" Header="特定 GPU">
                             <ComboBox x:Name="GpuPickCombo" MinWidth="220" SelectionChanged="GpuPickCombo_SelectionChanged" />
                         </ui:SettingsCard>
+                        <!-- 任务栏显示: what the taskbar GPU slot shows — the utilization
+                             row (the default), the temperature row (replaces it), or BOTH
+                             as two stacked rows ("GPU 42%" over "GPU 65°C"). The two cards
+                             below only matter while a temperature shows, so they are
+                             enabled-gated on this combo (the DiskPickCombo pattern). -->
+                        <ui:SettingsCard Header="任务栏显示">
+                            <ComboBox x:Name="GpuContentCombo" MinWidth="150" SelectionChanged="GpuContentCombo_SelectionChanged">
+                                <ComboBoxItem Content="使用率（默认）" />
+                                <ComboBoxItem Content="温度" />
+                                <ComboBoxItem Content="使用率 + 温度" />
+                            </ComboBox>
+                        </ui:SettingsCard>
+                        <ui:SettingsCard x:Name="GpuTempPickCard" Header="温度来源">
+                            <ComboBox x:Name="GpuTempPickCombo" MinWidth="220" SelectionChanged="GpuTempPickCombo_SelectionChanged" />
+                        </ui:SettingsCard>
+                        <ui:SettingsCard x:Name="GpuTempUnitCard" Header="温度单位"
+                                         Description="同时作用于任务栏与 GPU 详情弹窗。">
+                            <ComboBox x:Name="GpuTempUnitCombo" MinWidth="140" SelectionChanged="GpuTempUnitCombo_SelectionChanged">
+                                <ComboBoxItem Content="摄氏度（默认）" />
+                                <ComboBoxItem Content="华氏度" />
+                            </ComboBox>
+                        </ui:SettingsCard>
                     </ui:SettingsExpander.Items>
                 </ui:SettingsExpander>
 

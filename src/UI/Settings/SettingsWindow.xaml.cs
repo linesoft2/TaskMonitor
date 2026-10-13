@@ -16,7 +16,8 @@ namespace task_monitor
     /// expander whose item is 靠左位置, or a plain card where that item does not exist,
     /// i.e. on the classical Win10 taskbar), 采样 (one expander per metric, the toggle in
     /// its content area enabling/disabling that metric's sampling; 磁盘's and GPU's
-    /// expanders also hold 显示方式 + the specific-device picker, 网络's the 适配器
+    /// expanders also hold 显示方式 + the specific-device picker, GPU's additionally the
+    /// 任务栏显示 (使用率/温度/两者) trio with 温度来源 and 温度单位, 网络's the 适配器
     /// picker, the 公网 IP lookup switch and the Clash/Mihomo integration (switch +
     /// endpoint + 测试连接); plus the section-wide 合并相同程序 card) and 关于. Opened
     /// from the taskbar overlay's right-click menu (App keeps at most one instance).
@@ -38,6 +39,7 @@ namespace task_monitor
         private readonly Action<bool> _mergeSamePathChanged;  // 合并相同程序
         private readonly Action<int, int> _diskDisplayChanged; // (mode 0=平均 1=最高 2=特定, PhysicalDrive index)
         private readonly Action<int, int> _gpuDisplayChanged;  // (mode 0=平均 1=最高 2=特定, "GPU N" number)
+        private readonly Action<int, int, bool> _gpuTaskbarContentChanged; // (content 0=使用率 1=温度 2=两者, 温度来源 -1=最高, 华氏度)
         private readonly Action<string, string> _netAdapterChanged; // (adapter Id or "" = 自动, display name)
         private readonly Action<bool> _publicIpLookupChanged;       // 公网 IP lookup
         private readonly Action<bool, string, string> _clashApiChanged; // (enabled, controller address or "" = default, API secret)
@@ -102,6 +104,13 @@ namespace task_monitor
         /// null/empty when GPU sampling is off) — the picker's items.</param>
         /// <param name="gpuDisplayChanged">Reported with (modeIndex, "GPU N" number) on
         /// every 显示方式 / 特定 GPU change.</param>
+        /// <param name="gpuContentIndex">0=使用率 (yaml null, the default) 1=温度
+        /// 2=使用率+温度 — the 任务栏显示 combo.</param>
+        /// <param name="pickedGpuTempIndex">The 温度来源 pick: -1 = 最高温度 (yaml null,
+        /// the default), ≥0 = that "GPU N" number.</param>
+        /// <param name="gpuTempUnitIndex">0=摄氏度 (yaml null, the default) 1=华氏度.</param>
+        /// <param name="gpuTaskbarContentChanged">Reported with (contentIndex, 温度来源
+        /// pick, 华氏度) on every 任务栏显示 / 温度来源 / 温度单位 change.</param>
         /// <param name="netAdapterId">The pinned adapter's NetworkInterface.Id (GUID);
         /// null/empty = 自动.</param>
         /// <param name="netAdapterName">The pinned adapter's display name, for the
@@ -143,6 +152,8 @@ namespace task_monitor
             Action<int, int> diskDisplayChanged,
             int gpuDisplayIndex, int pickedGpuIndex, IReadOnlyList<GpuInfo> gpus,
             Action<int, int> gpuDisplayChanged,
+            int gpuContentIndex, int pickedGpuTempIndex, int gpuTempUnitIndex,
+            Action<int, int, bool> gpuTaskbarContentChanged,
             string netAdapterId, string netAdapterName,
             IReadOnlyList<(string Id, string Label)> adapters,
             Action<string, string> netAdapterChanged,
@@ -166,6 +177,7 @@ namespace task_monitor
             _mergeSamePathChanged = mergeSamePathChanged;
             _diskDisplayChanged = diskDisplayChanged;
             _gpuDisplayChanged = gpuDisplayChanged;
+            _gpuTaskbarContentChanged = gpuTaskbarContentChanged;
             _netAdapterChanged = netAdapterChanged;
             _publicIpLookupChanged = publicIpLookupChanged;
             _clashApiChanged = clashApiChanged;
@@ -231,6 +243,13 @@ namespace task_monitor
             GpuDisplayCombo.SelectedIndex = gpuDisplayIndex < 0 || gpuDisplayIndex > 2 ? 1 : gpuDisplayIndex;
             PopulateGpuPicker(gpus, pickedGpuIndex);
             GpuPickCombo.IsEnabled = GpuDisplayCombo.SelectedIndex == 2;
+            // 任务栏显示 + its two temperature sub-cards; the sub-cards are enabled only
+            // while a temperature actually shows (the DiskPickCombo pattern).
+            GpuContentCombo.SelectedIndex = gpuContentIndex < 0 || gpuContentIndex > 2 ? 0 : gpuContentIndex;
+            PopulateGpuTempPicker(gpus, pickedGpuTempIndex);
+            GpuTempUnitCombo.SelectedIndex = gpuTempUnitIndex == 1 ? 1 : 0;
+            GpuTempPickCombo.IsEnabled = GpuContentCombo.SelectedIndex != 0;
+            GpuTempUnitCombo.IsEnabled = GpuContentCombo.SelectedIndex != 0;
             PopulateNetAdapterPicker(adapters, netAdapterId, netAdapterName);
             PublicIpSwitch.IsOn = publicIpLookupOn;
             ClashSwitch.IsOn = clashEnabled;
@@ -303,6 +322,38 @@ namespace task_monitor
 
         private int PickedGpuIndex()
             => (GpuPickCombo.SelectedItem as ComboBoxItem)?.Tag is int i ? i : 0;
+
+        // The 温度来源 picker: 最高温度（默认） first (Tag = -1 — the sampler's "hottest
+        // adapter" sentinel), then one item per present GPU (Tag = the "GPU N" number) —
+        // the same items as the 特定 GPU picker. A stored pick that's currently absent (or
+        // GPU sampling off) keeps a （未连接） placeholder, same contract as the other two.
+        private void PopulateGpuTempPicker(IReadOnlyList<GpuInfo> gpus, int selectedIndex)
+        {
+            GpuTempPickCombo.Items.Add(new ComboBoxItem { Content = "最高温度（默认）", Tag = -1 });
+            int sel = 0;
+            if (gpus != null)
+            {
+                foreach (var g in gpus)
+                {
+                    var item = new ComboBoxItem { Content = $"{g.TabTitle} · {g.Name}", Tag = g.Index };
+                    GpuTempPickCombo.Items.Add(item);
+                    if (g.Index == selectedIndex) sel = GpuTempPickCombo.Items.Count - 1;
+                }
+            }
+            if (sel == 0 && selectedIndex >= 0)
+            {
+                GpuTempPickCombo.Items.Add(new ComboBoxItem
+                {
+                    Content = $"GPU {selectedIndex}（未连接）",
+                    Tag = selectedIndex,
+                });
+                sel = GpuTempPickCombo.Items.Count - 1;
+            }
+            GpuTempPickCombo.SelectedIndex = sel;
+        }
+
+        private int PickedGpuTempIndex()
+            => (GpuTempPickCombo.SelectedItem as ComboBoxItem)?.Tag is int i ? i : -1;
 
         // The 网络 适配器 combo: "自动（默认）" first (Tag = ""), then one item per
         // enumerated non-loopback adapter (Tag = its Id). A stored pick whose adapter is
@@ -519,6 +570,39 @@ namespace task_monitor
             // Re-picking only matters while 特定 GPU is the active mode.
             if (GpuDisplayCombo.SelectedIndex != 2) return;
             _gpuDisplayChanged?.Invoke(2, PickedGpuIndex());
+        }
+
+        // GPU → 任务栏显示 combo: 0=使用率（默认） 1=温度 2=使用率 + 温度 — 温度 replaces
+        // the utilization row, 两者 packs BOTH rows. The two temperature sub-cards below are
+        // enabled only while a temperature shows (index != 0).
+        private void GpuContentCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_loaded) return;
+            bool tempShows = GpuContentCombo.SelectedIndex != 0;
+            GpuTempPickCombo.IsEnabled = tempShows;
+            GpuTempUnitCombo.IsEnabled = tempShows;
+            _gpuTaskbarContentChanged?.Invoke(GpuContentCombo.SelectedIndex, PickedGpuTempIndex(),
+                GpuTempUnitCombo.SelectedIndex == 1);
+        }
+
+        // GPU → 温度来源 combo: the "-1"-tagged first item is 最高温度; every other item's
+        // Tag is the "GPU N" number. Re-picking only matters while a temperature shows.
+        private void GpuTempPickCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_loaded) return;
+            if (GpuContentCombo.SelectedIndex == 0) return;
+            _gpuTaskbarContentChanged?.Invoke(GpuContentCombo.SelectedIndex, PickedGpuTempIndex(),
+                GpuTempUnitCombo.SelectedIndex == 1);
+        }
+
+        // GPU → 温度单位 combo: 0=摄氏度（默认） 1=华氏度 — applies to the taskbar row AND
+        // the detail popup's temperatures. Only matters while a temperature shows.
+        private void GpuTempUnitCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_loaded) return;
+            if (GpuContentCombo.SelectedIndex == 0) return;
+            _gpuTaskbarContentChanged?.Invoke(GpuContentCombo.SelectedIndex, PickedGpuTempIndex(),
+                GpuTempUnitCombo.SelectedIndex == 1);
         }
 
         // 网络 → 适配器 combo: the ""-tagged first item is 自动; every other item's Tag is

@@ -289,6 +289,9 @@ namespace task_monitor
             _taskbar.SetMergeSamePathProcesses(_config.MergeSamePathProcesses != false); // null = on (the default)
             _taskbar.SetDiskDisplay(DiskDisplayModeIndexOf(_config), _config.DiskDisplayIndex ?? 0);
             _taskbar.SetGpuDisplay(GpuDisplayModeIndexOf(_config), _config.GpuDisplayIndex ?? 0);
+            _taskbar.SetGpuTempDisplay(_config.GpuTaskbarContent ?? GpuTaskbarContent.Usage,
+                _config.GpuTempIndex ?? -1,                       // null = 最高温度
+                _config.GpuTempUnit == GpuTempUnit.Fahrenheit);   // null = 摄氏度
             _taskbar.SetNetAdapter(_config.NetAdapterId);   // null = 自动 (the default)
             _taskbar.SetClashApi(_config.ClashEnabled != false, _config.ClashApiAddress, _config.ClashApiSecret); // null = on; null address = the 127.0.0.1:9090 default
             _taskbar.SetPublicIpLookup(_config.PublicIpEnabled != false); // null = on (the default)
@@ -706,6 +709,10 @@ namespace task_monitor
                 // Same for the 特定 GPU picker (empty while GPU sampling is off).
                 GpuDisplayModeIndexOf(_config), _config.GpuDisplayIndex ?? 0,
                 _taskbar.LatestSnapshot?.Gpus, OnGpuDisplayChanged,
+                // 任务栏显示 / 温度来源 / 温度单位 — the 温度来源 picker shares the same
+                // adapter list.
+                GpuTaskbarContentIndexOf(_config), _config.GpuTempIndex ?? -1,
+                GpuTempUnitIndexOf(_config), OnGpuTaskbarContentChanged,
                 _config.NetAdapterId, _config.NetAdapterName,
                 EnumerateNetAdapters(), OnNetAdapterChanged,
                 _config.PublicIpEnabled != false, OnPublicIpLookupChanged,
@@ -908,6 +915,35 @@ namespace task_monitor
             _config.GpuDisplayIndex = gpuIndex;
             TrySaveConfig();
             _taskbar.SetGpuDisplay(modeIndex, gpuIndex);
+        }
+
+        // ---------- 设置 → 采样 → GPU: 任务栏显示 / 温度来源 / 温度单位 ----------
+
+        // yaml GpuTaskbarContent ↔ the 任务栏显示 combo index (0=使用率 = yaml null, the
+        // default; 1=温度 2=使用率+温度).
+        private static int GpuTaskbarContentIndexOf(AppSettings c)
+            => c.GpuTaskbarContent == GpuTaskbarContent.Temperature ? 1
+               : c.GpuTaskbarContent == GpuTaskbarContent.Both ? 2 : 0;
+
+        // yaml GpuTempUnit ↔ the 温度单位 combo index (0=摄氏度 = yaml null, the default).
+        private static int GpuTempUnitIndexOf(AppSettings c)
+            => c.GpuTempUnit == GpuTempUnit.Fahrenheit ? 1 : 0;
+
+        // 任务栏显示 / 温度来源 / 温度单位 combo changed: persist (the pick ≥0 and the
+        // unit are KEPT when the content returns to 使用率, so switching back restores
+        // them — same keep rule as GpuDisplayIndex) and push to the taskbar thread.
+        // SetGpuTempDisplay posts WM_APP_SET_METRICS — unlike 显示方式 — because the row
+        // count (and so the overlay's layout width) changes with the content.
+        private void OnGpuTaskbarContentChanged(int contentIndex, int tempIndex, bool fahrenheit)
+        {
+            var content = contentIndex == 1 ? GpuTaskbarContent.Temperature
+                        : contentIndex == 2 ? GpuTaskbarContent.Both
+                        : GpuTaskbarContent.Usage;
+            _config.GpuTaskbarContent = content == GpuTaskbarContent.Usage ? (GpuTaskbarContent?)null : content;
+            _config.GpuTempIndex = tempIndex >= 0 ? tempIndex : (int?)null;   // -1/absent = 最高温度
+            _config.GpuTempUnit = fahrenheit ? GpuTempUnit.Fahrenheit : (GpuTempUnit?)null;
+            TrySaveConfig();
+            _taskbar.SetGpuTempDisplay(content, tempIndex, fahrenheit);
         }
 
         // ---------- 设置 → 采样 → 网络: 适配器 ----------

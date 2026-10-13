@@ -48,13 +48,25 @@ namespace task_monitor
         }
 
         private string _temperatureText = "--";
-        /// <summary>"62 °C", or "--" when the driver doesn't report one (Taskmgr hides the row
-        /// in that case; the popup shows the dash instead — the value staying visible tells the
-        /// user the metric exists but is unsupported).</summary>
+        /// <summary>"65°C" (or "149°F" per the 温度单位 setting), or "--" when the driver
+        /// doesn't report one (Taskmgr hides the row in that case; the popup shows the dash
+        /// instead — the value staying visible tells the user the metric exists but is
+        /// unsupported). Always produced by <see cref="GpuTempText.Format"/>.</summary>
         public string TemperatureText
         {
             get => _temperatureText;
             internal set { if (_temperatureText != value) { _temperatureText = value; Notify(nameof(TemperatureText)); } }
+        }
+
+        private float _temperatureCelsius = float.NaN;
+        /// <summary>The last temperature read in °C — NaN when the driver doesn't report one.
+        /// The numeric twin of <see cref="TemperatureText"/>: the taskbar headline (最高温度 /
+        /// 特定 GPU) aggregates adapters by number, never by parsing the display string. No
+        /// INotifyPropertyChanged — nothing binds it.</summary>
+        public float TemperatureCelsius
+        {
+            get => _temperatureCelsius;
+            internal set => _temperatureCelsius = value;
         }
 
         private string _topEngineText = "--";
@@ -86,16 +98,35 @@ namespace task_monitor
     }
 
     /// <summary>
+    /// GPU temperature display text — the ONE formatter shared by the taskbar temperature
+    /// row and the detail popup's per-adapter 温度 (<see cref="GpuInfo.TemperatureText"/>),
+    /// so the 温度单位 setting reads the same everywhere: "65°C" / "149°F", "--" when there
+    /// is no valid reading. The value stays Celsius in every sampler/snapshot field; this
+    /// is the only place the 华氏度 conversion happens.
+    /// </summary>
+    internal static class GpuTempText
+    {
+        public static string Format(double celsius, bool fahrenheit)
+        {
+            if (double.IsNaN(celsius) || celsius <= 0) return "--";
+            return fahrenheit ? $"{(int)(celsius * 9.0 / 5.0 + 32.0)}°F"
+                              : $"{(int)celsius}°C";
+        }
+    }
+
+    /// <summary>
     /// A GPU-only sample: whether any adapter exists, the headline utilization (per the
     /// 显示方式 setting — MAX across adapters by default, Task Manager's sidebar rule),
-    /// its 60-tick history, and the per-adapter live metrics (the stable
-    /// <see cref="GpuInfo"/> objects, updated in place).
+    /// its 60-tick history, the headline temperature (per the 温度来源 setting), and the
+    /// per-adapter live metrics (the stable <see cref="GpuInfo"/> objects, updated in place).
     /// </summary>
     internal struct GpuSample
     {
         public bool Available;                  // false → overlay keeps the "--" placeholder
         public double HeadlinePercent;          // 0–100, per the 显示方式 setting (MetricDisplayMode)
         public double[] History;                // recent HeadlinePercent (oldest→newest), for the chart
+        public bool TempValid;                  // false → the taskbar temperature row shows "--"
+        public double TempCelsius;              // headline temperature in °C (conversion is display-side)
         public List<GpuInfo> Gpus;              // per-adapter live metrics
     }
 
@@ -198,6 +229,16 @@ namespace task_monitor
         private readonly IntPtr _outBuf = Marshal.AllocHGlobal(64);
         private readonly IntPtr _nameBuf = Marshal.AllocHGlobal((MaxEngineNameChars + 2) * 2);
 
+        // 设置 → 采样项目 → GPU → 温度单位 — written by the WPF UI thread (via
+        // SystemSampler.SetGpuTempConfig), read on the taskbar thread each tick to format
+        // GpuInfo.TemperatureText. Same single-writer volatile contract as SystemSampler's.
+        private volatile bool _tempFahrenheit;
+
+        /// <summary>Thread-safe: set the GPU temperature display unit (false = 摄氏度, the
+        /// default). Applied to <see cref="GpuInfo.TemperatureText"/> on the next tick;
+        /// numeric fields stay Celsius.</summary>
+        public void SetTempUnit(bool fahrenheit) => _tempFahrenheit = fahrenheit;
+
         private IDXCoreAdapterFactory _factory;
         private long _qpcFreq;
 
@@ -216,10 +257,15 @@ namespace task_monitor
         /// <see cref="MetricDisplayMode.Specific"/>; ignored otherwise. A specific adapter
         /// that isn't currently present falls back to the remaining adapters' max (the GPU
         /// default — the pick survives, its own values resume when it returns).</param>
+        /// <param name="tempIndex">The 温度来源 pick for the headline TEMPERATURE: -1 =
+        /// 最高温度 (the default — the hottest adapter, mirroring the utilization's 最高利用
+        /// default); ≥0 = that "GPU N"'s temperature, with the same absent→max fallback as
+        /// the utilization's Specific mode (a present-but-unsupported adapter stays "--",
+        /// never another adapter's number).</param>
         /// <param name="pdhEngines">ProcessGpuSampler's per-(adapter, engine) totals —
         /// the utilization/name fallback for adapters without the DXCore running-time
         /// state. null when <see cref="NeedsPdhEngineData"/> is false.</param>
-        public GpuSample Sample(MetricDisplayMode mode, int specificIndex,
+        public GpuSample Sample(MetricDisplayMode mode, int specificIndex, int tempIndex,
             IReadOnlyDictionary<(long luid, int phys, int eng), GpuEngineSlice> pdhEngines)
         {
             if (mode != _lastMode || specificIndex != _lastSpecificIndex)
@@ -255,6 +301,9 @@ namespace task_monitor
             double utilMax = 0;
             double specificUtil = 0;
             bool specificFound = false;
+            double tempMax = double.NaN;      // hottest valid reading across adapters
+            double specificTemp = double.NaN;
+            bool specificTempFound = false;
             foreach (var entry in _adapters.Values)
             {
                 utilSum += entry.Info.UtilPercent;
@@ -263,6 +312,16 @@ namespace task_monitor
                 {
                     specificUtil = entry.Info.UtilPercent;
                     specificFound = true;
+                }
+                float t = entry.Info.TemperatureCelsius;
+                if (!float.IsNaN(t))
+                {
+                    if (double.IsNaN(tempMax) || t > tempMax) tempMax = t;
+                    if (entry.Info.Index == tempIndex)
+                    {
+                        specificTemp = t;
+                        specificTempFound = true;
+                    }
                 }
             }
 
@@ -280,6 +339,24 @@ namespace task_monitor
                     break;
             }
 
+            // Headline temperature (设置 → 采样项目 → GPU → 温度来源): the hottest adapter,
+            // or the picked "GPU N"'s. An ABSENT pick falls back to the max (the pick
+            // survives, same rule as the utilization's Specific mode); a present-but-
+            // unsupported one (NaN) stays invalid → "--". No history — temperature has no
+            // chart, so a pick change has nothing to clear.
+            bool tempValid;
+            double tempCelsius;
+            if (tempIndex >= 0 && specificTempFound)
+            {
+                tempValid = !double.IsNaN(specificTemp);
+                tempCelsius = specificTemp;
+            }
+            else
+            {
+                tempValid = !double.IsNaN(tempMax);
+                tempCelsius = tempMax;
+            }
+
             _history.Enqueue(headline);
             while (_history.Count > MaxHistory) _history.Dequeue();
 
@@ -295,6 +372,8 @@ namespace task_monitor
                 Available = _adapters.Count > 0,
                 HeadlinePercent = headline,
                 History = _history.ToArray(),
+                TempValid = tempValid,
+                TempCelsius = tempValid ? tempCelsius : 0,
                 Gpus = gpus,
             };
         }
@@ -356,11 +435,19 @@ namespace task_monitor
 
                 // Temperature (driver-gated; 0/unsupported reads as "--", like Taskmgr hiding it).
                 // The query takes a 4-byte physicalAdapterIndex input, like the engine query.
+                // The numeric twin feeds the taskbar headline; the text follows the 温度单位
+                // setting (GpuTempText is the one formatter for it).
                 if (entry.TemperatureSupported &&
                     QueryTemperature(adapter, entry.PhysicalIndex, out float celsius) && celsius > 0)
-                    entry.Info.TemperatureText = $"{(int)celsius} °C";
+                {
+                    entry.Info.TemperatureCelsius = celsius;
+                    entry.Info.TemperatureText = GpuTempText.Format(celsius, _tempFahrenheit);
+                }
                 else
+                {
+                    entry.Info.TemperatureCelsius = float.NaN;
                     entry.Info.TemperatureText = "--";
+                }
 
                 // Memory: resident bytes per segment group + Taskmgr's display totals.
                 long dedicatedUsed = 0, sharedUsed = 0;
@@ -392,6 +479,8 @@ namespace task_monitor
                     $"GPU 适配器（{entry.Info.TabTitle}）DXCore 查询失败（热插拔/驱动重置？）——指标归零", ex);
                 entry.Info.UtilPercent = 0;
                 entry.Info.TopEngineText = "--";
+                entry.Info.TemperatureCelsius = float.NaN;   // never a stale reading on the row
+                entry.Info.TemperatureText = "--";
             }
         }
 

@@ -13,6 +13,17 @@ namespace task_monitor
     /// (adapters), or one specific one's. null = the metric's default (磁盘 Average, GPU Max).</summary>
     public enum MetricDisplayMode { Average, Max, Specific }
 
+    /// <summary>GPU 任务栏显示内容 (settings.yaml <c>gpuTaskbarContent</c>): the taskbar GPU
+    /// slot shows the utilization (the default), the temperature, or BOTH — "both" packs TWO
+    /// stacked rows ("GPU 42%" + "GPU 65°C"), not one concatenated line. Values = the settings
+    /// combo indices. null = Usage.</summary>
+    public enum GpuTaskbarContent { Usage, Temperature, Both }
+
+    /// <summary>GPU 温度单位 (settings.yaml <c>gpuTempUnit</c>): the display unit for GPU
+    /// temperatures (taskbar row + detail popup) — the snapshot itself always carries Celsius;
+    /// the conversion is display-side only. null = Celsius.</summary>
+    public enum GpuTempUnit { Celsius, Fahrenheit }
+
     /// <summary>
     /// Persistent settings store — <c>settings.yaml</c> in the exe's own directory (the
     /// run directory; resolved from <see cref="AppDomain.BaseDirectory"/> because the
@@ -186,6 +197,37 @@ namespace task_monitor
         /// when the mode leaves Specific, like <see cref="DiskDisplayIndex"/>.
         /// </summary>
         public int? GpuDisplayIndex { get; set; }
+
+        /// <summary>
+        /// GPU 任务栏显示 (设置 → 采样项目 → GPU): what the taskbar GPU slot shows —
+        /// utilization (null, the default), the temperature, or <see cref="GpuTaskbarContent.Both"/>
+        /// (two stacked rows: the utilization row plus a temperature row). Orthogonal to
+        /// <see cref="GpuSamplingEnabled"/> (采样 gates the data, this gates the row) and to
+        /// <see cref="GpuDisplay"/> (显示方式 still picks WHICH adapters feed the utilization
+        /// headline). Pushed live via <see cref="TaskbarWindow.SetGpuTempDisplay"/> — the only
+        /// 显示设置 that posts WM_APP_SET_METRICS, because the row count (and so the layout
+        /// width) changes with it.
+        /// </summary>
+        public GpuTaskbarContent? GpuTaskbarContent { get; set; }
+
+        /// <summary>
+        /// The "GPU N" number whose temperature the taskbar shows when
+        /// <see cref="GpuTaskbarContent"/> is Temperature/Both. null = 最高温度 (the default —
+        /// the hottest adapter, mirroring the utilization default 最高利用率); a specific adapter
+        /// that isn't currently present falls back to the max until it returns (same fallback
+        /// rule as the utilization's Specific mode). The numbering follows the adapter-set sort
+        /// order and can shift when the set changes (same caveat as
+        /// <see cref="GpuDisplayIndex"/>). Kept when the content switches back to 使用率.
+        /// </summary>
+        public int? GpuTempIndex { get; set; }
+
+        /// <summary>
+        /// GPU 温度单位 (设置 → 采样项目 → GPU): display unit for GPU temperatures — the
+        /// taskbar row and the detail popup's per-adapter 温度 both follow it. null = 摄氏度
+        /// (the default — only 华氏度 is ever written). Pure display-side conversion; the
+        /// snapshot always carries Celsius.
+        /// </summary>
+        public GpuTempUnit? GpuTempUnit { get; set; }
 
         /// <summary>
         /// 网络适配器 (设置 → 采样项目 → 网络): the NetworkInterface.Id (GUID) of the adapter
