@@ -2,7 +2,7 @@
 
 **中文** | English (TODO)
 
-从进程维度实时监测系统负载情况。
+**通过常驻的任务栏视图或悬浮窗**，从进程维度实时监测系统负载情况。
 
 <p align="center">
   <img src="assets/header.webp" alt="TaskMonitor">
