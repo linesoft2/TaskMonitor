@@ -13,6 +13,10 @@ This file provides guidance to AI coding agents when working with code in this r
 | a 设置 item's wiring to its sampler | `docs/settings-plumbing.md` |
 | any of the six scroll views | `docs/scroll-stack.md` |
 
+## 工程化原则
+
+你应具备软件工程化的能力来完成这个项目：所有工作不单是为了完成某个需求，而是为了持久地完成一个工程。如果你的代码不够工程化，后续也会消耗更多精力让你重构。当前代码中不够工程化的部分要主动提出，而不是参照之前的风格继续编写。
+
 ## What this is
 
 A Windows taskbar widget: a self-drawn overlay embedded in the taskbar (three stacked groups —
@@ -206,6 +210,9 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 **Keep it in sync with the code — update it in the same change, not later.** Stale guidance is worse
 than none; fix or delete any claim that no longer matches the code on the spot.
 
+**每次更新本文件前，先检查它的体积，整个文件控制在 20 KB 以内。** 加入内容后将超过 20 KB 时，
+要想清楚是否真的需要加入；必须加入的话，精简语序，并考虑是否需要优化（压缩或迁移到 docs/）已有内容。
+
 **Route each fact to exactly one place, and point at it elsewhere** (a fact held in two prose copies
 WILL drift — it already happened once, to the 合并相同程序 wording):
 
@@ -219,6 +226,4 @@ WILL drift — it already happened once, to the 合并相同程序 wording):
 | derivation, calibration constants, offsets, reversed layouts | **the code site's own comment** — link to it, never copy it |
 | what the code already says plainly (signature, field name, obvious branch) | **nowhere** |
 
-Keep this file a *map*: the gotcha index (one line per rule) is its payload — **everything around it
-must stay under ~10 KB of prose**. Text that does not fit belongs in a doc, not here.
 New gotcha → a numbered line here + a matching `## N.` section in `docs/gotchas.md`.
