@@ -20,7 +20,8 @@ This file provides guidance to AI coding agents when working with code in this r
 ## What this is
 
 A Windows taskbar widget: a self-drawn overlay embedded in the taskbar (three stacked groups —
-CPU/内存, 磁盘/GPU, 网络 ↑/↓, plus an optional GPU 温度 row via 设置 → GPU → 任务栏显示) that pops
+CPU/内存, 磁盘/GPU, 网络 ↑/↓; 设置 → GPU → 任务栏显示 swaps in a 温度 row, or in 两者 packs one
+网络-style two-row GPU block with a single vertically-centred "GPU" label) that pops
 up a fluent acrylic detail window on click. WPF on .NET
 Framework 4.8. **No main window**; the only persistent UI is that overlay — optionally detached
 into a free-floating card widget (设置 → 外观 → 悬浮模式, gotchas §36). The process stays alive via
@@ -89,7 +90,7 @@ Windows runner。`publish-cnb-release.ps1` 的三个坑（勿回退，见脚本�
 
 **Two threads, one process.** ① A native Win32 overlay owned by `TaskbarWindow` on its own STA
 message loop (DirectN), embedded with `SetParent`; up to 4 visual groups (3 stacked + 网络) → 5
-hit slots (GPU 温度行 shares slot 3), geometry DYNAMIC
+hit slots (GPU 温度 row / 两者块 shares slot 3), geometry DYNAMIC
 from the sampling mask + GPU 任务栏显示 content; two taskbar families (Win11 `Shell_TrayWnd` / classical Win10 `ReBarWindow32`
 band-shrink, restored on exit), plus side-docked and 悬浮模式 forms. ② The WPF UI thread: on-demand
 `DetailWindow`s (shell + one `IDetailView`), `SettingsWindow`, the lazily-created right-click menu,

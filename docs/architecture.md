@@ -12,9 +12,13 @@ disagree, the code wins — fix this file.
   `SetParent`. 3 visual groups → **5 hit slots** (0=CPU 1=内存 2=磁盘 3=GPU 4=网络); `WndProc`
   does the 2D hit-test (left-click toggles a popup, right-click the menu). Slot geometry is
   DYNAMIC (`ComputeLayout` from the sampling mask): the visible stacked metrics pack into the
-  two-row grid in their fixed order — a hidden metric leaves no hole (空缺补齐; only the grid's
-  last row may stay empty on an odd count), an emptied group frees its width and the window
-  shrinks (`ResizeForLayout`; slot IDs stay stable). **Two taskbar families**, detected per
+  two-row grid in their fixed order — a hidden metric leaves no hole (空缺补齐; an odd count's
+  last row, and the trailing hole 任务栏显示 两者 pads before its GPU block, may stay empty), an
+  emptied group frees its width and the window
+  shrinks (`ResizeForLayout`; slot IDs stay stable). 任务栏显示 两者 packs GPU usage+temperature
+  as ONE 网络-style two-row block (a dedicated cell, single "GPU" label vertically centred;
+  the vertical flow keeps the pair in one column, the narrow two-line strip draws one
+  label+two-values block). **Two taskbar families**, detected per
   `Start()` run (TrafficMonitor's `CheckWindows11Taskbar`: Win11 version AND the XAML
   `DesktopWindowContentBridge` child — anything else, Windows 10 or an ExplorerPatcher-restored
   classic taskbar on Win11, is "classical"):

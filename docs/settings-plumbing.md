@@ -79,7 +79,7 @@ and the missing-device fallback: [`gotchas.md` §28](gotchas.md#28-磁盘gpu-显
 |---|---|
 | Setter | `TaskbarWindow.SetGpuTempDisplay(content, tempIndex, fahrenheit)` → `SystemSampler.SetGpuTempConfig(index, fahrenheit)` |
 | Sampler state | `SystemSampler` volatile index+unit; the CONTENT is TaskbarWindow layout state (`_gpuTaskbarContent`, read by every `ComputeLayout`) |
-| WM_APP | **YES — `WM_APP_SET_METRICS`**: slot 3's ROW COUNT changes with the content — 温度 swaps the utilization row for a temperature row, 两者 packs BOTH rows (a fifth stacked position, a third stacked group, a wider overlay). ResizeForLayout is a no-op when the width didn't move, so the source/unit combo changes reuse the same message harmlessly |
+| WM_APP | **YES — `WM_APP_SET_METRICS`**: slot 3's form changes with the content — 温度 swaps the utilization row for a temperature row, 两者 packs BOTH rows as ONE 网络-style two-row block (usage over temperature, the single "GPU" label vertically centred; a dedicated cell, with the horizontal grid padding a trailing hole before it — same width as the old two stacked rows). ResizeForLayout is a no-op when the width didn't move, so the source/unit combo changes reuse the same message harmlessly |
 
 Temperature itself is already sampled every tick for every adapter (DXCore
 `AdapterTemperatureCelsius`, driver-gated — the detail popup has always shown it); this
