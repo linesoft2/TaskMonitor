@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using iNKORE.UI.WPF.Modern;
 using iNKORE.UI.WPF.Modern.Common.IconKeys;
 using iNKORE.UI.WPF.Modern.Controls;
@@ -30,9 +33,12 @@ namespace task_monitor
     /// decoupled from the row containers' lifetime, and the captured
     /// <see cref="ProcessInfo"/> stays valid regardless of what the next tick's rebind does
     /// to the list.
-    /// <para>Rows without a killable target (Clash/Mihomo controller rows, Pid = 0) never
-    /// open the menu — there is no local process to end. Merged rows (合并相同程序) kill
-    /// ALL member PIDs (<see cref="ProcessInfo.Pids"/>), not just the first member's.</para>
+    /// <para>Rows without a killable target never open the menu. That is rare now:
+    /// Clash/Mihomo controller rows carry no PID (the core's API reports only a path), so a
+    /// right-click RESOLVES the path back to live PIDs (name candidates → full image-path
+    /// verification) and kills those — the menu only stays away when nothing resolves (the
+    /// connection's process is already gone). Merged rows (合并相同程序) kill ALL member PIDs
+    /// (<see cref="ProcessInfo.Pids"/>), not just the first member's.</para>
     /// </remarks>
     internal static class ProcessKillMenu
     {
@@ -43,12 +49,17 @@ namespace task_monitor
             private readonly ItemsControl _list;
             private ContextMenu _menu;          // lazily built on the first right-click
             private MenuItem _killItem;
+            private FontIcon _fallbackGlyph;    // the menu item's static RecordStop icon
+            private Image _cardIcon;            // the confirm card's 20×20 process icon
+            private System.Windows.Shapes.Rectangle _cardIconGap; // hidden together with the icon
+            private TextBlock _killHeaderText;  // the menu item's header (trimmable, capped width)
             private Popup _confirm;             // lazily built with the menu
             private TextBlock _confirmTitle;
             private TextBlock _confirmDetail;
             private Button _killButton;
             private Button _cancelButton;
             private ProcessInfo _row;           // the right-clicked row, kept across ticks
+            private List<int> _targets;         // its resolved kill targets (see TargetsOf)
             private Point _anchor;              // right-click point (list space) — the confirm card's position
 
             public Session(ItemsControl list)
@@ -67,13 +78,16 @@ namespace task_monitor
                 if (!(container is ContentPresenter cp) || !(cp.DataContext is ProcessInfo p))
                     return;
 
-                var targets = TargetsOf(p);
-                if (targets == null) return;   // Clash row / Pid 0 — nothing local to end
+                _targets = TargetsOf(p);
+                if (_targets == null) return;   // nothing local to end (e.g. a Clash row whose process is already gone)
 
                 EnsureMenu();
                 _row = p;
                 _anchor = e.GetPosition(_list);
-                _killItem.Header = p.Count > 1 ? $"结束全部 {p.Count} 个进程" : "结束进程";
+                // Contextualize the item with the row's own name (the ×N spelling matches
+                // the row's merge chip): capped + ellipsized so a long service display name
+                // can't blow the menu out to absurd widths.
+                _killHeaderText.Text = _targets.Count > 1 ? $"结束进程 {p.Name} ×{_targets.Count}" : $"结束进程 {p.Name}";
 
                 _menu.PlacementTarget = _list;
                 _menu.Placement = PlacementMode.MousePoint;
@@ -81,17 +95,47 @@ namespace task_monitor
                 e.Handled = true;
             }
 
-            // Kill targets: a merged row's full member list, else the single Pid; null when
-            // there is nothing local to terminate (Clash controller rows report Pid 0).
+            // Kill targets, resolved ONCE per right-click and kept for the confirm card and
+            // the kill itself: a merged row's full member list, a Clash row's path→PID
+            // lookup, else the single Pid. Null when there is nothing local to terminate.
             private static List<int> TargetsOf(ProcessInfo p)
             {
-                if (p.ViaClash) return null;
+                if (p.ViaClash) return ResolvePidsByPath(p.ExePath);
                 if (p.Pids != null && p.Pids.Count > 0)
                 {
                     var live = p.Pids.FindAll(pid => pid > 0);
                     return live.Count > 0 ? live : null;
                 }
                 return p.Pid > 0 ? new List<int> { p.Pid } : null;
+            }
+
+            // A Clash/Mihomo row carries no PID (the core's API reports only a path) —
+            // resolve the path back to live PIDs: name candidates via GetProcessesByName,
+            // then verify each candidate's FULL image path (Win32 form, the same source the
+            // samplers' ExePath uses) so a same-named exe elsewhere can't be hit by mistake.
+            // A one-off, shell-free walk on the UI thread, only for a right-clicked Clash
+            // row; null when the path matches nothing running.
+            private static List<int> ResolvePidsByPath(string exePath)
+            {
+                if (string.IsNullOrEmpty(exePath)) return null;
+                try
+                {
+                    var result = new List<int>();
+                    foreach (var proc in Process.GetProcessesByName(
+                        Path.GetFileNameWithoutExtension(exePath)))
+                    {
+                        try
+                        {
+                            int pid = proc.Id;
+                            if (string.Equals(SystemInfo.QueryProcessImageFileName(pid), exePath,
+                                StringComparison.OrdinalIgnoreCase))
+                                result.Add(pid);
+                        }
+                        finally { proc.Dispose(); }
+                    }
+                    return result.Count > 0 ? result : null;
+                }
+                catch { return null; }
             }
 
             private void EnsureMenu()
@@ -102,9 +146,22 @@ namespace task_monitor
                 // Fluent 2 looks for the standard ContextMenu/MenuItem, applied BY KEY
                 // because the FluentWpfCore dictionary merged after XamlControlsResources
                 // would otherwise win the keyless defaults.
+                //
+                // The header names the target row (the ×N spelling matches the row's merge
+                // chip); the icon stays the static RecordStop glyph — the row's own icon
+                // lives on the confirm card, not here (user's call). No explicit Foreground
+                // on the header TextBlock: it must inherit the item's hover/selected
+                // highlight from the MenuItem template.
+                _fallbackGlyph = new FontIcon { Icon = FluentSystemIcons.RecordStop_16_Regular, FontSize = 16 };
+                _killHeaderText = new TextBlock
+                {
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    MaxWidth = 260,
+                };
                 _killItem = new MenuItem
                 {
-                    Icon = new FontIcon { Icon = FluentSystemIcons.RecordStop_16_Regular, FontSize = 16 },
+                    Icon = _fallbackGlyph,
+                    Header = _killHeaderText,
                 };
                 _killItem.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemStyle");
                 _killItem.Click += (s, e) => ShowConfirm();
@@ -124,13 +181,28 @@ namespace task_monitor
                 _cancelButton.SetResourceReference(FrameworkElement.StyleProperty, "DefaultButtonStyle");
                 _cancelButton.Click += (s, e) => _confirm.IsOpen = false;
 
+                _cardIcon = new Image
+                {
+                    Width = 20, Height = 20,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    SnapsToDevicePixels = true,
+                };
+                RenderOptions.SetBitmapScalingMode(_cardIcon, BitmapScalingMode.HighQuality);
                 _confirmTitle = new TextBlock
                 {
                     FontSize = 13,
                     FontWeight = FontWeights.SemiBold,
                     TextWrapping = TextWrapping.Wrap,
+                    VerticalAlignment = VerticalAlignment.Center,
                 };
                 _confirmTitle.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorPrimaryBrush");
+                // Title row: [row icon] 结束 xxx？ — the icon makes the target unmistakable
+                // even when the name is a truncated/renamed service display name.
+                var titleRow = new StackPanel { Orientation = Orientation.Horizontal };
+                titleRow.Children.Add(_cardIcon);
+                _cardIconGap = new System.Windows.Shapes.Rectangle { Width = 8 };
+                titleRow.Children.Add(_cardIconGap);
+                titleRow.Children.Add(_confirmTitle);
                 _confirmDetail = new TextBlock
                 {
                     FontSize = 12,
@@ -156,7 +228,7 @@ namespace task_monitor
                 card.SetResourceReference(Border.BackgroundProperty, "SolidBackgroundFillColorBaseBrush");
                 card.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
                 var panel = new StackPanel();
-                panel.Children.Add(_confirmTitle);
+                panel.Children.Add(titleRow);
                 panel.Children.Add(_confirmDetail);
                 panel.Children.Add(buttons);
                 card.Child = panel;
@@ -177,12 +249,18 @@ namespace task_monitor
                 if (_row == null) return;
                 var p = _row;
 
-                _confirmTitle.Text = p.Count > 1
-                    ? $"结束 {p.Name} 的全部 {p.Count} 个进程？"
+                // The card's icon mirrors the menu item's (same row, same icon object — the
+                // lists resolve Icon before binding so it's effectively always present).
+                _cardIcon.Source = p.Icon;
+                bool hasIcon = p.Icon != null;
+                _cardIcon.Visibility = hasIcon ? Visibility.Visible : Visibility.Collapsed;
+                _cardIconGap.Visibility = hasIcon ? Visibility.Visible : Visibility.Collapsed;
+
+                var targets = _targets ?? new List<int>();
+                _confirmTitle.Text = targets.Count > 1
+                    ? $"结束 {p.Name} 的全部 {targets.Count} 个进程？"
                     : $"结束 {p.Name}？";
-                var pidText = p.Pids != null && p.Pids.Count > 0
-                    ? $"PID {string.Join(", ", p.Pids)}"
-                    : $"PID {p.Pid}";
+                var pidText = $"PID {string.Join(", ", targets)}";
                 _confirmDetail.Text = p.ServiceHost != null
                     ? $"{pidText} · svchost.exe 服务宿主——它承载的系统服务也会一并停止，相关功能可能中断。"
                     : $"{pidText} · 结束后该进程未保存的数据将丢失。";
@@ -197,8 +275,15 @@ namespace task_monitor
 
             private void Kill()
             {
-                if (_row == null) { _confirm.IsOpen = false; return; }
-                var targets = TargetsOf(_row) ?? new List<int>();
+                // Use the SAME resolution the confirm card showed (a re-resolve here could
+                // diverge from what the user just approved — a vanished member shows up in
+                // the per-PID error counts instead).
+                if (_row == null || _targets == null || _targets.Count == 0)
+                {
+                    _confirm.IsOpen = false;
+                    return;
+                }
+                var targets = _targets;
                 int ok = 0, fail = 0, firstErr = 0;
 
                 foreach (int pid in targets)
