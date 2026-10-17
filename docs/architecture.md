@@ -28,17 +28,18 @@ disagree, the code wins — fix this file.
     Win11-only (the settings page hides it there).
   - **Orientation is orthogonal to the family**: a **side-docked (vertical) taskbar** — the
     classical one since Win10, and on Win11 26H2 the native 设置 → 任务栏位置 左侧/右侧 — transposes
-    EITHER family's overlay into the strip stack (`ComputeLayout(mask, vertical, stripWidth)` /
-    `DrawVertical` / `HitTestSlot`); the probe is the taskbar rect's aspect, never `classical`
-    (getting that wrong is the "覆盖层盖满整条任务栏、任务栏点不动" incident — gotchas §44).
-    A ~48-DIP side bar cannot hold the single-line "label … value" pair, so below
-    `STRIP_TWO_LINE_MIN_W` each metric becomes a padded label-over-value block
-    (rows × `VerticalRowH`: 44 DIP two-line / 16 DIP single-line; the padding is what keeps a
-    label with its own value — gotchas §44), and the Win11
-    family anchors along the taskbar's axis (`CalcPositionVertical`: tray end by default, the top
-    corner / above Start when 靠左显示) since it has no band to shrink. `DetailWindow` anchors its
-    popup to the taskbar's screen edge (`GetTaskbarEdge`), and an orientation flip re-docks live
-    at runtime (`ReconfigureOrientation`).
+    EITHER family's overlay into a COLUMN GRID (`ComputeVerticalLayout` / `DrawVertical` /
+    `HitTestSlot`); the probe is the taskbar rect's aspect, never `classical` (getting that wrong
+    is the "覆盖层盖满整条任务栏、任务栏点不动" incident — gotchas §44). The bar's THICKNESS picks the
+    form: one ~48-DIP column below `STRIP_TWO_LINE_MIN_W` becomes padded label-over-value blocks
+    (44 DIP per row; the padding is what keeps a label with its own value — gotchas §44), a
+    70–139-DIP bar keeps one one-line column, and 26H2's WIDENED vertical bar (320px @200% =
+    160 DIP) flows the packed rows into two or more 70/84-DIP columns (the row flow is
+    `ComputeVerticalLayout`; arithmetic, rounding and the 2026-10-17 incident: gotchas §44). The
+    Win11 family anchors along the taskbar's axis (`CalcPositionVertical`: tray end by default,
+    the top corner / above Start when 靠左显示) since it has no band to shrink. `DetailWindow`
+    anchors its popup to the taskbar's screen edge (`GetTaskbarEdge`), and an orientation flip
+    re-docks live at runtime (`ReconfigureOrientation`).
   - Lifetime: `Start()` first waits for a real taskbar, and ANY return from `Start()` makes App
     re-enter it after 2s to recreate the overlay (gotchas §2).
   - **悬浮模式 (设置 → 外观)**: the same window class, layout, drawing, hit-testing and sampler,

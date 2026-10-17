@@ -25,8 +25,8 @@ namespace task_monitor
     /// CClassicalTaskbarDlg path). The family is fixed per <see cref="Start"/> run.
     /// ORTHOGONAL to the family is the taskbar's ORIENTATION: a side-docked (vertical)
     /// taskbar — the classical one since Win10, and on Win11 26H2 the native 左侧/右侧
-    /// 任务栏位置 — transposes both families' overlay into the strip stack (see the
-    /// STRIP_H block below).
+    /// 任务栏位置 — transposes both families' overlay into a COLUMN GRID whose column count
+    /// follows the bar's thickness (see the STRIP_H block below).
     ///
     /// Runs on whatever thread calls <see cref="Start"/> — the caller (App)
     /// is expected to spin up a dedicated STA thread, since this method ends
@@ -76,107 +76,154 @@ namespace task_monitor
         private const int SlotCount = 5;                   // hit slots: CPU/内存/磁盘/GPU/网络
         // VERTICAL taskbar (a SIDE-docked taskbar of EITHER family — Start()'s orientation
         // probe is about the taskbar's shape, never about which family it is): the grid
-        // transposes into a stack of full-width strips — one per packed stacked ROW
-        // (slot 3's temperature row is its own strip in 任务栏显示 温度/两者), two for
-        // 网络 (↑ over ↓). Text stays horizontal (TrafficMonitor's vertical mode;
-        // no rotated text).
+        // transposes into a COLUMN GRID of rows. Text stays horizontal (TrafficMonitor's
+        // vertical mode; no rotated text). How many COLUMNS depends on the bar's THICKNESS:
         //
-        // A side taskbar is only as thick as a horizontal one is tall (~48 DIP), while the
-        // single-line "label … value" strip wants ~72 DIP of width, so below that width every
-        // metric becomes a TWO-LINE BLOCK: its label on a small dim line over its value
-        // (DrawVertical's two-line form; the 2026-09-30 Win11 26H2 left taskbar is 48 DIP).
-        // Such a block is STRIP_BLOCK_H tall = 2 lines + the gap between them + STRIP_BLOCK_PAD
-        // above and below. The padding is NOT optional: at the first, tight version (2×STRIP_H
-        // = 32 DIP, no padding) the label and its value read as one collided lump and the
-        // hairline between blocks looked like it belonged to neither (the 2026-09-30 布局不合理
-        // report); 48 DIP was the roomy answer, 44 the "稍微紧凑一点" follow-up — the block height
-        // is the one knob, everything inside it is derived (DrawStripLines).
-        private const float STRIP_H = 16f;                 // one vertical-mode strip LINE (DIPs at 96 DPI)
-        private const int STRIP_H_I = 16;                  // the same, for integer DPI scaling
-        private const float STRIP_TWO_LINE_MIN_W = 72f;    // narrower strips (DIP) take the two-line form
+        //   • ~48 DIP (a stock side taskbar, incl. the Win11 26H2 left bar): one strip column,
+        //     and a single-line "label … value" pair does not fit — every metric becomes a
+        //     TWO-LINE BLOCK (label over value; DrawVertical's two-line form / DrawStripLines).
+        //   • ≥ 72 DIP: one strip column, roomy enough for one-line rows across it.
+        //   • ≥ ~140 DIP (26H2's WIDENED vertical taskbar — a 320px bar @200% is 160 DIP):
+        //     the packed ROWS flow into as many columns as the width holds (up to 4), each
+        //     column a contiguous run of rows with 网络's ↑/↓ pair kept together. The
+        //     2026-10-17 「根据宽度自适应列数」 report: two columns turn a 160-DIP bar's
+        //     seven compact rows into four.
+        //
+        // The narrow form's block is STRIP_BLOCK_H tall = 2 lines + the gap between them +
+        // STRIP_BLOCK_PAD above and below. The padding is NOT optional: at the first, tight
+        // version (2×STRIP_H = 32 DIP, no padding) the label and its value read as one
+        // collided lump and the hairline between blocks looked like it belonged to neither
+        // (the 2026-09-30 布局不合理 report); 48 DIP was the roomy answer, 44 the "稍微紧凑一点"
+        // follow-up — the block height is the one knob, everything inside it is derived
+        // (DrawStripLines).
+        //
+        // ROW PITCH: the COMPACT 16-DIP line is the single-column strip's form (it is the
+        // whole point of a narrow bar — see the 48-DIP block above). The multi-column GRID is
+        // not compact: it exists because a WIDE bar has room, and at 16 DIP the 13px line box
+        // (~17 DIP) has no breathing space above/below (the 2026-10-17 "多列时边距不用这么
+        // 紧凑，单列才紧凑" follow-up). So a grid row is 24 DIP — 1.5× the strip line, the
+        // vertical room the width-adaptive form gets for free.
+        private const float STRIP_H = 16f;                 // ONE-LINE single-column strip (compact form; DIPs at 96 DPI)
+        private const float GRID_ROW_H = 24f;              // one MULTI-COLUMN grid row (roomy form)
+        private const float STRIP_TWO_LINE_MIN_W = 72f;    // one-line pairs need this much; a 70-DIP cell (stacked only) already fits
         private const float STRIP_BLOCK_H = 44f;           // one two-line metric BLOCK (DIPs at 96 DPI)
         private const float STRIP_BLOCK_PAD = 4f;          // …of which this much sits above and below the pair
         private const float STRIP_LINE_GAP = 1f;           // …and this much between a label and its value
                                                            // (the pair's own gap — ~17px at 200% here, against
                                                            // ~27px of block separation; the 2026-09-30
                                                            // "文案和数值再近一点点" trim, 4 → 1 DIP)
+        private const float LAYOUT_FIT_EPSILON = 1e-4f;    // float slack for "do this many columns fit"
 
         // The geometry of one visibility mask. Flat fields (no arrays) — computed per
         // Draw/HitTest call, incl. per mouse-move, so it must not allocate.
         private struct OverlayLayout
         {
-            public bool Vertical;               // side-docked taskbar (strips), false = the two-row grid
-            public bool TwoLine;                // vertical ONLY: strip too narrow for one-line rows → label line over value line
+            public bool Vertical;               // side-docked taskbar (columns of rows), false = the two-row grid
+            public bool TwoLine;                // vertical ONLY: one narrow column → label line over value line
             public float Width;                 // total logical width (0 when every metric is off)
             public float Height;                // total logical height — VERTICAL mode only (horizontal: the band owns the height, 0 here)
-            public float Left0, Left1, Left2, Left3; // per-group left edge in DIPs (-1 = group gone); vertical: 0/-1 visibility sentinels only
+            public float Left0, Left1, Left2, Left3; // HORIZONTAL: per-group left edge in DIPs (-1 = group gone)
             // The slot packed at each stacked row position [g0-top, g0-bottom, g1-top,
-            // g1-bottom, g2-top]; -1 = the trailing empty position of an odd count. Vertical mode:
-            // the same packing, but each position is one full-width strip (two-line form:
-            // one strip BLOCK of two lines). Slot 3 can hold TWO positions (任务栏显示 两者:
-            // the utilization row plus the temperature row — both PosN entries are 3).
+            // g1-bottom, g2-top]; -1 = the trailing empty position of an odd count. A slot
+            // can appear TWICE (任务栏显示 两者: slot 3's utilization row plus its temperature
+            // row, both PosN entries are 3).
             public int Pos0, Pos1, Pos2, Pos3, Pos4;
             public int TempPos;                 // the position that draws the GPU TEMPERATURE row (-1 = none)
             public int SlotMask;                // the sampling mask this layout was derived from
             public GpuTaskbarContent GpuContent; // …and the GPU 任务栏显示 content (slot 3's row count)
+
+            // VERTICAL geometry — BOTH forms are a column grid: Columns == 1 is the strip
+            // stack (RowH picks the one-line / two-line form), Columns > 1 the width-adaptive
+            // grid. A packed position's cell is (PosCol, PosRow); 网络's two-row block is
+            // (NetCol, NetRow). Column c starts at ColumnLeft(c) and is ColumnWidth(c) wide
+            // (70 DIP, except the LAST column's 84 when it carries 网络); ColRows(c) is its
+            // occupied row count (columns can end at different heights).
+            public int Columns;
+            public float RowH;                  // GRID_ROW_H (multi-column), STRIP_H or STRIP_BLOCK_H (single column)
+            public int ColRows0, ColRows1, ColRows2, ColRows3;
+            public int PosCol0, PosCol1, PosCol2, PosCol3, PosCol4;
+            public int PosRow0, PosRow1, PosRow2, PosRow3, PosRow4;
+            public int NetCol, NetRow;          // 网络's two-row block (-1 column = 网络 off)
 
             public bool GroupVisible(int g) => GroupLeft(g) >= 0f;
             public float GroupLeft(int g) => g == 0 ? Left0 : g == 1 ? Left1 : g == 2 ? Left2 : Left3;
             public bool SlotVisible(int slot) => (SlotMask & (1 << slot)) != 0;
             public int SlotAt(int pos) => pos == 0 ? Pos0 : pos == 1 ? Pos1 : pos == 2 ? Pos2 : pos == 3 ? Pos3 : Pos4;
             public int PositionOf(int slot) => Pos0 == slot ? 0 : Pos1 == slot ? 1 : Pos2 == slot ? 2 : Pos3 == slot ? 3 : Pos4 == slot ? 4 : -1;
+            public bool NetVisible => NetCol >= 0;
+            public int PosCol(int pos) => pos == 0 ? PosCol0 : pos == 1 ? PosCol1 : pos == 2 ? PosCol2 : pos == 3 ? PosCol3 : PosCol4;
+            public int PosRow(int pos) => pos == 0 ? PosRow0 : pos == 1 ? PosRow1 : pos == 2 ? PosRow2 : pos == 3 ? PosRow3 : PosRow4;
+            public int ColRows(int c) => c == 0 ? ColRows0 : c == 1 ? ColRows1 : c == 2 ? ColRows2 : ColRows3;
+            public float ColumnLeft(int c) => Columns > 1 ? c * GroupWidths[0] : 0f;
+            public float ColumnWidth(int c) => Columns > 1
+                ? (c == Columns - 1 && NetCol == c ? GroupWidths[3] : GroupWidths[0])
+                : Width;
+            public void SetPosCell(int pos, int col, int row)
+            {
+                if (pos == 0) { PosCol0 = col; PosRow0 = row; }
+                else if (pos == 1) { PosCol1 = col; PosRow1 = row; }
+                else if (pos == 2) { PosCol2 = col; PosRow2 = row; }
+                else if (pos == 3) { PosCol3 = col; PosRow3 = row; }
+                else { PosCol4 = col; PosRow4 = row; }
+            }
+            public void AddColRows(int col, int rows)
+            {
+                if (col == 0) ColRows0 += rows;
+                else if (col == 1) ColRows1 += rows;
+                else if (col == 2) ColRows2 += rows;
+                else ColRows3 += rows;
+            }
         }
 
-        // Visible stacked ROW POSITIONS (not metrics — slot 3 counts twice in 两者 mode):
-        // the vertical mode's strip-order base and the horizontal grid's packing count.
-        private static int PackedStackedCount(int mask, GpuTaskbarContent gpuContent)
+        // A vertical slot's rect (DIPs): 网络's two-row block, or the cell its FIRST packed
+        // position occupies. False = no cell under this layout (sampling off) — in the grid
+        // form an EMPTY cell (a ragged column's trailing hole) is a false too.
+        private static bool VerticalSlotRect(OverlayLayout l, int slot,
+            out float left, out float top, out float right, out float bottom)
         {
-            int n = (mask & 1) + ((mask >> 1) & 1) + ((mask >> 2) & 1);
-            if ((mask & (1 << 3)) != 0)
-                n += gpuContent == GpuTaskbarContent.Both ? 2 : 1;   // 使用率/温度: one row either way
-            return n;
-        }
-
-        // Height of one vertical ROW (DIPs): a single-line strip, or a two-line metric block.
-        private static float VerticalRowH(bool twoLine) => twoLine ? STRIP_BLOCK_H : STRIP_H;
-
-        // Rows in the vertical stack: one per visible stacked metric, two for 网络 (↑ over ↓).
-        // The stack's height is just rows × VerticalRowH — no unit arithmetic to keep in sync.
-        private static int VerticalRows(int packed, bool net) => packed + (net ? 2 : 0);
-
-        // A vertical slot's rect in the stack (top/height in DIPs, x always spans the strip).
-        // False = the slot has no strip under this layout (sampling off).
-        private static bool VerticalSlotRect(OverlayLayout l, int slot, out float top, out float height)
-        {
-            top = 0f;
-            height = 0f;
-            float rowH = VerticalRowH(l.TwoLine);
+            left = top = right = bottom = 0f;
             if (slot == 4)
             {
-                if (l.Left3 < 0f) return false;
-                top = PackedStackedCount(l.SlotMask, l.GpuContent) * rowH;
-                height = 2f * rowH;                // both ↑/↓ rows — one hit slot
+                if (!l.NetVisible) return false;
+                left = l.ColumnLeft(l.NetCol);
+                right = left + l.ColumnWidth(l.NetCol);
+                top = l.NetRow * l.RowH;
+                bottom = top + 2f * l.RowH;      // ↑/↓ pair — one hit slot
                 return true;
             }
-            int pos = l.PositionOf(slot);
-            if (pos < 0) return false;
-            top = pos * rowH;
-            height = rowH;
+            return VerticalPosRect(l, l.PositionOf(slot), out left, out top, out right, out bottom);
+        }
+
+        // One packed stacked position's cell — the position twin of VerticalSlotRect's
+        // stacked branch. Every row is one RowH tall (one line, or one two-line block).
+        private static bool VerticalPosRect(OverlayLayout l, int pos,
+            out float left, out float top, out float right, out float bottom)
+        {
+            left = top = right = bottom = 0f;
+            if (pos < 0 || pos > 4 || l.SlotAt(pos) < 0) return false;
+            int col = l.PosCol(pos);
+            left = l.ColumnLeft(col);
+            right = left + l.ColumnWidth(col);
+            top = l.PosRow(pos) * l.RowH;
+            bottom = top + l.RowH;
             return true;
         }
 
         // Derive all geometry from the sampling mask (bit per slot, SystemSampler.Mask*)
-        // and the GPU 任务栏显示 content (slot 3 packs one or two rows) — and — in VERTICAL
-        // mode — the strip width the window ends up with, because that width decides the
-        // strip FORM (one line vs two) and with it the whole stack height.
-        // ComputeTargetSize is the one caller that has to solve that circularity (band clamp
-        // first, layout second); pass 0 for "not measured yet" → the natural cell width.
-        private static OverlayLayout ComputeLayout(int mask, GpuTaskbarContent gpuContent, bool vertical, float stripWidthDip)
+        // and the GPU 任务栏显示 content (slot 3 packs one or two rows). HORIZONTAL: fixed
+        // 70/84-DIP cells, the width follows. VERTICAL: the available THICKNESS decides the
+        // form and the column count, so the window's size and the layout are mutually
+        // dependent — ComputeTargetSize is the one caller that has to solve that circularity
+        // (band clamp first, layout second); pass 0 for "not measured yet" → natural width.
+        private static OverlayLayout ComputeLayout(int mask, GpuTaskbarContent gpuContent, bool vertical, float availableWidthDip)
         {
             var l = new OverlayLayout
             {
                 Left0 = -1f, Left1 = -1f, Left2 = -1f, Left3 = -1f,
                 Pos0 = -1, Pos1 = -1, Pos2 = -1, Pos3 = -1, Pos4 = -1,
+                PosCol0 = -1, PosCol1 = -1, PosCol2 = -1, PosCol3 = -1, PosCol4 = -1,
+                PosRow0 = -1, PosRow1 = -1, PosRow2 = -1, PosRow3 = -1, PosRow4 = -1,
+                NetCol = -1,
                 TempPos = -1,
                 SlotMask = mask,
                 GpuContent = gpuContent,
@@ -201,23 +248,9 @@ namespace task_monitor
                 }
                 else { SetPos(pos, slot); pos++; }
             }
-            bool net = (mask & (1 << 4)) != 0;      // 网络 column / strips
+            bool net = (mask & (1 << 4)) != 0;
             if (vertical)
-            {
-                // One full-width strip per packed ROW; 网络 takes two (↑ over ↓).
-                // Left* degrade to visibility sentinels — x plays no role vertically.
-                l.Left0 = pos >= 1 ? 0f : -1f;
-                l.Left1 = pos >= 3 ? 0f : -1f;
-                l.Left2 = pos >= 5 ? 0f : -1f;
-                l.Left3 = net ? 0f : -1f;
-                float cw = pos > 0 ? GroupWidths[0] : 0f;
-                if (net) cw = Math.Max(cw, GroupWidths[3]);
-                l.Width = cw <= 0f ? 0f : stripWidthDip > 0f ? stripWidthDip : cw;
-                l.TwoLine = l.Width < STRIP_TWO_LINE_MIN_W;
-                l.Height = VerticalRows(pos, net) * VerticalRowH(l.TwoLine);
-                l.Vertical = true;
-                return l;
-            }
+                return ComputeVerticalLayout(l, pos, net, availableWidthDip);
             bool g0 = pos >= 1;                     // at least one stacked metric
             bool g1 = pos >= 3;                     // enough to spill into the second cell
             bool g2 = pos >= 5;                     // the 5th stacked row (GPU 温度 in 两者)
@@ -230,11 +263,96 @@ namespace task_monitor
             return l;
         }
 
+        // The vertical branch: ONE strip column when the bar is thin, a width-adaptive GRID
+        // when it is thick. `packed` = stacked row count, `net` = 网络 on. Rows keep their
+        // sampling order and 网络 is always the flow's last item — which is what makes the
+        // "how many columns fit" arithmetic exact: every column is a 70-DIP cell except the
+        // last, which is 84 when it carries 网络.
+        private static OverlayLayout ComputeVerticalLayout(OverlayLayout l, int packed, bool net, float availableWidthDip)
+        {
+            l.Vertical = true;
+            float natural = packed > 0 ? GroupWidths[0] : 0f;
+            if (net) natural = Math.Max(natural, GroupWidths[3]);
+            if (natural <= 0f) return l;                       // every metric off — a 0×0 stub
+
+            float avail = availableWidthDip > 0f ? availableWidthDip : natural;   // 0 = not measured yet
+            int items = packed + (net ? 1 : 0);
+
+            int maxCols;
+            if (net)
+                maxCols = avail + LAYOUT_FIT_EPSILON >= GroupWidths[0] + GroupWidths[3]
+                    ? 1 + (int)((avail - GroupWidths[3]) / GroupWidths[0] + LAYOUT_FIT_EPSILON)
+                    : 1;
+            else
+                maxCols = (int)(avail / GroupWidths[0] + LAYOUT_FIT_EPSILON);
+            maxCols = Math.Min(Math.Min(Math.Max(maxCols, 1), items), 4);
+
+            if (maxCols == 1)
+            {
+                // One strip column, clamped into the band. Below the one-line pair's width it
+                // becomes the padded two-line block form; at 70 DIP (stacked metrics only) the
+                // one-line pair already fits, so the threshold is capped by the natural cell.
+                l.Columns = 1;
+                l.Width = Math.Min(natural, avail);
+                l.TwoLine = l.Width < Math.Min(STRIP_TWO_LINE_MIN_W, natural);
+                l.RowH = l.TwoLine ? STRIP_BLOCK_H : STRIP_H;
+                int rows = packed + (net ? 2 : 0);
+                l.ColRows0 = rows;
+                for (int p = 0; p < packed; p++) l.SetPosCell(p, 0, p);
+                if (net) { l.NetCol = 0; l.NetRow = packed; }
+                l.Height = rows * l.RowH;
+                return l;
+            }
+
+            // Grid: flow the packed rows then 网络 into `maxCols` columns, filling each up to
+            // the even share (ceil rows) and only starting a new one while the items left can
+            // still populate the remaining columns — so 7 rows over 2 columns is 4+3, never
+            // 7+0. The FIRST column takes the surplus (a table's ragged edge is last). The
+            // flow can end up using fewer columns than the candidate (e.g. 4 rows over 4
+            // columns: one column must hold the 2-row 网络 block), which is harmless — the
+            // window is sized from the columns actually used. A grid row is GRID_ROW_H (the
+            // roomy pitch), NOT the compact STRIP_H.
+            l.RowH = GRID_ROW_H;
+            int totalRows = packed + (net ? 2 : 0);
+            int target = (totalRows + maxCols - 1) / maxCols;
+            int col = 0, row = 0, item = 0;
+            for (int p = 0; p < packed; p++, item++)
+            {
+                if (row > 0 && col + 1 < maxCols
+                    && (row + 1 > target || items - item - 1 < maxCols - 1 - col))
+                { col++; row = 0; }
+                l.SetPosCell(p, col, row);
+                l.AddColRows(col, 1);
+                row++;
+            }
+            if (net)
+            {
+                if (row > 0 && col + 1 < maxCols
+                    && (row + 2 > target || items - item - 1 < maxCols - 1 - col))
+                { col++; row = 0; }
+                l.NetCol = col;
+                l.NetRow = row;
+                l.AddColRows(col, 2);
+                row += 2;
+            }
+            l.Columns = col + 1;
+            l.Width = l.Columns * GroupWidths[0] + (net ? GroupWidths[3] - GroupWidths[0] : 0f);
+            int maxRows = Math.Max(Math.Max(l.ColRows0, l.ColRows1), Math.Max(l.ColRows2, l.ColRows3));
+            l.Height = maxRows * l.RowH;
+            return l;
+        }
+
+        // The layout's form as the log states it — the single thing to check when the same
+        // taskbar shows the wrong shape after a width/DPI change.
+        private static string VerticalFormName(OverlayLayout l)
+            => l.Columns > 1 ? $"{l.Columns} 列网格"
+                : l.TwoLine ? "双行条带"
+                : "单行条带";
+
         // Logical rect of a hit slot under a layout, or false when the slot is hidden.
         // Horizontal: a stacked slot's row comes from its PACKED position (positions 0/2/4 =
         // the top row of their cell, 1/3 = the bottom row); slot 4 (网络) spans the whole
-        // height. Vertical: the stack's running order (VerticalSlotRect) — a stacked slot is
-        // its packed strip (one line, or the two-line block), slot 4 the two-strip ↑/↓ block.
+        // height. Vertical: the column grid's cell (VerticalSlotRect) — 网络's two-row block.
         // In 两者 mode slot 3 owns TWO positions; this returns its FIRST (the utilization
         // row — the temperature row's rect comes from TryPosRect with layout.TempPos).
         private static bool TrySlotRect(OverlayLayout l, float top, float mid, float bottom, int slot, out D2D_RECT_F r)
@@ -242,8 +360,9 @@ namespace task_monitor
             r = default;
             if (l.Vertical)
             {
-                if (!VerticalSlotRect(l, slot, out float vtop, out float vheight)) return false;
-                r = new D2D_RECT_F { left = 0f, top = vtop, right = l.Width, bottom = vtop + vheight };
+                if (!VerticalSlotRect(l, slot, out float left, out float vtop, out float right, out float vbottom))
+                    return false;
+                r = new D2D_RECT_F { left = left, top = vtop, right = right, bottom = vbottom };
                 return true;
             }
             if (slot == 4)
@@ -264,8 +383,9 @@ namespace task_monitor
             r = default;
             if (l.Vertical)
             {
-                if (!VerticalPosRect(l, pos, out float vtop, out float vheight)) return false;
-                r = new D2D_RECT_F { left = 0f, top = vtop, right = l.Width, bottom = vtop + vheight };
+                if (!VerticalPosRect(l, pos, out float left, out float vtop, out float right, out float vbottom))
+                    return false;
+                r = new D2D_RECT_F { left = left, top = vtop, right = right, bottom = vbottom };
                 return true;
             }
             if (pos < 0 || pos > 4 || l.SlotAt(pos) < 0) return false;
@@ -275,19 +395,6 @@ namespace task_monitor
             r = (pos % 2 == 0)
                 ? new D2D_RECT_F { left = gx0, top = top, right = gx1, bottom = mid }
                 : new D2D_RECT_F { left = gx0, top = mid, right = gx1, bottom = bottom };
-            return true;
-        }
-
-        // VerticalPosRect: one packed stacked position's strip rect (top/height in DIPs,
-        // x spans the strip) — the position twin of VerticalSlotRect's stacked branch.
-        private static bool VerticalPosRect(OverlayLayout l, int pos, out float top, out float height)
-        {
-            top = 0f;
-            height = 0f;
-            if (pos < 0 || pos > 4 || l.SlotAt(pos) < 0) return false;
-            float rowH = VerticalRowH(l.TwoLine);
-            top = pos * rowH;
-            height = rowH;                    // one strip / one two-line BLOCK
             return true;
         }
 
@@ -729,55 +836,50 @@ namespace task_monitor
             return true;
         }
 
-        // Taskbar-thread mirrors of RenderState.Vertical / the overlay's width for the
-        // UI-thread layout accessors below (they can't touch the HWND-bound state). The
-        // WIDTH is part of it because in vertical mode it picks the strip form (one line vs
-        // two) and the stack height, which the accessors cannot derive from the mask alone.
+        // Taskbar-thread mirrors of RenderState.Vertical / AvailWidthDip for the UI-thread
+        // layout accessors below (they can't touch the HWND-bound state). The WIDTH is part
+        // of it because in vertical mode it picks the form — one line vs two, or how many
+        // columns — and with it the height, none of which the accessors can derive from the
+        // mask alone. It is the BAND's thickness, never the rounded window width, so the
+        // accessors rebuild exactly the layout Draw does (see RenderState.AvailWidthDip).
         // Both are written together by PublishLayout — Start, every resize, an orientation
         // flip; read on the WPF UI thread.
         private volatile bool _layoutVertical;
-        private volatile float _layoutStripW;
+        private volatile float _layoutAvailWidth;
 
-        // Mirror the taskbar thread's geometry for the accessors below (width → DIPs).
-        private void PublishLayout(bool vertical, int physicalWidth, uint dpi)
+        // Mirror the taskbar thread's layout basis for the accessors below.
+        private void PublishLayout(bool vertical, float availWidthDip)
         {
-            _layoutStripW = physicalWidth > 0 && dpi > 0
-                ? physicalWidth * (float)USER_DEFAULT_SCREEN_DPI / dpi
-                : 0f;
+            _layoutAvailWidth = availWidthDip;
             _layoutVertical = vertical;
         }
 
-        // Current overlay geometry (layout follows the sampling mask + GPU 任务栏显示 —
-        // hidden slots are gone, not blank). Read by DetailWindow to centre its popup
-        // over a column.
+        // Current layout's logical width (hidden slots are gone, not blank) — read by
+        // DetailWindow to centre its popup over a column.
         internal float LogicalWidth
-        {
-            get
-            {
-                if (_layoutVertical) return _layoutStripW;   // the strips span the window
-                return ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, false, 0f).Width;
-            }
-        }
+            => ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, _layoutVertical, _layoutAvailWidth).Width;
 
         // Total layout height in DIPs — meaningful only in VERTICAL mode (horizontal
         // layouts take the band's height; the layout owns none). DetailWindow reads it
         // for the centre ratio when the taskbar is docked left/right.
         internal float LogicalHeight => _layoutVertical
-            ? ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, true, _layoutStripW).Height
+            ? ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, true, _layoutAvailWidth).Height
             : 0f;
 
         // X centre of a hit slot — used to centre the detail popup over its column. A
         // stacked slot's centre is its PACKED cell's centre (the cell it shifted into;
         // slot 3 centres on its FIRST row's cell — the utilization row in 两者 mode);
         // slot 4 is the 网络 group's. A hidden slot has no centre (0) — it can never be
-        // clicked or pinned into existence. Vertical mode: the strip's horizontal centre.
+        // clicked or pinned into existence. Vertical mode: the cell's column centre (the
+        // width-adaptive grid can put the slots in different columns).
         internal float ColumnCenter(int slot)
         {
             if (_layoutVertical)
             {
-                var lv = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, true, _layoutStripW);
-                bool vis = slot == 4 ? lv.Left3 >= 0f : lv.PositionOf(slot) >= 0;
-                return vis ? lv.Width / 2f : 0f;
+                var lv = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, true, _layoutAvailWidth);
+                return VerticalSlotRect(lv, slot, out float left, out _, out float right, out _)
+                    ? (left + right) / 2f
+                    : 0f;
             }
             var l = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, false, 0f);
             if (slot == 4)
@@ -787,13 +889,15 @@ namespace task_monitor
         }
 
         // Y centre of a hit slot — VERTICAL mode only (0 otherwise, unused there): the
-        // strip's (or strip block's) vertical centre; slot 4 (网络) centres over its
-        // two-strip ↑/↓ block. Same hidden-slot-returns-0 contract as ColumnCenter.
+        // cell's vertical centre; slot 4 (网络) centres over its two-row ↑/↓ block. Same
+        // hidden-slot-returns-0 contract as ColumnCenter.
         internal float ColumnCenterY(int slot)
         {
             if (!_layoutVertical) return 0f;
-            var l = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, true, _layoutStripW);
-            return VerticalSlotRect(l, slot, out float top, out float height) ? top + height / 2f : 0f;
+            var l = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, true, _layoutAvailWidth);
+            return VerticalSlotRect(l, slot, out _, out float top, out _, out float bottom)
+                ? (top + bottom) / 2f
+                : 0f;
         }
 
         /// <summary>
@@ -929,7 +1033,7 @@ namespace task_monitor
             // mistake is not cosmetic: the horizontal grid is ~200 DIP wide, so in a
             // 48-DIP column it covers the whole taskbar AND eats its clicks (the
             // 2026-09-30 report: 任务栏整个点不了了). A side taskbar transposes the overlay
-            // into the strips layout. The FLOATING form has no taskbar surface to transpose
+            // into the column grid. The FLOATING form has no taskbar surface to transpose
             // into, so it is always the horizontal grid.
             bool vertical = !floating && (taskbarRect.right - taskbarRect.left) < (taskbarRect.bottom - taskbarRect.top);
 
@@ -942,14 +1046,17 @@ namespace task_monitor
             // (TaskbarBandCross), and the classical family carves the band itself.
             TaskbarBand(taskbar, taskbarRect, out int taskbarBandH, out int taskbarBandY);
             int taskbarBandW = TaskbarBandCross(taskbar, taskbarRect, out int taskbarBandX);
+            int verticalBandW = vertical ? (classical ? rcMin.right - rcMin.left : taskbarBandW) : 0;
+            // The width the vertical layout is built against (band minus the breathing margin);
+            // every later Draw/HitTest rebuilds the SAME layout from this, never from the
+            // rounded window width (see RenderState.AvailWidthDip).
+            float verticalAvail = vertical ? VerticalAvailWidth(verticalBandW, dpi) : 0f;
             ComputeTargetSize(_samplingEnabledMask, _gpuTaskbarContent, vertical, dpi,
-                vertical ? (classical ? rcMin.right - rcMin.left : taskbarBandW) : 0,
-                classical ? rcBar.bottom - rcBar.top : taskbarBandH,
+                verticalBandW, classical ? rcBar.bottom - rcBar.top : taskbarBandH,
                 out int physicalWidth, out int physicalHeight);
-            var startupLayout = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, vertical,
-                physicalWidth * (float)USER_DEFAULT_SCREEN_DPI / dpi);
+            var startupLayout = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, vertical, verticalAvail);
             Logger.Info($"任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical}"
-                + (vertical ? $"（任务栏 {taskbarRect.right - taskbarRect.left}x{taskbarRect.bottom - taskbarRect.top}px，条带宽 {taskbarBandW}px，{(startupLayout.TwoLine ? "双行" : "单行")}条带）" : "")
+                + (vertical ? $"（任务栏 {taskbarRect.right - taskbarRect.left}x{taskbarRect.bottom - taskbarRect.top}px，条带宽 {taskbarBandW}px，{VerticalFormName(startupLayout)}）" : "")
                 + $" DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms{AnchorDiag()}");
             // DXGI can't create 0-sized buffers — a 1px stub draws nothing (Draw skips
             // an empty layout) and resizes out the moment a metric comes back.
@@ -958,7 +1065,7 @@ namespace task_monitor
             float logicalHeight = physicalHeight * (float)USER_DEFAULT_SCREEN_DPI / dpi;
             // Mirror for the UI-thread layout accessors (DetailWindow's popup placement) —
             // the taskbar thread re-publishes it on every later resize/flip.
-            PublishLayout(vertical, physicalWidth, dpi);
+            PublishLayout(vertical, verticalAvail);
 
             // Start's phase markers for the native-crash tracer: the name only. The per-step
             // MILLISECOND timings that used to live here were dropped (the numbers they produced
@@ -1004,7 +1111,7 @@ namespace task_monitor
                 if (vertical)
                 {
                     // Side taskbar: the anchor runs along the taskbar's own axis (tray end /
-                    // top corner), the strip stack is centred across the band.
+                    // top corner), the column grid is centred across the band.
                     (yScreen, yRelative, xRelative) = CalcPositionVertical(taskbar, taskbarRect,
                         taskbarBandW, taskbarBandX, physicalWidth, physicalHeight, dpi, _onLeft, _snapToStart);
                     xScreen = taskbarRect.left + xRelative;
@@ -1108,6 +1215,7 @@ namespace task_monitor
                 LastMinLength = -1,          // no band measurement yet — the first reposition always applies
                 PhysicalWidth = physicalWidth,
                 PhysicalHeight = physicalHeight,
+                AvailWidthDip = verticalAvail,
                 LogicalHeight = logicalHeight,
                 Dpi = dpi,
                 Hovered = -1,
@@ -1380,7 +1488,7 @@ namespace task_monitor
             if (s.DeviceLost) return;
 
             var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical,
-                s.PhysicalWidth * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi);
+                s.AvailWidthDip);
             if (layout.Width <= 0f) return;   // every metric off — the overlay is a stub
 
             var ctx = s.D2dContext;
@@ -1562,24 +1670,32 @@ namespace task_monitor
             }
         }
 
-        // The transposed layout for a SIDE-docked taskbar (either family): full-width strips —
-        // one per visible stacked metric, two for 网络 (↑ over ↓) — with hairlines between
-        // them. Text stays horizontal (TrafficMonitor's vertical mode). A NARROW side taskbar
-        // (~48 DIP: the Win11 26H2 left bar) cannot hold the single-line "label … value" pair,
-        // so layout.TwoLine turns every metric into a padded label-over-value BLOCK
-        // (DrawStripLines) — the same stack, one STRIP_BLOCK_H-tall block per metric. The 网络 block
-        // is two such blocks there (↑ label over its rate, then ↓), which keeps the long rates
-        // inside the strip: its rates are drawn in the compact form
-        // (NetRateFormatter.FormatCompact).
+        // The vertical layout for a SIDE-docked taskbar (either family): a COLUMN GRID — one
+        // row per visible stacked metric (two for 网络: ↑ over ↓), flowed into as many 70/84-DIP
+        // columns as the bar's thickness holds (ComputeVerticalLayout). Text stays horizontal
+        // (TrafficMonitor's vertical mode). A NARROW bar (one ~48-DIP column: the stock 26H2
+        // left taskbar) cannot hold the single-line "label … value" pair, so layout.TwoLine
+        // turns every metric into a padded label-over-value BLOCK (DrawStripLines) — one
+        // STRIP_BLOCK_H-tall block per metric, 网络's two blocks carrying the compact rate form
+        // (NetRateFormatter.FormatCompact). A GRID column is only 70/84 DIP wide, so its rows
+        // use the single-line form (label left, value right — the horizontal cells' proven
+        // look), not the two-line one.
         private static void DrawVertical(RenderState s, OverlayLayout layout)
         {
             var ctx = s.D2dContext;
 
             // The classical opaque backdrop (the 残影 cure — see DrawHorizontal). Win11 keeps
-            // true transparency (its taskbar paints under us) in this orientation too.
+            // true transparency (its taskbar paints under us) in this orientation too. Paint
+            // the whole WINDOW, not layout.Width: the ceil-rounded window is up to a pixel
+            // wider at fractional DPI scaling.
             if (!s.Floating && s.Classical && s.CardBrush != null)
                 ctx.FillRectangle(
-                    new D2D_RECT_F { left = 0f, top = 0f, right = layout.Width, bottom = s.LogicalHeight },
+                    new D2D_RECT_F
+                    {
+                        left = 0f, top = 0f,
+                        right = s.PhysicalWidth * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi,
+                        bottom = s.LogicalHeight,
+                    },
                     s.CardBrush);
 
             for (int i = 0; i < SlotCount; i++)
@@ -1595,7 +1711,8 @@ namespace task_monitor
                     brush);
 
                 // 任务栏显示 两者: slot 3's second row (GPU 温度) highlights with it — same
-                // one-item contract as DrawHorizontal.
+                // one-item contract as DrawHorizontal. In the grid form the two rows can sit in
+                // different columns; each cell is filled on its own.
                 if (i == 3 && layout.TempPos >= 0 &&
                     TryPosRect(layout, 0f, 0f, 0f, layout.TempPos, out var gpuTempRect))
                     ctx.FillRoundedRectangle(
@@ -1603,16 +1720,27 @@ namespace task_monitor
                         brush);
             }
 
-            // Hairlines on every row boundary (the transposed mid line; 网络's ↑/↓ split
-            // included). A row IS the unit here — a single-line strip, or a whole two-line
-            // block — so no line ever cuts a metric's label off its own value.
+            // Hairlines on every row boundary (网络's ↑/↓ split included) and between columns.
+            // A row IS the unit here — a single-line strip, or a whole two-line block — so no
+            // line ever cuts a metric's label off its own value. Columns can end at different
+            // heights; the column separator runs the full grid height, a column's last row
+            // simply has no line under it.
             const float lineHalf = 0.5f;
-            int rows = VerticalRows(PackedStackedCount(layout.SlotMask, layout.GpuContent), layout.Left3 >= 0f);
-            float rowH = VerticalRowH(layout.TwoLine);
-            for (int i = 1; i < rows; i++)
+            for (int c = 0; c < layout.Columns; c++)
             {
-                float y = i * rowH;
-                ctx.FillRectangle(new D2D_RECT_F { left = 0f, top = y - lineHalf, right = layout.Width, bottom = y + lineHalf }, s.SeparatorBrush);
+                float x0 = layout.ColumnLeft(c);
+                float x1 = x0 + layout.ColumnWidth(c);
+                if (c > 0)
+                    ctx.FillRectangle(
+                        new D2D_RECT_F { left = x0 - lineHalf, top = 0f, right = x0 + lineHalf, bottom = layout.Height },
+                        s.SeparatorBrush);
+                for (int r = 1; r < layout.ColRows(c); r++)
+                {
+                    float y = r * layout.RowH;
+                    ctx.FillRectangle(
+                        new D2D_RECT_F { left = x0, top = y - lineHalf, right = x1, bottom = y + lineHalf },
+                        s.SeparatorBrush);
+                }
             }
 
             if (!layout.TwoLine)
@@ -1626,12 +1754,12 @@ namespace task_monitor
                 if (layout.TempPos >= 0)
                     DrawPosRow(ctx, s, layout, 0f, 0f, 0f, layout.TempPos, "GPU", gpuTempText);
 
-                // 网络's two strips: ↑/↓ flush-left labels, rates flush-right — the same
-                // split as the horizontal column, two strips instead of two half-rows.
+                // 网络's two rows: ↑/↓ flush-left labels, rates flush-right — the same split as
+                // the horizontal column, stacked instead of side by side.
                 if (TrySlotRect(layout, 0f, 0f, 0f, 4, out var netRect))
                 {
                     const float netInset = 5f;
-                    float midY = netRect.top + STRIP_H;
+                    float midY = netRect.top + layout.RowH;
                     var netUp   = new D2D_RECT_F { left = netRect.left + netInset, top = netRect.top, right = netRect.right - netInset, bottom = midY };
                     var netDown = new D2D_RECT_F { left = netRect.left + netInset, top = midY, right = netRect.right - netInset, bottom = netRect.bottom };
                     ctx.DrawText("↑", s.LabelFormat, netUp, s.LabelBrush);
@@ -2052,6 +2180,7 @@ namespace task_monitor
             GetBandSize(s, out int bandW, out int bandH);
             if (!s.Vertical && bandH <= 0) return;   // the band isn't laid out yet
             if (s.Vertical && bandW <= 0) return;
+            if (s.Vertical) s.AvailWidthDip = VerticalAvailWidth(bandW, newDpi);
             ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical, newDpi, bandW, bandH,
                 out int newPhysicalWidth, out int newPhysicalHeight);
             Logger.Info($"DPI 变化 {s.Dpi}→{newDpi}——覆盖层重设 {newPhysicalWidth}x{newPhysicalHeight}px");
@@ -2097,6 +2226,7 @@ namespace task_monitor
         private static void ResizeForLayout(IntPtr hwnd, RenderState s)
         {
             GetBandSize(s, out int bandW, out int bandH);
+            if (s.Vertical) s.AvailWidthDip = VerticalAvailWidth(bandW, s.Dpi);
             ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical, s.Dpi, bandW, bandH,
                 out int newWidth, out int newHeight);
             if (newWidth == s.PhysicalWidth && newHeight == s.PhysicalHeight) return;
@@ -2215,7 +2345,7 @@ namespace task_monitor
         // below us (ClusterTop), which is the same shape as CalcPosition's "no room left of
         // Start → fall back to the tray side"; the fallback here is the tray end. A
         // side taskbar's Widgets button does not exist, so the 160px reserve has no analogue.
-        // Returns SCREEN y and the parent-relative (y, x); x centres the strip stack in the
+        // Returns SCREEN y and the parent-relative (y, x); x centres the column grid in the
         // band, whose left edge is already bandX inside the taskbar window.
         private static (int screenY, int relativeY, int relativeX) CalcPositionVertical(
             IntPtr taskbar, WindowInterop.RECT taskbarRect, int bandW, int bandX,
@@ -2224,7 +2354,7 @@ namespace task_monitor
             int bandTop = taskbarRect.top;
             int bandH = taskbarRect.bottom - taskbarRect.top;
             int spacing = DpiScaleInt(2, dpi);
-            int xrel = bandX + Math.Max(0, (bandW - windowW) / 2);   // the stack centres in the band
+            int xrel = bandX + Math.Max(0, (bandW - windowW) / 2);   // the grid centres in the band
 
             if (onLeft && IsTaskbarCenterAligned())
             {
@@ -3044,15 +3174,18 @@ namespace task_monitor
             if (s.Vertical)
             {
                 // Side taskbar: the anchor runs along the taskbar's axis (tray end / top
-                // corner) and the CLAMPED strip width owns the size — a wider/narrower bar
-                // (DPI or 缩放 change) also flips the strip form, so re-derive the target
-                // size every tick and resize on a real change. Same resize dance as
-                // HandleDpiChange, DPI unchanged.
+                // corner) and the bar's THICKNESS owns the size — widening it (26H2's
+                // 显示标签 vertical taskbar, a DPI/缩放 change) can add a COLUMN, so re-derive
+                // the target size every tick and resize on a real change. Same resize dance
+                // as HandleDpiChange, DPI unchanged.
                 int bandW = TaskbarBandCross(s.TaskbarHwnd, taskbarRect, out int bandX);
+                s.AvailWidthDip = VerticalAvailWidth(bandW, s.Dpi);
                 ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, true, s.Dpi, bandW, 0, out int wantW, out int wantH);
                 if (wantW > 0 && wantH > 0 && (wantW != s.PhysicalWidth || wantH != s.PhysicalHeight))
                 {
-                    Logger.Info($"竖直任务栏条带变化 {s.PhysicalWidth}x{s.PhysicalHeight}→{wantW}x{wantH}px——覆盖层跟随重设");
+                    var wantLayout = ComputeLayout(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, true,
+                        s.AvailWidthDip);
+                    Logger.Info($"竖直任务栏条带变化 {s.PhysicalWidth}x{s.PhysicalHeight}→{wantW}x{wantH}px（{VerticalFormName(wantLayout)}）——覆盖层跟随重设");
                     ResizeBackBuffer(s, wantW, wantH, s.Dpi);
                     s.PhysicalWidth = wantW;
                     s.PhysicalHeight = wantH;
@@ -3064,7 +3197,7 @@ namespace task_monitor
 
                 var (_, yRel, xRelV) = CalcPositionVertical(s.TaskbarHwnd, taskbarRect, bandW, bandX,
                     s.PhysicalWidth, s.PhysicalHeight, s.Dpi, s.Owner._onLeft, s.Owner._snapToStart);
-                s.Owner.PublishLayout(true, s.PhysicalWidth, s.Dpi);
+                s.Owner.PublishLayout(true, s.AvailWidthDip);
                 if (!force && xRelV == s.LastPlaceX && yRel == s.LastPlaceY) return;
                 Logger.Debug($"重定位（竖直锚点{(force ? "，强制" : "")}）：({s.LastPlaceX},{s.LastPlaceY})→({xRelV},{yRel})，尺寸={s.PhysicalWidth}x{s.PhysicalHeight}");
                 s.LastPlaceX = xRelV;
@@ -3104,7 +3237,7 @@ namespace task_monitor
             int taskbarWidth = taskbarRect.right - taskbarRect.left;
             var (_, xRel) = CalcPosition(s.TaskbarHwnd, taskbarRect, taskbarWidth, s.PhysicalWidth, s.Dpi,
                 s.Owner._onLeft, s.Owner._snapToStart);
-            s.Owner.PublishLayout(false, s.PhysicalWidth, s.Dpi);
+            s.Owner.PublishLayout(false, 0f);
             if (!force && xRel == s.LastPlaceX && bandY == s.LastPlaceY) return;
             Logger.Debug($"重定位（Win11 锚点{(force ? "，强制" : "")}）：xRel {s.LastPlaceX}→{xRel}，y {s.LastPlaceY}→{bandY}，尺寸={s.PhysicalWidth}x{s.PhysicalHeight}");
             s.LastPlaceX = xRel;
@@ -3163,7 +3296,7 @@ namespace task_monitor
 
         // The SIDE-docked mirror of TaskbarBand: the width of the strip between the work
         // area's left edge and the monitor's left edge, intersected with the taskbar's rect;
-        // xOffset is that strip's left edge relative to the window (the strip stack centres
+        // xOffset is that strip's left edge relative to the window (the column grid is centred
         // inside it). Same reasoning and the same "only trust it when it is a real, smaller
         // strip" guard as the horizontal one — a right-docked (or oddly shaped) taskbar comes
         // out empty or oversized and simply gets the window's own width, offset 0.
@@ -3280,6 +3413,11 @@ namespace task_monitor
             // explorer's band/ReBar deadlocks a direct GetWindowRect (CaptureStackOf).
             if (!TryGetWindowRectGuarded(s.MinHwnd, 300, out var rcMin)) return;
             if (!TryGetWindowRectGuarded(s.BarHwnd, 300, out var rcBar)) return;
+
+            // Keep the UI-thread layout mirror current for this family too (the Win11 path
+            // publishes in RepositionOverlay). The value is the one the window was SIZED for —
+            // ClassicalReposition never resizes, so the live band is deliberately not adopted.
+            s.Owner.PublishLayout(s.Vertical, s.AvailWidthDip);
 
             if (!s.Vertical)
             {
@@ -3584,9 +3722,9 @@ namespace task_monitor
 
         // A taskbar that changed orientation (dragged to another screen edge, or — Win11
         // 26H2 — switched between 任务栏位置 底部/左侧/右侧) flips the layout (horizontal grid
-        // ⟷ vertical strips): undo the old-axis dock, resize the buffers to the transposed
-        // layout and re-dock. Watched by the classical family on the 100ms TIMER_ID_POS and
-        // by both on the tick's RepositionOverlay.
+        // ⟷ vertical column grid): undo the old-axis dock, resize the buffers to the
+        // transposed layout and re-dock. Watched by the classical family on the 100ms
+        // TIMER_ID_POS and by both on the tick's RepositionOverlay.
         private static void ReconfigureOrientation(IntPtr hwnd, RenderState s)
         {
             RestoreMinWindow(s);            // undo along the OLD axis
@@ -3595,6 +3733,7 @@ namespace task_monitor
             Logger.Info($"任务栏方向翻转——重排覆盖层为{(s.Vertical ? "竖直条带" : "水平网格")}");
 
             GetBandSize(s, out int bandW, out int bandH);
+            s.AvailWidthDip = s.Vertical ? VerticalAvailWidth(bandW, s.Dpi) : 0f;
             ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical, s.Dpi, bandW, bandH,
                 out int newWidth, out int newHeight);
             if (newWidth > 0 && newHeight > 0)
@@ -3611,7 +3750,7 @@ namespace task_monitor
 
         // The band measurement feeding ComputeTargetSize: horizontal modes need the parent
         // band's height (Win11: the taskbar itself; classical: the ReBar); vertical mode
-        // needs the strip column's WIDTH — the classical task-buttons toolbar's, or (there
+        // needs the band's cross-axis WIDTH — the classical task-buttons toolbar's, or (there
         // is no band to shrink on the Win11 family) the taskbar's own reserved strip.
         private static void GetBandSize(RenderState s, out int bandW, out int bandH)
         {
@@ -3637,13 +3776,25 @@ namespace task_monitor
             }
         }
 
+        // The width the vertical layout is built against: the band's DIP thickness minus the
+        // 2-DIP breathing margin, or 0 when the band is not measured yet (→ the layout's
+        // natural width). It is stored on RenderState (AvailWidthDip) and reused by every
+        // Draw/HitTest and by the UI-thread accessors — deriving the layout from the ROUNDED
+        // window width instead makes the form flip at a boundary: a 69.9-DIP band rounds up to
+        // a 70-DIP window, which crosses the two-line threshold and redraws a form the window
+        // was never sized for.
+        private static float VerticalAvailWidth(int bandW, uint dpi)
+        {
+            int maxW = bandW - DpiScaleInt(2, dpi);
+            return maxW > 0 ? maxW * (float)USER_DEFAULT_SCREEN_DPI / dpi : 0f;
+        }
+
         // Target physical size for the current layout. Horizontal: width is layout-driven,
-        // height is the band's. Vertical: width is the content width clamped into the band (a
-        // narrower band clips text — TrafficMonitor clamps its item rects the same way), and
-        // that CLAMPED width then picks the strip form (one line vs two) and with it the
-        // stack height — which is why the layout is built twice here. A 0 in the
-        // layout-driven dimension = the every-metric-off stub (the caller keeps the old
-        // buffers).
+        // height is the band's. Vertical: the band's THICKNESS (width, via VerticalAvailWidth)
+        // decides the form AND the column count, so the layout is built against it and its own
+        // Width/Height become the target. Those are rounded UP so the window never clips the
+        // grid at fractional DPI scaling (125%, 175%). A 0 in the layout-driven dimension =
+        // the every-metric-off stub (the caller keeps the old buffers).
         private static void ComputeTargetSize(int mask, GpuTaskbarContent gpuContent, bool vertical, uint dpi, int bandW, int bandH,
             out int width, out int height)
         {
@@ -3653,20 +3804,9 @@ namespace task_monitor
                 height = bandH;
                 return;
             }
-            int contentW = DpiScaleInt((int)VerticalNaturalWidth(mask, gpuContent), dpi);
-            int maxW = bandW - DpiScaleInt(2, dpi);
-            width = maxW > 0 && contentW > maxW ? maxW : contentW;
-            var l = ComputeLayout(mask, gpuContent, true, width * (float)USER_DEFAULT_SCREEN_DPI / dpi);
-            height = DpiScaleInt((int)l.Height, dpi);
-        }
-
-        // The vertical layout's NATURAL width — the widest cell the horizontal grid would give
-        // the same metrics (网络's column is the widest of the four); the band clamps it.
-        private static float VerticalNaturalWidth(int mask, GpuTaskbarContent gpuContent)
-        {
-            float w = PackedStackedCount(mask, gpuContent) > 0 ? GroupWidths[0] : 0f;
-            if ((mask & (1 << 4)) != 0) w = Math.Max(w, GroupWidths[3]);
-            return w;
+            var l = ComputeLayout(mask, gpuContent, true, VerticalAvailWidth(bandW, dpi));
+            width = l.Width > 0f ? DpiScaleCeil(l.Width, dpi) : 0;
+            height = l.Height > 0f ? DpiScaleCeil(l.Height, dpi) : 0;
         }
 
         // TrafficMonitor's CClassicalTaskbarDlg::InitTaskbarWnd chain: Shell_TrayWnd →
@@ -4525,29 +4665,38 @@ namespace task_monitor
         private static int DpiScaleInt(int value, uint dpi)
             => (int)(value * dpi / USER_DEFAULT_SCREEN_DPI);
 
+        // Round a DIP size UP into physical pixels — a size derived from the window must
+        // never come out smaller than the layout it was derived from (see ComputeTargetSize).
+        private static int DpiScaleCeil(float value, uint dpi)
+            => (int)Math.Ceiling(value * dpi / USER_DEFAULT_SCREEN_DPI);
+
         // 2D hit-test over the CURRENT layout. Horizontal: x picks a visible group (the
         // last visible group extends to the window's right edge, so the whole width is
         // covered); inside a stacked group, y picks the row POSITION, which maps to
         // whichever metric packed into it — the trailing empty position of an odd count
         // hits nothing (-1); the 网络 group is one whole-column slot regardless of y.
-        // Vertical: y picks the strip — a packed stacked metric (its whole two-line block in
-        // the narrow form), or either of 网络's two strips (one slot either way); x is free
-        // (the strips span the window's width).
+        // Vertical: the COLUMN GRID — x picks the column, y the row in it; a packed cell maps
+        // to its slot (either line of a two-line block clicks the metric), 网络's ↑/↓ pair is
+        // one slot, and an empty cell (a ragged column's trailing hole) hits nothing.
         private static int HitTestSlot(RenderState s, int x, int y)
         {
             var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical,
-                s.PhysicalWidth * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi);
+                s.AvailWidthDip);
             if (layout.Vertical)
             {
-                if (x < 0 || x >= s.PhysicalWidth || y < 0) return -1;
-                // One ROW per hit region: a single-line strip, or a whole two-line block
-                // (label + value together — either line clicks the metric).
-                int rowH = DpiScaleInt(layout.TwoLine ? (int)STRIP_BLOCK_H : STRIP_H_I, s.Dpi);
-                if (rowH <= 0) return -1;
-                int idx = y / rowH;
-                int packed = PackedStackedCount(layout.SlotMask, layout.GpuContent);
-                if (layout.Pos0 >= 0 && idx < packed) return layout.SlotAt(idx);   // GPU 温度's strip → 3
-                if (layout.Left3 >= 0f && idx >= packed && idx < packed + 2) return 4;
+                if (x < 0 || y < 0) return -1;
+                float xDip = x * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi;
+                float yDip = y * (float)USER_DEFAULT_SCREEN_DPI / s.Dpi;
+                for (int pos = 0; pos <= 4; pos++)
+                {
+                    int slot = layout.SlotAt(pos);
+                    if (slot < 0) continue;
+                    if (!VerticalPosRect(layout, pos, out float left, out float top, out float right, out float bottom))
+                        continue;
+                    if (xDip >= left && xDip < right && yDip >= top && yDip < bottom) return slot;
+                }
+                if (layout.NetVisible && VerticalSlotRect(layout, 4, out float nl, out float nt, out float nr, out float nb)
+                    && xDip >= nl && xDip < nr && yDip >= nt && yDip < nb) return 4;
                 return -1;
             }
             for (int g = 0; g < GroupCount; g++)
@@ -4614,7 +4763,7 @@ namespace task_monitor
             public IntPtr TaskbarHwnd;
             // ---- classical taskbar family (Win10 / restored-classic taskbar on Win11) ----
             public bool Classical;              // false = the Win11 taskbar path
-            public bool Vertical;               // SIDE-docked taskbar, either family (strips layout)
+            public bool Vertical;               // SIDE-docked taskbar, either family (column grid)
             // ---- 悬浮模式 (the floating form) ----
             public bool Floating;               // top-level self-drawn card widget instead of a taskbar child
             // The window region last applied to the floating widget (0×0 = none) — the
@@ -4647,6 +4796,12 @@ namespace task_monitor
             public int PendingBackdropCount;    // …its consecutive-sample count so far
             public int PhysicalWidth;
             public int PhysicalHeight;
+            // VERTICAL only: the band thickness (DIP) the layout is built against — the ONE
+            // width all layout callers use (VerticalAvailWidth). 0 = not measured yet (the
+            // layout falls back to its natural 70/84-DIP width). Never derive a layout from
+            // PhysicalWidth: its DPI rounding can cross a form/column threshold (remarks at
+            // VerticalAvailWidth).
+            public float AvailWidthDip;
             public int LastPlaceX;      // taskbar-relative x last applied by MoveWindow (Win11 path)
             public int LastPlaceY;      // taskbar-relative y last applied (band bottom-alignment horizontal,
                                         // the vertical anchor along the side taskbar's axis)
