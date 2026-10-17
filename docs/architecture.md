@@ -175,7 +175,7 @@ src/
     DetailWindow.xaml(.cs)  acrylic shell hosting one IDetailView
     ConsentDialog           first-run UAC-consent prompt (iNKORE modern window, unelevated)
     UpdateAvailableDialog   发现新版本提醒 (iNKORE modern window — 立即更新/不再提醒/稍后)
-    Common/                 formatters · ProcessListTip · ProcessIconCache (the shared per-exe icon cache) · ChartTipHost/ChartPalette (the shared chart hover tip + colors) · PivotNavButtonFix · FollowTagPanel · the scroll stack
+    Common/                 formatters · ProcessListTip · ProcessKillMenu (the process lists' right-click 结束进程: list-level menu + confirm card, same rebind-proof pattern as ProcessListTip) · ProcessIconCache (the shared per-exe icon cache) · ChartTipHost/ChartPalette (the shared chart hover tip + colors) · PivotNavButtonFix · FollowTagPanel · the scroll stack
     Details/                the five IDetailViews
     Charts/                 hand-drawn DrawingContext charts
     Settings/               SettingsWindow (ONE scroll page, 类别 sections via TextBlock headers: 通用 / 外观 / 采样 / 关于 — SettingsCard/SettingsExpander)

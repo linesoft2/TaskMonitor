@@ -51,6 +51,7 @@ namespace task_monitor
             });
 
             ProcessListTip.Attach(GpuProcessList, ProcessTip, ProcessTipDesc, ProcessTipPath);
+            ProcessKillMenu.Attach(GpuProcessList);
         }
 
         void IDetailView.Refresh(SystemSnapshot s)

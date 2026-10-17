@@ -62,6 +62,7 @@ namespace task_monitor
             _tip.Attach(NetChart, NetChart.HitTest, HistoryTip, HistoryTipText, FormatTip);
 
             ProcessListTip.Attach(NetList, ProcessTip, ProcessTipDesc, ProcessTipPath);
+            ProcessKillMenu.Attach(NetList);
 
             // 连接 spans both columns; keep its trim boundary just left of 速率's label.
             BandGrid.LayoutUpdated += (_, _) => UpdateConnTrimBoundary();

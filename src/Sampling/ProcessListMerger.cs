@@ -5,8 +5,9 @@ namespace task_monitor
 {
     /// <summary>
     /// 设置 → 采样项目 → 合并相同程序: merges the per-process list rows that share an exe
-    /// path into one row — every numeric value is summed and the member count rides on
-    /// <see cref="ProcessInfo.Count"/> (shown as a "×N" row tag — ProcessInfo.TagText). Rows without a path (protected/system processes the sampler can't
+    /// path into one row — every numeric value is summed, the member count rides on
+    /// <see cref="ProcessInfo.Count"/> (shown as a "×N" row tag — ProcessInfo.TagText) and
+    /// the member PIDs on <see cref="ProcessInfo.Pids"/> (the row's 结束进程 targets). Rows without a path (protected/system processes the sampler can't
     /// OpenProcess) group by name instead. 服务宿主 (svchost.exe) is exempt: its instances
     /// host unrelated services, so each keeps its own row. Clash/Mihomo controller rows
     /// (<see cref="ProcessInfo.ViaClash"/>) are exempt too — a separate data source shown
@@ -54,11 +55,14 @@ namespace task_monitor
                 if (!groups.TryGetValue(key, out var g))
                 {
                     // The first member becomes the group row (keeps its Name/Pid/ExePath).
-                    groups[key] = new Group { Row = row, TopMemberGpu = row.GpuPercent };
+                    var first = new Group { Row = row, TopMemberGpu = row.GpuPercent };
+                    first.Pids.Add(row.Pid);
+                    groups[key] = first;
                     continue;
                 }
 
                 g.Row.Count++;
+                g.Pids.Add(row.Pid);
                 g.Row.CpuPercent += row.CpuPercent;
                 g.Row.WorkingSetBytes += row.WorkingSetBytes;
                 g.Row.NetUpBytesPerSec += row.NetUpBytesPerSec;
@@ -75,7 +79,13 @@ namespace task_monitor
             }
 
             var merged = new List<ProcessInfo>(groups.Count + (solo == null ? 0 : solo.Count));
-            foreach (var g in groups.Values) merged.Add(g.Row);
+            foreach (var g in groups.Values)
+            {
+                // Publish the member PIDs only for real groups — a single-member "group"
+                // stays a plain row (Pids null → the kill path uses Pid alone).
+                if (g.Pids.Count > 1) g.Row.Pids = g.Pids;
+                merged.Add(g.Row);
+            }
             if (solo != null) merged.AddRange(solo);
             merged.Sort((a, b) =>
             {
@@ -90,6 +100,7 @@ namespace task_monitor
         {
             public ProcessInfo Row;
             public double TopMemberGpu; // max single-member GpuPercent — picks the merged row's GpuEngineName
+            public List<int> Pids = new List<int>(); // every member's PID — the merged row's 结束进程 targets
         }
     }
 }

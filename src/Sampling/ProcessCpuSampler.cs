@@ -33,6 +33,12 @@ namespace task_monitor
         // ProcessListMerger sums the members' values into this row). Shown by the row tag
         // chip as "×N" (TagText); 1 = an ordinary single row.
         public int Count { get; set; } = 1;
+        // Every member PID of a merged row (合并相同程序 — collected by ProcessListMerger
+        // when Count grows past 1; null on an ordinary row, whose only member is Pid).
+        // 结束进程 (the lists' right-click kill) terminates ALL of them, the way Task
+        // Manager's 结束任务 handles a grouped app — killing just the first member would
+        // leave the rest running and the row would reappear next tick.
+        public List<int> Pids { get; set; }
         // Non-null when the row is a renamed svchost.exe instance (ServiceHostMap): a single
         // hosted service (Name = its display name, tag 服务) or a -k group (Name = the group,
         // tag 服务组). The hover tooltip (ProcessListTip) reads the services from here.

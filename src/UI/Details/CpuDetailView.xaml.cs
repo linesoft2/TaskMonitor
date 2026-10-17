@@ -47,6 +47,7 @@ namespace task_monitor
             });
 
             ProcessListTip.Attach(ProcessList, ProcessTip, ProcessTipDesc, ProcessTipPath);
+            ProcessKillMenu.Attach(ProcessList);
         }
 
         void IDetailView.Refresh(SystemSnapshot s)

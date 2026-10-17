@@ -217,8 +217,16 @@ namespace task_monitor
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern IntPtr OpenProcess(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwProcessId);
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        // ---------- 结束进程 (the detail lists' right-click kill) ----------
+        // TerminateProcess is the whole action — no close-message grace, exactly what
+        // Task Manager's 结束任务 does (and the only thing that works on a hung process).
+        internal const uint PROCESS_TERMINATE = 0x0001;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, System.Text.StringBuilder lpExeName, ref uint lpdwSize);
 
         [DllImport("kernel32.dll", SetLastError = true)]
