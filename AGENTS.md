@@ -167,7 +167,7 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 12. **Disk/GPU replicate Taskmgr exactly** (`IOCTL_DISK_PERFORMANCE` / DXCore COM); disk handles are opened and closed per query, never held. On Win10 fetch the base `IDXCoreAdapter` + all four attribute passes; capability gates — never OS-version checks — drive the fallbacks.
 13. **Per-process GPU% is PDH, not DXCore** — encoding and aggregation at `ProcessGpuSampler.cs`; no elevation, unlike SRUM.
 14. **Process-row tooltip = view-owned `Popup` on `MouseMove`**, never a row `ToolTip`.
-15. **Per-process net = SRUM real-time API** (why we elevate); rates re-diff only when the frame version advances. **Unregister on EVERY rebuild** (`ProcessNetSampler.Shutdown`, from `WM_DESTROY`) — srumapi holds a raw pointer to the delegate stub (the 2026-09-22 卡死).
+15. **Per-process net = SRUM real-time API** (why we elevate); rates re-diff only when the frame version advances. **Unregister on EVERY rebuild AND on a `Start()` throw** (`Shutdown`/`AbandonSamplerAfterFailedStart`) — srumapi holds a raw callback pointer (the 2026-09-22 卡死), and leaked registrations + a hard kill wedge the engine for the whole boot session (empty net list, 注册成功但零帧; reboot-only).
 16. **Wi-Fi `wlanapi` is on-demand only** — never on the per-tick path.
 17. **Memory breakdown = `GlobalMemoryStatusEx` + NTQSI class-2/class-80**, not `GetPerformanceInfo`.
 18. **Charts are hand-drawn WPF** — hover = `HitTest` + a real `Popup`.

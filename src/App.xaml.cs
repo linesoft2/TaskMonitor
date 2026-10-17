@@ -357,6 +357,14 @@ namespace task_monitor
                     {
                         // The taskbar overlay is non-critical; never let it take the app down.
                         Logger.Error("任务栏覆盖层 Start() 抛异常，2s 后重建", ex);
+                        // Start() died before its message loop, so the WM_DESTROY teardown
+                        // (which owns the sampler's release) never ran. Release the failed
+                        // round's sampler here, or a persistent failure re-REGISTERS the SRUM
+                        // real-time subscription once per retry and floods srumapi (the
+                        // 2026-10-17 incident: 124 leaked registrations from a 4-minute
+                        // crash loop; after the instance was force-killed the engine stopped
+                        // delivering frames and the per-process network list sat empty).
+                        _taskbar.AbandonSamplerAfterFailedStart();
                     }
                     // FAILURE backoff only — the ordinary return already slept its own delay.
                     if (!_stopping) Thread.Sleep(2000);

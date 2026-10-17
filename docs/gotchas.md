@@ -264,6 +264,19 @@ left the retired pair polling at ~1 Hz for the rest of the session — gateway +
 extra pair per 悬浮模式 flip / explorer restart / §43 self-heal. No Join in the teardown path:
 a poll cycle can block on ICMP/HTTP and teardown runs on the taskbar STA thread (§43).
 
+**A `Start()` that THROWS never reaches `WM_DESTROY`, so its sampler is released from App's
+rebuild-loop catch instead** (`TaskbarWindow.AbandonSamplerAfterFailedStart`). Without it a
+persistent pre-loop failure re-REGISTERS once per 2s retry: the 2026-10-17 incident left ~124
+live registrations from a 4-minute crash loop, and force-killing that instance then left the
+stale registrations inside the engine — **which stopped delivering frames to ANYONE for the
+rest of the boot session.** Symptom fingerprint (now logged, once per process, in
+`ProcessNetSampler.Sample`): `SRUM 实时 API 注册成功` followed by `SRUM 注册成功但 30 秒未收到任何帧` —
+a clean app restart does NOT recover it (verified 2026-10-17: fresh process, fresh
+registration, still zero frames), only a reboot clears the engine. Task Manager's per-process
+网络 column shares the engine, so it goes dark in the same incident — a quick way to tell
+"the OS side is wedged" from "our bug". The success side is logged too (`SRUM 首帧已到达`),
+so "engine OK" is provable from the log alone.
+
 ## 16. Wi-Fi `wlanapi` calls are on-demand, NOT per-tick
 
 *`src/Sampling/NetInfoSampler.cs`*

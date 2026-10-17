@@ -483,6 +483,31 @@ namespace task_monitor
         // Volatile: written once on the taskbar thread, read on the UI thread.
         private volatile SystemSampler _sampler;
 
+        /// <summary>
+        /// Called by App's rebuild loop when <see cref="Start"/> THREW before entering its
+        /// message loop: the WM_DESTROY teardown (which owns the sampler's release — SRUM
+        /// unregister etc.) never runs on that path, and the next re-entry builds a fresh
+        /// sampler with a fresh SRUM registration. Without this, a persistent Start()
+        /// failure re-registers once per 2s retry and floods srumapi (the 2026-10-17
+        /// incident: 124 leaked registrations from a 4-minute crash loop; after the
+        /// instance was force-killed the engine stopped delivering frames and the
+        /// per-process network list sat empty for the rest of the session). The unregister
+        /// runs on a pool thread exactly like the WM_DESTROY path (SruUnregister may wait
+        /// out an in-flight callback — never block this thread, gotchas §43); the Retired
+        /// list inside ProcessNetSampler.Shutdown keeps the callback delegate rooted for a
+        /// call that is already in flight. Safe when Start() failed before creating a
+        /// sampler (null → no-op), and idempotent with the WM_DESTROY release should both
+        /// ever run for the same sampler.
+        /// </summary>
+        internal void AbandonSamplerAfterFailedStart()
+        {
+            var s = _sampler;
+            _sampler = null;
+            if (s == null) return;
+            try { System.Threading.Tasks.Task.Run((Action)s.Shutdown); }
+            catch (Exception ex) { Logger.Warn("失败轮次的 sampler 释放异常（忽略）", ex); }
+        }
+
         // Placement settings: which side of the taskbar the overlay sits on, and (on the
         // left) which anchor. Same volatile contract as _clickDisabledMask — written by the
         // WPF UI thread (startup / settings page), read on the taskbar thread in CalcPosition.

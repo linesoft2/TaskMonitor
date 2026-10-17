@@ -67,6 +67,11 @@ namespace task_monitor
         private bool _available;
         private IntPtr _srumModule = IntPtr.Zero;
         private IntPtr _registration = IntPtr.Zero;
+        // Stopwatch timestamp of the successful registration (0 = none) — the frame
+        // diagnostics below judge "registered but silent" against it.
+        private long _registeredTicks;
+        // Set when the first frame's INFO line has been logged (once per process).
+        private bool _firstFrameLogged;
         // Kept as a field so the delegate outlives the Register call (the SRU thread invokes
         // it asynchronously for the life of the registration).
         private SrumInterop.SruStatsCallback _callback;
@@ -161,6 +166,7 @@ namespace task_monitor
             }
 
             _available = true;
+            _registeredTicks = Stopwatch.GetTimestamp();
             Logger.Info("SRUM 实时 API 注册成功——按进程网络流量已启用");
         }
 
@@ -260,6 +266,24 @@ namespace task_monitor
 
                         _prev = now;
                     }
+                }
+
+                // Frame diagnostics: a successful registration that never delivers a frame
+                // is a REAL failure mode, indistinguishable from "no traffic" without
+                // instrumentation (2026-10-17: after a crash-looping instance's ~124
+                // leaked registrations were force-killed away, the engine delivered
+                // nothing — the list sat empty while the log only said 注册成功). Two
+                // once-per-process lines make both sides of that visible.
+                if (_hasPrev && !_firstFrameLogged)
+                {
+                    _firstFrameLogged = true;
+                    Logger.Info("SRUM 首帧已到达——按进程网络列表开始输出");
+                }
+                else if (!_hasPrev && _registeredTicks > 0 &&
+                         curTicks - _registeredTicks > 30L * Stopwatch.Frequency)
+                {
+                    Logger.WarnOnce("srum-no-frames",
+                        "SRUM 注册成功但 30 秒未收到任何帧——按进程网络列表为空（引擎侧可能被其他实例的泄漏注册卡住；重启本进程或系统可恢复）");
                 }
 
                 // Emit every tick from the held rates (empty until the first diff — the first
