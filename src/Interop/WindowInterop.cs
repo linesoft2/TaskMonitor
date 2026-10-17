@@ -242,6 +242,14 @@ namespace task_monitor
         [DllImport("user32.dll")]
         public static extern int GetMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
 
+        public const uint PM_REMOVE = 1;
+
+        // Non-destructive queue peek (Start's embed-failure drain discards the WM_QUIT that
+        // TeardownOverlay's PostQuitMessage leaves behind — a stale WM_QUIT makes the NEXT
+        // Start()'s GetMessage return 0 at once).
+        [DllImport("user32.dll")]
+        public static extern bool PeekMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
         [DllImport("user32.dll")]
         public static extern bool TranslateMessage(ref MSG lpMsg);
 
@@ -313,6 +321,7 @@ namespace task_monitor
         public static extern bool IsZoomed(IntPtr hWnd);
 
         public const uint GA_ROOT = 2;
+        public const uint GA_PARENT = 1;
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);

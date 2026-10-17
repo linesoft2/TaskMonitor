@@ -304,6 +304,14 @@ namespace task_monitor
         // slide run ~100-150ms, well under the eye's flicker-fusion for small moves.
         private const uint TIMER_ID_FLOAT_SLIDE = 3;
         private const int FLOAT_SLIDE_MS = 10;
+        // The taskbar-embed retry. SetParent into explorer's window is CROSS-THREAD and
+        // fails transiently with err=87 while explorer is still unwinding the removal of a
+        // just-destroyed previous child (the 2026-10-06 report: toggling 悬浮模式 back and
+        // forth stranded the top-level overlay at the top-left of the screen roughly every
+        // third flip). 5 × 250ms spans explorer's cleanup without slowing the flip in the
+        // common case — attempt 1 normally succeeds; only failures pay the delays.
+        private const int SetParentMaxAttempts = 5;
+        private const int SetParentRetryDelayMs = 250;
 
         // Sampling/refresh cadence in ms (settings 采样间隔; 500/1000/2000 from the combo,
         // clamped for hand-edited yaml). Same volatile contract as _onLeft: written by the
@@ -1239,11 +1247,62 @@ namespace task_monitor
                 // worker waits for us to pump, we're waiting for the worker — verified
                 // 2026-09-30, gotchas §43). Its dying-explorer risk is covered by the
                 // probe seconds above + the 45s zombie self-restart.
-                IntPtr prevParent = WindowInterop.SetParent(hwnd, classical ? hBar : taskbar);
-                if (prevParent == IntPtr.Zero)
-                    Logger.Error($"SetParent 嵌入任务栏失败（目标={(classical ? "ReBarWindow32" : "Shell_TrayWnd")}）err={Marshal.GetLastWin32Error()}——覆盖层浮为顶层窗口");
-                else
-                    Logger.Info($"已嵌入任务栏（父={(classical ? "ReBarWindow32" : "Shell_TrayWnd")}）");
+                //
+                // A failure here is TRANSIENT (err=87 while explorer unwinds the previous
+                // child's removal — see the constants above), so retry in place. And if it
+                // stays broken, DESTROY this window and let App's loop rebuild: falling
+                // through as "embedded anyway" is the one thing this path must never do —
+                // every later MoveWindow would write parent-relative coords into a TOP-LEVEL
+                // window, landing it at the top-left of the screen, and the tick (which only
+                // checks IsWindow(taskbar)) would keep re-writing it there forever (the
+                // stranded (569,0) overlay in the 2026-10-06 log sat there for 49s+).
+                IntPtr embedTarget = classical ? hBar : taskbar;
+                bool embedded = false;
+                for (int attempt = 1; attempt <= SetParentMaxAttempts; attempt++)
+                {
+                    IntPtr prevParent = WindowInterop.SetParent(hwnd, embedTarget);
+                    // A NULL return alone is ambiguous — it is "failed" but also
+                    // "succeeded, no previous parent" for a born-top-level window. The
+                    // actual parent is the ground truth.
+                    embedded = prevParent != IntPtr.Zero
+                        || WindowInterop.GetAncestor(hwnd, WindowInterop.GA_PARENT) == embedTarget;
+                    if (embedded)
+                    {
+                        Logger.Info(attempt == 1
+                            ? $"已嵌入任务栏（父={(classical ? "ReBarWindow32" : "Shell_TrayWnd")}）"
+                            : $"已嵌入任务栏（父={(classical ? "ReBarWindow32" : "Shell_TrayWnd")}，第 {attempt} 次尝试成功）");
+                        break;
+                    }
+                    int err = Marshal.GetLastWin32Error();
+                    if (!WindowInterop.IsWindow(embedTarget))
+                    {
+                        Logger.Error($"SetParent 目标窗口已失效（{(classical ? "ReBarWindow32" : "Shell_TrayWnd")}）——放弃本轮，等待重建");
+                        break;
+                    }
+                    if (attempt < SetParentMaxAttempts)
+                    {
+                        Logger.Warn($"SetParent 嵌入任务栏失败 err={err}（第 {attempt}/{SetParentMaxAttempts} 次）——{SetParentRetryDelayMs}ms 后重试");
+                        // The window is top-level and VISIBLE here (embedded form is created
+                        // with WS_VISIBLE) at the taskbar's rect — hide it for the retry
+                        // window or the transparent slab eats the taskbar's clicks.
+                        WindowInterop.ShowWindow(hwnd, WindowInterop.SW_HIDE);
+                        Thread.Sleep(SetParentRetryDelayMs);
+                    }
+                    else
+                        Logger.Error($"SetParent 嵌入任务栏失败 err={err}（共 {SetParentMaxAttempts} 次尝试）——销毁本轮窗口，由重建循环稍后全新重试");
+                }
+                if (!embedded)
+                {
+                    // The synchronous WM_DESTROY runs the SAME once-guarded teardown as a
+                    // 悬浮模式 flip (band restore, SRUM unregister, pipeline release); the
+                    // WM_QUIT it posts must then be drained, or the NEXT Start()'s first
+                    // GetMessage would return 0 at once — an instant-return hot loop.
+                    CrashTrace.NoteStep("嵌入失败自毁(DestroyWindow)");
+                    WindowInterop.DestroyWindow(hwnd);
+                    DrainThreadQueue();
+                    OverlayHwnd = IntPtr.Zero;
+                    return;
+                }
                 if (classical)
                 {
                     RepositionOverlay(hwnd, state, force: true);
@@ -4220,6 +4279,25 @@ namespace task_monitor
                             return IntPtr.Zero;
                         }
 
+                        // Embed invariant (the belt to Start's retry braces): the taskbar
+                        // being ALIVE does not mean we are still its child — a top-level
+                        // overlay in embedded form receives parent-relative coords on every
+                        // tick, i.e. it sits at the top-left of the screen and eats clicks
+                        // there (the stranded (569,0) overlay, 2026-10-06). Start destroys
+                        // instead of stranding now, so tripping this means something exotic
+                        // un/re-parented us mid-run (an ExplorerPatcher band swap on the
+                        // classical family included — the fresh rebuild re-probes the whole
+                        // chain). One GetAncestor per tick; self-heal by the same destroy →
+                        // rebuild → re-embed path as the dead-taskbar case above.
+                        if (!s.Floating
+                            && WindowInterop.GetAncestor(hwnd, WindowInterop.GA_PARENT) != (s.Classical ? s.BarHwnd : s.TaskbarHwnd))
+                        {
+                            Logger.Warn("嵌入不变量失守（任务栏仍在，覆盖层却不是其子窗口）——自毁，等待重建重新嵌入");
+                            CrashTrace.NoteStep("嵌入不变量自毁(DestroyWindow)");
+                            WindowInterop.DestroyWindow(hwnd);
+                            return IntPtr.Zero;
+                        }
+
                         // A LOST DEVICE owns this tick (显卡驱动更新/重置/TDR): rebuild the
                         // pipeline first — DPI tracking, repositioning and the sample-draw all
                         // funnel into Draw/ResizeBuffers, which a dead device can only reject.
@@ -4369,6 +4447,18 @@ namespace task_monitor
                 handle.Free();
                 WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, IntPtr.Zero);
             }
+        }
+
+        // Discard whatever is queued on this thread (bounded). Used after the
+        // embed-failure DestroyWindow in Start(): the synchronous teardown posts WM_QUIT,
+        // and Start returns WITHOUT entering the message loop — a WM_QUIT left in the
+        // queue would make the next Start()'s first GetMessage return 0 instantly and
+        // hot-loop the rebuild cycle.
+        private static void DrainThreadQueue()
+        {
+            for (int i = 0; i < 256
+                && WindowInterop.PeekMessageW(out var drained, IntPtr.Zero, 0, 0, WindowInterop.PM_REMOVE); i++)
+            { /* discard — the window is gone and Start is returning */ }
         }
 
         private static RenderState StateOf(IntPtr hwnd)

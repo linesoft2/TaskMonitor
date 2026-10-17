@@ -1144,3 +1144,42 @@ Win11 族（26H2 的 设置 → 任务栏位置）。
 `FindWindowEx`，失败再手工走 `GW_CHILD`/`GW_HWNDNEXT` 比对类名（USER 锁内读，不走 §43 的
 跨线程 worker）。
 
+## 45. SetParent 嵌入任务栏会偶发 err=87；失败的嵌入绝不能「照常走嵌入流程」
+
+*`src/UI/TaskbarWindow.cs`（`Start` 的嵌入重试与放弃、`DrainThreadQueue`、`WM_TIMER` 的嵌入
+不变量）、`src/Interop/WindowInterop.cs`（`PeekMessageW`、`GA_PARENT`）*
+
+事故（2026-10-06 日志，用户报告「任务栏图标跑到左上角」）：反复勾选/取消悬浮模式时，
+「关闭悬浮 → 重新嵌入」这一轮约每三次失败一次：`SetParent 嵌入任务栏失败（目标=
+Shell_TrayWnd）err=87`，覆盖层落在屏幕 **(569,0)** —— 顶层窗口贴在屏幕顶端、挡住那里的
+点击，且永远不自愈（19:57:05 失败，19:57:54 仍在那里）。
+
+机制分两层：
+
+1. **err=87 本身**：`SetParent` 把我们的窗口挂进 explorer 的窗口，是跨线程/跨进程调用；
+   紧跟一次悬浮切换时，150ms 前 explorer 刚被拆走一个子窗口（旧覆盖层），其收尾（队列
+   解绑、任务栏重排）还没跑完，win32k 在这窗口期会拒绝新的 attach。开机首嵌没有「刚被
+   拆走的旧子窗口」，所以从不触发——这就是它「只在反复切换时偶发」的原因。瞬态故障，
+   重试即愈。
+2. **滞留才是真 bug**：失败后代码只记了一行日志就**照常走嵌入流程** —— `MoveWindow`
+   的坐标是**父窗口相对坐标**（xRel, 0），写在顶层窗口上就成了屏幕坐标 (xRel, 0)；
+   而 tick 的自愈只查 `IsWindow(TaskbarHwnd)`（任务栏活着 ≠ 我们还是它的孩子），于是
+   `RepositionOverlay` 每 tick 把父相对坐标再写一遍，窗口被钉死在屏幕顶端。
+
+三层处置（缺一层都有对应的事故路径）：
+
+- **就地重试**：`SetParentMaxAttempts=5 × 250ms`。判据不只看返回值——返回 NULL 对「生来
+  顶层」的窗口既可能是失败也可能是「成功、无前父」，以 `GetAncestor(GA_PARENT) == 目标`
+  为准。重试期间窗口先 `SW_HIDE`（嵌入形窗口是带 `WS_VISIBLE` 创建的，透明的顶层窗口
+  会吃掉任务栏的点击）；目标 `IsWindow` 失活则立刻放弃（explorer 重启有自己的
+  重建路径）。
+- **重试耗尽 → 销毁本轮、走重建循环**（2s 退避）：绝不能「浮为顶层窗口继续跑」。销毁是
+  同线程 `DestroyWindow`，同步跑与悬浮切换完全相同的 `TeardownOverlay`（幂等）；它
+  `PostQuitMessage` 留下的 `WM_QUIT` 必须用 `DrainThreadQueue()` 排干——`Start()` 这时
+  **没进消息循环**就返回了，残留的 WM_QUIT 会让下一轮 `GetMessage` 立刻返回 0，重建
+  循环变成秒级热循环。
+- **tick 持有嵌入不变量**（兜底）：`!Floating && GetAncestor(hwnd, GA_PARENT) !=
+  (Classical ? BarHwnd : TaskbarHwnd)` → 自毁重建。一次 `GetAncestor` 的代价，覆盖
+  「任务栏活着但我们已不是它的孩子」的一切冷门路径（含经典族 ReBar 被换掉——
+  重建会重新探测整条链，比拿着死 hBar 硬撑正确）。
+
