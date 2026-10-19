@@ -21,7 +21,11 @@ namespace task_monitor
     /// expanders also hold 显示方式 + the specific-device picker, GPU's additionally the
     /// 任务栏显示 (使用率/温度/两者) trio with 温度来源 and 温度单位, 网络's the 适配器
     /// picker, the 公网 IP lookup switch and the Clash/Mihomo integration (switch +
-    /// endpoint + 测试连接); plus the section-wide 合并相同程序 card) and 关于. Each 类别
+    /// endpoint + 测试连接); plus the section-wide 合并相同程序 card); 关于 lives at the
+    /// pane's bottom-left (FooterMenuItems) and is NOT a card page — a centred hero
+    /// (logo/name/version pill), the app's own live CPU waveform (push-fed by
+    /// <see cref="RefreshAbout"/> off App's SnapshotChanged pump — no timer here), two
+    /// plain link buttons and the copyright line. Each 类别
     /// is its own TouchDragScrollViewer page, switched by VISIBILITY in
     /// <see cref="NavView_SelectionChanged"/> — NOT Frame navigation, so the window
     /// keeps one namescope: every control/handler pair (and the ctor's initial-state
@@ -54,6 +58,9 @@ namespace task_monitor
         private readonly Action<bool, string, string> _clashApiChanged; // (enabled, controller address or "" = default, API secret)
         private readonly Action<bool> _updateCheckChanged;  // 检查更新
         private readonly Action<int> _updateSourceChanged;  // 0=CNB 1=GitHub
+        // Reads the overlay-owned SystemSampler's latest snapshot — the About page's live
+        // CPU waveform; the same single-source push model as the detail windows.
+        private readonly Func<SystemSnapshot> _snapshotProvider;
         // 500ms single-shot debounce for the two Clash text boxes — a yaml write +
         // sampler retarget must not fire on every keystroke.
         private DispatcherTimer _clashDebounce;
@@ -147,6 +154,8 @@ namespace task_monitor
         /// <param name="updateCheckChanged">Reported with the requested on/off — takes
         /// effect on the next startup (the check runs once per launch).</param>
         /// <param name="updateSourceIndex">0=CNB (yaml null, the default) 1=GitHub.</param>
+        /// <param name="snapshotProvider">Reads TaskbarWindow's LatestSnapshot (App's
+        /// lambda) — the About page's live CPU waveform.</param>
         // internal: the signature mentions internal sampler types — App (same assembly) is
         // the only caller; the window is never instantiated from XAML.
         internal SettingsWindow(bool overlayOnLeft, bool snapToStart, Action<bool, bool> placementChanged,
@@ -174,7 +183,8 @@ namespace task_monitor
             bool clashEnabled, string clashApiAddress, string clashApiSecret,
             Action<bool, string, string> clashApiChanged,
             bool updateCheckOn, Action<bool> updateCheckChanged,
-            int updateSourceIndex, Action<int> updateSourceChanged)
+            int updateSourceIndex, Action<int> updateSourceChanged,
+            Func<SystemSnapshot> snapshotProvider)
         {
             InitializeComponent();
             _placementChanged = placementChanged;
@@ -197,6 +207,7 @@ namespace task_monitor
             _clashApiChanged = clashApiChanged;
             _updateCheckChanged = updateCheckChanged;
             _updateSourceChanged = updateSourceChanged;
+            _snapshotProvider = snapshotProvider;
 
             OnLeftSwitch.IsOn = overlayOnLeft;
             AnchorCombo.SelectedIndex = snapToStart ? 1 : 0;
@@ -724,6 +735,53 @@ namespace task_monitor
             AppearancePage.Visibility = item == NavAppearance ? Visibility.Visible : Visibility.Collapsed;
             SamplingPage.Visibility = item == NavSampling ? Visibility.Visible : Visibility.Collapsed;
             AboutPage.Visibility = item == NavAbout ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // The About page's live CPU waveform. Driven by App's SnapshotChanged pump (the
+        // same push model as the detail windows — this window holds no timer): a no-op
+        // unless the About page is actually showing, and the whole band collapses while
+        // CPU sampling is off (the snapshot's history then stays empty — a flat line at
+        // zero would be a lie). Points map oldest→newest left→right, 2px inset so the
+        // 100% peak never clips.
+        internal void RefreshAbout()
+        {
+            if (AboutPage.Visibility != Visibility.Visible) return;
+            var s = _snapshotProvider?.Invoke();
+            var history = s?.CpuHistory;
+            double w = LiveWave.ActualWidth, h = LiveWave.ActualHeight;
+            if (history == null || history.Length < 2 || w < 10 || h < 10)
+            {
+                LiveBand.Visibility = Visibility.Collapsed;
+                return;
+            }
+            LiveBand.Visibility = Visibility.Visible;
+            LiveCpuText.Text = $"{s.CpuPercent:0}%";
+
+            int n = history.Length;
+            var pts = new Point[n];
+            double step = w / (n - 1);
+            for (int i = 0; i < n; i++)
+            {
+                double v = history[i];
+                if (v < 0) v = 0; else if (v > 100) v = 100;
+                pts[i] = new Point(i * step, h - 2 - v / 100.0 * (h - 4));
+            }
+            LiveLine.Points = new PointCollection(pts);
+
+            // The soft area under the curve (the logo's chart motif) — one StreamGeometry,
+            // frozen so the render thread can share it.
+            var fill = new StreamGeometry();
+            using (var ctx = fill.Open())
+            {
+                ctx.BeginFigure(new Point(0, h), true, true);
+                ctx.PolyLineTo(pts, true, false);
+                ctx.LineTo(new Point(w, h), true, false);
+            }
+            fill.Freeze();
+            LiveFill.Data = fill;
+
+            Canvas.SetLeft(LiveDot, pts[n - 1].X - LiveDot.Width / 2);
+            Canvas.SetTop(LiveDot, pts[n - 1].Y - LiveDot.Height / 2);
         }
 
         private void GitHubCard_Click(object sender, RoutedEventArgs e) => OpenUrl(GitHubUrl);

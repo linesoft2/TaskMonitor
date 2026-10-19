@@ -381,6 +381,7 @@ namespace task_monitor
         {
             _detail?.Refresh();
             foreach (var w in _pinned) w.Refresh();
+            _settings?.RefreshAbout();   // the About page's live waveform (no-op unless showing)
         }
 
         /// <summary>UI-thread handler for a taskbar column toggle.</summary>
@@ -729,7 +730,9 @@ namespace task_monitor
                 _config.PublicIpEnabled != false, OnPublicIpLookupChanged,
                 _config.ClashEnabled != false, _config.ClashApiAddress, _config.ClashApiSecret, OnClashApiChanged,
                 _config.UpdateCheckEnabled != false, OnUpdateCheckChanged,
-                UpdateSourceIndexOf(_config), OnUpdateSourceChanged);
+                UpdateSourceIndexOf(_config), OnUpdateSourceChanged,
+                // The About page's live waveform reads the same latest snapshot.
+                () => _taskbar.LatestSnapshot);
             _settings.Closed += (s, e) =>
             {
                 _settings = null;

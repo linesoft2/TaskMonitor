@@ -5,7 +5,6 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
         xmlns:local="clr-namespace:task_monitor"
-        xmlns:sys="clr-namespace:System;assembly=mscorlib"
         mc:Ignorable="d"
         Title="设置"
         Width="1040" Height="720"
@@ -18,9 +17,17 @@
         ui:TitleBar.Height="32">
 
     <Window.Resources>
+        <!-- Push the content CARD below the caption strip. Theme default is 0 — the card
+             then starts flush at the window top (its white surface runs right up behind
+             the caption buttons, reading as "content level with the title bar"). The
+             Gallery look — a Mica strip first, then the floating card — is exactly this
+             resource overridden (the Gallery uses 0,48 to match its TitleBar.Height=48;
+             ours is 32). IsTitleBarAutoPaddingEnabled is OFF (below), so nothing adds a
+             second in-card band — page content starts right at the card's top edge. -->
+        <Thickness x:Key="NavigationViewContentMargin">0,32,0,0</Thickness>
+
         <!-- Page title at the top of each nav category page (Win11 Settings' big
-             header, scrolling away WITH the page — no fixed NavigationView.Header).
-             The first title overrides the top margin back down (no group above it). -->
+             header, scrolling away WITH the page — no fixed NavigationView.Header). -->
         <Style x:Key="PageTitleStyle" TargetType="TextBlock">
             <Setter Property="FontSize" Value="28" />
             <Setter Property="FontWeight" Value="SemiBold" />
@@ -33,15 +40,20 @@
     <Grid>
         <!-- The 类别 shell: an iNKORE NavigationView, Win11-Settings style. The pane
              is transparent over the Mica, the content area is the library's layer
-             card; the content-side top padding (title-bar clearance) is the
-             NavigationView's own IsTitleBarAutoPaddingEnabled — it only engages
-             while the control sits at the window root (y == 0), which is why the
-             caption band below is an overlay, not a grid row above. The back button
-             is collapsed (no stack to go back on) or Auto would show a dead arrow.
-             PaneDisplayMode stays Auto: ≥1008 DIP (the default window size) the pane
-             is open with labels, 641–1007 icon-compact, <641 minimal hamburger. -->
+             card (pushed below the caption strip by the NavigationViewContentMargin
+             override in Window.Resources). IsTitleBarAutoPaddingEnabled is OFF: its
+             single TemplateSettings.TopPadding feeds THREE spots (the pane toggle
+             row, the pane content AND an in-card band above the page) — off removes
+             the dead white band at the card's top so every page starts at the card's
+             edge; the hamburger then lives in the caption strip (the usual Fluent
+             pattern), which the caption band's left margin below makes room for.
+             The back button is collapsed (no stack to go back on) or Auto would show
+             a dead arrow. PaneDisplayMode stays Auto: ≥1008 DIP (the default window
+             size) the pane is open with labels, 641–1007 icon-compact, <641 minimal
+             hamburger. -->
         <ui:NavigationView x:Name="NavView"
                            IsBackButtonVisible="Collapsed"
+                           IsTitleBarAutoPaddingEnabled="False"
                            SelectionChanged="NavView_SelectionChanged">
             <ui:NavigationView.MenuItems>
                 <ui:NavigationViewItem x:Name="NavGeneral" Content="通用" IsSelected="True">
@@ -59,12 +71,18 @@
                         <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Gauge_20_Regular}" />
                     </ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>
+            </ui:NavigationView.MenuItems>
+
+            <!-- 关于 sits at the pane's bottom-left (Win11-Settings style), out of the
+                 scrollable category list; selection flows through the same
+                 NavView_SelectionChanged as the categories above. -->
+            <ui:NavigationView.FooterMenuItems>
                 <ui:NavigationViewItem x:Name="NavAbout" Content="关于">
                     <ui:NavigationViewItem.Icon>
                         <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Info_20_Regular}" />
                     </ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>
-            </ui:NavigationView.MenuItems>
+            </ui:NavigationView.FooterMenuItems>
 
             <!-- ONE page per 类别, switched by VISIBILITY (NavView_SelectionChanged),
                  not Frame navigation: the whole window keeps a single namescope, so
@@ -93,7 +111,7 @@
                     </local:TouchDragScrollViewer.Physics>
                     <StackPanel Margin="44,0,44,32">
 
-                        <TextBlock Style="{StaticResource PageTitleStyle}" Margin="1,4,0,12" Text="通用" />
+                        <TextBlock Style="{StaticResource PageTitleStyle}" Text="通用" />
 
                         <ui:SettingsCard Header="开机自启"
                                          Margin="0,0,0,4">
@@ -442,165 +460,243 @@
                     </StackPanel>
                 </local:TouchDragScrollViewer>
 
-                <local:TouchDragScrollViewer x:Name="AboutPage"
-                                             Visibility="Collapsed"
-                                             VerticalScrollBarVisibility="Auto"
-                                             Style="{DynamicResource {x:Type ScrollViewer}}"
-                                             IsEnableSmoothManipulating="False" PanningMode="None"
-                                             local:ScrollCacheDuringTouch.Enabled="True">
-                    <local:TouchDragScrollViewer.Physics>
-                        <local:SnappyScrollPhysics />
-                    </local:TouchDragScrollViewer.Physics>
-                    <StackPanel Margin="44,0,44,32">
+                <!-- 关于 page root is a GRID, not the scroller: the two decorations below are
+                     page-FIXED, OUTSIDE the scroll viewport (a decoration inside the
+                     ScrollViewer gets hard-clipped at the viewport edge on scroll, and a
+                     clip through a gradient's mid-fade is a torn seam). Both blobs bleed
+                     off the page — safe now: every edge they meet is a REAL one, since
+                     the card sits below the caption strip (visible border + rounded
+                     corner + Mica above), so a fade ending there reads naturally. -->
+                <Grid x:Name="AboutPage" Visibility="Collapsed">
 
-                        <TextBlock Style="{StaticResource PageTitleStyle}" Text="关于" />
+                    <!-- Top-left glow (the original look, restored): half-hung off the
+                         page's top-left corner. -->
+                    <Ellipse Width="460" Height="460" IsHitTestVisible="False"
+                             HorizontalAlignment="Left" VerticalAlignment="Top"
+                             Margin="-190,-230,0,0">
+                        <Ellipse.Fill>
+                            <RadialGradientBrush>
+                                <GradientStop Color="#332AA1F2" Offset="0" />
+                                <GradientStop Color="#002AA1F2" Offset="1" />
+                            </RadialGradientBrush>
+                        </Ellipse.Fill>
+                    </Ellipse>
 
-                        <!-- The about card is an expander: app identity in the header, the
-                             external-link cards as items. The logo is logo.svg INLINED as XAML
-                             (gradients/clip and all, no raster); SVG stop/fill/stroke-opacity
-                             folds into ARGB hex. The SettingsCard template clamps HeaderIcon
-                             through a Viewbox to the SettingsCardHeaderIconMaxSize resource
-                             (20) — overridden here or the logo stays 20px. -->
-                        <ui:SettingsExpander Header="TaskMonitor" IsExpanded="True"
-                                             Description="Copyright © 2026 双霖（LineSoft）">
-                            <ui:SettingsExpander.Resources>
-                                <sys:Double x:Key="SettingsCardHeaderIconMaxSize">48</sys:Double>
-                            </ui:SettingsExpander.Resources>
-                            <ui:SettingsExpander.HeaderIcon>
-                                <!-- logo.svg (viewBox 0 0 256 256): base gradient → clipped
-                                     sheen/popup/chart/taskbar pill → inner edge. -->
-                                <Viewbox Width="48" Height="48" Stretch="Uniform">
+                    <!-- Bottom-right corner glow: ends at the card's own corner. -->
+                    <Ellipse Width="520" Height="520" IsHitTestVisible="False"
+                             HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                             Margin="0,0,-200,-250">
+                        <Ellipse.Fill>
+                            <RadialGradientBrush>
+                                <GradientStop Color="#2E1282E2" Offset="0" />
+                                <GradientStop Color="#001282E2" Offset="1" />
+                            </RadialGradientBrush>
+                        </Ellipse.Fill>
+                    </Ellipse>
+
+                    <!-- 关于 page content — deliberately NOT the card list the other pages
+                         use: a centred hero (logo → name → version pill), the app's own
+                         live CPU waveform as the creative touch, two plain link buttons
+                         and the copyright line. MinHeight=ViewportHeight centres the
+                         column vertically whenever the window has room; the scroller
+                         still engages when it doesn't. -->
+                    <local:TouchDragScrollViewer x:Name="AboutScroll"
+                                                 VerticalScrollBarVisibility="Auto"
+                                                 Style="{DynamicResource {x:Type ScrollViewer}}"
+                                                 IsEnableSmoothManipulating="False" PanningMode="None"
+                                                 local:ScrollCacheDuringTouch.Enabled="True">
+                        <local:TouchDragScrollViewer.Physics>
+                            <local:SnappyScrollPhysics />
+                        </local:TouchDragScrollViewer.Physics>
+                        <Grid MinHeight="{Binding ViewportHeight, ElementName=AboutScroll}" Margin="44,0">
+
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,24">
+
+                            <!-- logo.svg (viewBox 0 0 256 256) inlined as XAML shapes — base
+                                 gradient → clipped sheen/popup/chart/taskbar pill → inner edge;
+                                 SVG stop/fill/stroke-opacity folds into ARGB hex. -->
+                            <Viewbox Width="88" Height="88" Stretch="Uniform">
+                                <Canvas Width="256" Height="256">
+                                    <Rectangle Canvas.Left="8" Canvas.Top="8" Width="240" Height="240" RadiusX="56" RadiusY="56">
+                                        <Rectangle.Fill>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                                <GradientStop Color="#63C1F9" Offset="0" />
+                                                <GradientStop Color="#2AA1F2" Offset="0.52" />
+                                                <GradientStop Color="#1282E2" Offset="1" />
+                                            </LinearGradientBrush>
+                                        </Rectangle.Fill>
+                                    </Rectangle>
                                     <Canvas Width="256" Height="256">
-                                        <Rectangle Canvas.Left="8" Canvas.Top="8" Width="240" Height="240" RadiusX="56" RadiusY="56">
+                                        <Canvas.Clip>
+                                            <RectangleGeometry Rect="8,8,240,240" RadiusX="56" RadiusY="56" />
+                                        </Canvas.Clip>
+                                        <!-- acrylic sheen on the top half -->
+                                        <Rectangle Canvas.Left="8" Canvas.Top="8" Width="240" Height="150">
                                             <Rectangle.Fill>
-                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                                    <GradientStop Color="#63C1F9" Offset="0" />
-                                                    <GradientStop Color="#2AA1F2" Offset="0.52" />
-                                                    <GradientStop Color="#1282E2" Offset="1" />
+                                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                    <GradientStop Color="#3DFFFFFF" Offset="0" />
+                                                    <GradientStop Color="#00FFFFFF" Offset="0.55" />
                                                 </LinearGradientBrush>
                                             </Rectangle.Fill>
                                         </Rectangle>
-                                        <Canvas Width="256" Height="256">
-                                            <Canvas.Clip>
-                                                <RectangleGeometry Rect="8,8,240,240" RadiusX="56" RadiusY="56" />
-                                            </Canvas.Clip>
-                                            <!-- acrylic sheen on the top half -->
-                                            <Rectangle Canvas.Left="8" Canvas.Top="8" Width="240" Height="150">
-                                                <Rectangle.Fill>
-                                                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                                                        <GradientStop Color="#3DFFFFFF" Offset="0" />
-                                                        <GradientStop Color="#00FFFFFF" Offset="0.55" />
-                                                    </LinearGradientBrush>
-                                                </Rectangle.Fill>
-                                            </Rectangle>
-                                            <!-- acrylic detail window + its caption -->
-                                            <Rectangle Canvas.Left="60" Canvas.Top="44" Width="136" Height="150" RadiusX="14" RadiusY="14"
-                                                       Fill="#14FFFFFF" Stroke="#40FFFFFF" StrokeThickness="1.5" />
-                                            <Rectangle Canvas.Left="74" Canvas.Top="56" Width="26" Height="5" RadiusX="2.5" RadiusY="2.5"
-                                                       Fill="#66FFFFFF" />
-                                            <!-- usage-history chart inside the popup -->
-                                            <Path Data="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88 L184 178 L72 178 Z">
-                                                <Path.Fill>
-                                                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                                                        <GradientStop Color="#33FFFFFF" Offset="0" />
-                                                        <GradientStop Color="#05FFFFFF" Offset="1" />
-                                                    </LinearGradientBrush>
-                                                </Path.Fill>
-                                            </Path>
-                                            <Path Data="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88"
-                                                  Stroke="#E6FFFFFF" StrokeThickness="6.5"
-                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                            <!-- live sample dot -->
-                                            <Ellipse Canvas.Left="175" Canvas.Top="79" Width="18" Height="18" Fill="#4D35E08C" />
-                                            <Ellipse Canvas.Left="179" Canvas.Top="83" Width="10" Height="10" Fill="#35E08C" />
-                                            <!-- taskbar strip: soft shadow + frosted pill -->
-                                            <Rectangle Canvas.Left="38" Canvas.Top="150" Width="180" Height="56" RadiusX="28" RadiusY="28"
-                                                       Fill="#380B3E6B" />
-                                            <Rectangle Canvas.Left="38" Canvas.Top="146" Width="180" Height="56" RadiusX="28" RadiusY="28"
-                                                       Stroke="#47FFFFFF" StrokeThickness="1">
-                                                <Rectangle.Fill>
-                                                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                                                        <GradientStop Color="#9EFFFFFF" Offset="0" />
-                                                        <GradientStop Color="#7AFFFFFF" Offset="1" />
-                                                    </LinearGradientBrush>
-                                                </Rectangle.Fill>
-                                            </Rectangle>
-                                            <!-- group 1: CPU / 内存 -->
-                                            <Rectangle Canvas.Left="56" Canvas.Top="163" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
-                                            <Rectangle Canvas.Left="71" Canvas.Top="163" Width="24" Height="8" RadiusX="4" RadiusY="4" Fill="#1282E2" />
-                                            <Rectangle Canvas.Left="56" Canvas.Top="177" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
-                                            <Rectangle Canvas.Left="71" Canvas.Top="177" Width="16" Height="8" RadiusX="4" RadiusY="4" Fill="#5EADF4" />
-                                            <!-- group 2: 磁盘 / GPU -->
-                                            <Rectangle Canvas.Left="114" Canvas.Top="163" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
-                                            <Rectangle Canvas.Left="129" Canvas.Top="163" Width="20" Height="8" RadiusX="4" RadiusY="4" Fill="#1282E2" />
-                                            <Rectangle Canvas.Left="114" Canvas.Top="177" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
-                                            <Rectangle Canvas.Left="129" Canvas.Top="177" Width="26" Height="8" RadiusX="4" RadiusY="4" Fill="#9B8CF2" />
-                                            <!-- group 3: 网络 ↑ / ↓ -->
-                                            <Path Data="M192 173 V161 M186.5 166.5 L192 161 L197.5 166.5"
-                                                  Stroke="#23B57F" StrokeThickness="6" StrokeLineJoin="Round"
-                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                            <Path Data="M192 175 V187 M186.5 181.5 L192 187 L197.5 181.5"
-                                                  Stroke="#F0A02E" StrokeThickness="6" StrokeLineJoin="Round"
-                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
-                                        </Canvas>
-                                        <!-- Fluent inner edge -->
-                                        <Rectangle Canvas.Left="9" Canvas.Top="9" Width="238" Height="238" RadiusX="55" RadiusY="55"
-                                                   Stroke="#47FFFFFF" StrokeThickness="1.5" />
+                                        <!-- acrylic detail window + its caption -->
+                                        <Rectangle Canvas.Left="60" Canvas.Top="44" Width="136" Height="150" RadiusX="14" RadiusY="14"
+                                                   Fill="#14FFFFFF" Stroke="#40FFFFFF" StrokeThickness="1.5" />
+                                        <Rectangle Canvas.Left="74" Canvas.Top="56" Width="26" Height="5" RadiusX="2.5" RadiusY="2.5"
+                                                   Fill="#66FFFFFF" />
+                                        <!-- usage-history chart inside the popup -->
+                                        <Path Data="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88 L184 178 L72 178 Z">
+                                            <Path.Fill>
+                                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                    <GradientStop Color="#33FFFFFF" Offset="0" />
+                                                    <GradientStop Color="#05FFFFFF" Offset="1" />
+                                                </LinearGradientBrush>
+                                            </Path.Fill>
+                                        </Path>
+                                        <Path Data="M72 110 C85.6 90 97.5 112 112.7 98 C126.3 85 134.8 68 151.8 80 C165.3 90 172.1 106 184 88"
+                                              Stroke="#E6FFFFFF" StrokeThickness="6.5"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                        <!-- live sample dot -->
+                                        <Ellipse Canvas.Left="175" Canvas.Top="79" Width="18" Height="18" Fill="#4D35E08C" />
+                                        <Ellipse Canvas.Left="179" Canvas.Top="83" Width="10" Height="10" Fill="#35E08C" />
+                                        <!-- taskbar strip: soft shadow + frosted pill -->
+                                        <Rectangle Canvas.Left="38" Canvas.Top="150" Width="180" Height="56" RadiusX="28" RadiusY="28"
+                                                   Fill="#380B3E6B" />
+                                        <Rectangle Canvas.Left="38" Canvas.Top="146" Width="180" Height="56" RadiusX="28" RadiusY="28"
+                                                   Stroke="#47FFFFFF" StrokeThickness="1">
+                                            <Rectangle.Fill>
+                                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                    <GradientStop Color="#9EFFFFFF" Offset="0" />
+                                                    <GradientStop Color="#7AFFFFFF" Offset="1" />
+                                                </LinearGradientBrush>
+                                            </Rectangle.Fill>
+                                        </Rectangle>
+                                        <!-- group 1: CPU / 内存 -->
+                                        <Rectangle Canvas.Left="56" Canvas.Top="163" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                        <Rectangle Canvas.Left="71" Canvas.Top="163" Width="24" Height="8" RadiusX="4" RadiusY="4" Fill="#1282E2" />
+                                        <Rectangle Canvas.Left="56" Canvas.Top="177" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                        <Rectangle Canvas.Left="71" Canvas.Top="177" Width="16" Height="8" RadiusX="4" RadiusY="4" Fill="#5EADF4" />
+                                        <!-- group 2: 磁盘 / GPU -->
+                                        <Rectangle Canvas.Left="114" Canvas.Top="163" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                        <Rectangle Canvas.Left="129" Canvas.Top="163" Width="20" Height="8" RadiusX="4" RadiusY="4" Fill="#1282E2" />
+                                        <Rectangle Canvas.Left="114" Canvas.Top="177" Width="11" Height="8" RadiusX="4" RadiusY="4" Fill="#731282E2" />
+                                        <Rectangle Canvas.Left="129" Canvas.Top="177" Width="26" Height="8" RadiusX="4" RadiusY="4" Fill="#9B8CF2" />
+                                        <!-- group 3: 网络 ↑ / ↓ -->
+                                        <Path Data="M192 173 V161 M186.5 166.5 L192 161 L197.5 166.5"
+                                              Stroke="#23B57F" StrokeThickness="6" StrokeLineJoin="Round"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                        <Path Data="M192 175 V187 M186.5 181.5 L192 187 L197.5 181.5"
+                                              Stroke="#F0A02E" StrokeThickness="6" StrokeLineJoin="Round"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
                                     </Canvas>
-                                </Viewbox>
-                            </ui:SettingsExpander.HeaderIcon>
-                            <TextBlock x:Name="VersionText"
-                                       VerticalAlignment="Center"
-                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                            <ui:SettingsExpander.Items>
-                                <!-- External-link cards. The GitHub icon is the official GitHub mark
-                                     path (its fill-rule=evenodd is WPF's default), tinted by the theme. -->
-                                <ui:SettingsCard Header="GitHub"
-                                                 IsClickEnabled="True"
-                                                 Click="GitHubCard_Click">
-                                    <!-- The expander overrides SettingsCardHeaderIconMaxSize to 48
-                                         for its own header logo; resources inherit DOWN the tree,
-                                         so restore the 20 default here or the mark renders 48px. -->
-                                    <ui:SettingsCard.Resources>
-                                        <sys:Double x:Key="SettingsCardHeaderIconMaxSize">20</sys:Double>
-                                    </ui:SettingsCard.Resources>
-                                    <ui:SettingsCard.HeaderIcon>
-                                        <Path Stretch="Uniform"
+                                    <!-- Fluent inner edge -->
+                                    <Rectangle Canvas.Left="9" Canvas.Top="9" Width="238" Height="238" RadiusX="55" RadiusY="55"
+                                               Stroke="#47FFFFFF" StrokeThickness="1.5" />
+                                </Canvas>
+                            </Viewbox>
+
+                            <TextBlock Text="TaskMonitor" FontSize="30" FontWeight="SemiBold"
+                                       HorizontalAlignment="Center" Margin="0,18,0,0" />
+
+                            <!-- The version as a quiet pill instead of a header side-note. -->
+                            <Border HorizontalAlignment="Center" Margin="0,10,0,0"
+                                    CornerRadius="12" Padding="12,3"
+                                    Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                                <TextBlock x:Name="VersionText" FontSize="12"
+                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                            </Border>
+
+                            <!-- The creative touch: the app's OWN live CPU waveform — push-fed
+                                 by RefreshAbout() off App's SnapshotChanged pump (no timer here),
+                                 so it only redraws while this page shows, and collapses entirely
+                                 while CPU sampling is off (a flat line would be a lie). The dot
+                                 rides the newest sample; its pulse is render-thread only. -->
+                            <StackPanel x:Name="LiveBand" Width="400" Margin="0,30,0,0" Visibility="Collapsed">
+                                <Grid Margin="0,0,0,6">
+                                    <TextBlock Text="实时 CPU" FontSize="12"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock x:Name="LiveCpuText" FontSize="12" FontWeight="SemiBold"
+                                               HorizontalAlignment="Right" />
+                                </Grid>
+                                <Canvas x:Name="LiveWave" Width="400" Height="56" ClipToBounds="True">
+                                    <Path x:Name="LiveFill">
+                                        <Path.Fill>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                <GradientStop Color="#3D2AA1F2" Offset="0" />
+                                                <GradientStop Color="#002AA1F2" Offset="1" />
+                                            </LinearGradientBrush>
+                                        </Path.Fill>
+                                    </Path>
+                                    <Polyline x:Name="LiveLine" StrokeThickness="2" StrokeLineJoin="Round"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round">
+                                        <Polyline.Stroke>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                <GradientStop Color="#63C1F9" Offset="0" />
+                                                <GradientStop Color="#1282E2" Offset="1" />
+                                            </LinearGradientBrush>
+                                        </Polyline.Stroke>
+                                    </Polyline>
+                                    <Ellipse x:Name="LiveDot" Width="8" Height="8" Fill="#35E08C">
+                                        <Ellipse.Triggers>
+                                            <EventTrigger RoutedEvent="Loaded">
+                                                <BeginStoryboard>
+                                                    <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                         From="1" To="0.35" Duration="0:0:1.2" />
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </EventTrigger>
+                                        </Ellipse.Triggers>
+                                    </Ellipse>
+                                </Canvas>
+                            </StackPanel>
+
+                            <!-- External links: plain Fluent buttons, not cards. The GitHub
+                                 icon is the official GitHub mark path (its fill-rule=evenodd
+                                 is WPF's default), tinted by the theme. -->
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,34,0,0">
+                                <Button Click="GitHubCard_Click">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Path Width="16" Height="16" Stretch="Uniform"
                                               Fill="{DynamicResource TextFillColorPrimaryBrush}"
                                               Data="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-                                    </ui:SettingsCard.HeaderIcon>
-                                    <ui:SettingsCard.ActionIcon>
-                                        <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.OpenInNewWindow}" />
-                                    </ui:SettingsCard.ActionIcon>
-                                </ui:SettingsCard>
+                                        <TextBlock Text="GitHub" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Button>
+                                <Button Margin="12,0,0,0" Click="AcknowledgementsCard_Click">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.Heart_20_Regular}" FontSize="16" />
+                                        <TextBlock Text="参考 / 致谢 / 开源许可" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
 
-                                <ui:SettingsCard Header="参考 / 致谢 / 开源许可"
-                                                 IsClickEnabled="True"
-                                                 Click="AcknowledgementsCard_Click">
-                                    <ui:SettingsCard.ActionIcon>
-                                        <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.OpenInNewWindow}" />
-                                    </ui:SettingsCard.ActionIcon>
-                                </ui:SettingsCard>
-                            </ui:SettingsExpander.Items>
-                        </ui:SettingsExpander>
-
-                    </StackPanel>
-                </local:TouchDragScrollViewer>
+                            <TextBlock Text="Copyright © 2026 双霖（LineSoft）" FontSize="12"
+                                       HorizontalAlignment="Center" Margin="0,28,0,0"
+                                       Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                        </StackPanel>
+                        </Grid>
+                    </local:TouchDragScrollViewer>
+                </Grid>
             </Grid>
         </ui:NavigationView>
 
         <!-- Caption band (extended title-bar area), OVERLAID on the NavigationView:
              transparent so the Mica shows through and iNKORE's TitleBar hit-tests it
-             as the drag region; the TextBlock itself is hit-test-invisible. The
-             NavigationView's own top padding (IsTitleBarAutoPaddingEnabled) keeps the
-             pane toggle and the content below this band. Holds only the small caption
+             as the drag region; the TextBlock itself is hit-test-invisible. The left
+             48 DIP stays clear of the hamburger, which lives in this strip now that
+             IsTitleBarAutoPaddingEnabled is off — the margin keeps the band from
+             swallowing its clicks. The band is 46 tall (pane margin 3 + the 40-tall
+             toggle row + 3) so the caption title shares the hamburger's centerline
+             (a 32 band would float it ~7 DIP high). Holds only the small caption
              title, Win11-Settings style. -->
-        <Border Height="32" VerticalAlignment="Top" Background="Transparent">
+        <Border Height="46" VerticalAlignment="Top" Background="Transparent"
+                Margin="48,0,0,0">
             <TextBlock Text="设置"
                        Style="{DynamicResource CaptionTextBlockStyle}"
                        Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                        VerticalAlignment="Center"
-                       Margin="16,0,0,0"
+                       Margin="12,0,0,0"
                        IsHitTestVisible="False" />
         </Border>
     </Grid>
