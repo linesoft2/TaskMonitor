@@ -305,7 +305,7 @@ Hover = `HitTest` + a real `Popup` re-rendered per `Refresh`.
 *`src/UI/Common/TouchDragScrollViewer.cs`, `SnappyScrollPhysics.cs`,
 `ScrollCacheDuringTouch.cs`*
 
-Full design: [`scroll-stack.md`](scroll-stack.md). The one rule that bites: **the six
+Full design: [`scroll-stack.md`](scroll-stack.md). The one rule that bites: **the nine
 scrollers must set `Style="{DynamicResource {x:Type ScrollViewer}}"` explicitly** — WPF
 keyless styles match `TargetType` exactly and do NOT reach derived controls, so without it
 the control silently falls back to the Aero scrollbar.

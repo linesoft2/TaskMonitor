@@ -186,7 +186,7 @@ src/
     Common/                 formatters · ProcessListTip · ProcessKillMenu (the process lists' right-click 结束进程: list-level menu + confirm card, same rebind-proof pattern as ProcessListTip) · ProcessIconCache (the shared per-exe icon cache) · ChartTipHost/ChartPalette (the shared chart hover tip + colors) · PivotNavButtonFix · FollowTagPanel · the scroll stack
     Details/                the five IDetailViews
     Charts/                 hand-drawn DrawingContext charts
-    Settings/               SettingsWindow (ONE scroll page, 类别 sections via TextBlock headers: 通用 / 外观 / 采样 / 关于 — SettingsCard/SettingsExpander)
+    Settings/               SettingsWindow (iNKORE NavigationView 类别 shell: 通用 / 外观 / 采样项目 / 关于 — one visibility-switched TouchDragScrollViewer page each; cards SettingsCard/SettingsExpander)
 ```
 
 **App.xaml under `src/`** needs the explicit `<Page Remove>` + `<ApplicationDefinition Include>`

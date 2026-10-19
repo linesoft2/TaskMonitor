@@ -11,7 +11,7 @@ This file provides guidance to AI coding agents when working with code in this r
 | taskbar geometry, boot/explorer-restart, D2D/DXGI, samplers, theme, process rows, 悬浮模式/贴边隐藏/全屏时隐藏, crash & stall forensics | `docs/gotchas.md` |
 | anything spanning files: the two threads, cross-thread contract, detail/pin model, startup & elevation, project layout | `docs/architecture.md` |
 | a 设置 item's wiring to its sampler | `docs/settings-plumbing.md` |
-| any of the six scroll views | `docs/scroll-stack.md` |
+| any of the nine scroll views | `docs/scroll-stack.md` |
 
 ## 工程化原则
 

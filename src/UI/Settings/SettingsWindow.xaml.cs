@@ -11,18 +11,26 @@ namespace task_monitor
 {
     /// <summary>
     /// The settings window — a WinUI-look shell (iNKORE modern window style + Mica)
-    /// holding ONE scrollable page (Win11 Settings style, cards grouped by 类别
-    /// TextBlock headers): 通用 (开机自启动 / 采样间隔 / 检查更新 / 更新源), 外观 (主题 / 靠左显示 — an
+    /// whose left pane is an iNKORE NavigationView, one item per 类别 (Win11 Settings
+    /// style; PaneDisplayMode Auto — labeled ≥1008 DIP, icon-compact 641–1007, minimal
+    /// hamburger below): 通用 (开机自启动 / 采样间隔 / 检查更新 / 更新源), 外观 (主题 / 靠左显示 — an
     /// expander whose item is 靠左位置, or a plain card where that item does not exist,
-    /// i.e. on the classical Win10 taskbar — plus 紧凑模式, the item-pitch switch), 采样 (one expander per metric, the toggle in
+    /// i.e. on the classical Win10 taskbar — plus 紧凑模式, the item-pitch switch, and
+    /// 悬浮模式 with its four sub-cards), 采样项目 (one expander per metric, the toggle in
     /// its content area enabling/disabling that metric's sampling; 磁盘's and GPU's
     /// expanders also hold 显示方式 + the specific-device picker, GPU's additionally the
     /// 任务栏显示 (使用率/温度/两者) trio with 温度来源 and 温度单位, 网络's the 适配器
     /// picker, the 公网 IP lookup switch and the Clash/Mihomo integration (switch +
-    /// endpoint + 测试连接); plus the section-wide 合并相同程序 card) and 关于. Opened
-    /// from the taskbar overlay's right-click menu (App keeps at most one instance).
-    /// Every card is live: initial values + change callbacks arrive via the ctor (App
-    /// owns settings.yaml, the scheduled task, the app theme and the taskbar overlay).
+    /// endpoint + 测试连接); plus the section-wide 合并相同程序 card) and 关于. Each 类别
+    /// is its own TouchDragScrollViewer page, switched by VISIBILITY in
+    /// <see cref="NavView_SelectionChanged"/> — NOT Frame navigation, so the window
+    /// keeps one namescope: every control/handler pair (and the ctor's initial-state
+    /// push into all of them, visible page or not) works exactly as the old single
+    /// scroll page did, and each page keeps its own scroll position across switches.
+    /// Opened from the taskbar overlay's right-click menu (App keeps at most one
+    /// instance). Every card is live: initial values + change callbacks arrive via the
+    /// ctor (App owns settings.yaml, the scheduled task, the app theme and the taskbar
+    /// overlay).
     /// </summary>
     public partial class SettingsWindow : Window
     {
@@ -701,6 +709,22 @@ namespace task_monitor
 
         private const string GitHubUrl = "https://github.com/linesoft2/TaskMonitor";
         private const string AcknowledgementsUrl = "https://github.com/linesoft2/TaskMonitor#参考--致谢--开源许可";
+
+        // The nav pane's 类别 switch. Only ever flips the four pages' Visibility —
+        // deliberately without the _loaded guard: it carries no change callback to
+        // App, and it must also run for the selection IsSelected="True" establishes
+        // in XAML (the pages' XAML defaults already match, so the early fire during
+        // InitializeComponent is a no-op there — the null check only covers it firing
+        // before the pages themselves are parsed).
+        private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+        {
+            if (GeneralPage == null) return;
+            object item = args.SelectedItem;
+            GeneralPage.Visibility = item == NavGeneral ? Visibility.Visible : Visibility.Collapsed;
+            AppearancePage.Visibility = item == NavAppearance ? Visibility.Visible : Visibility.Collapsed;
+            SamplingPage.Visibility = item == NavSampling ? Visibility.Visible : Visibility.Collapsed;
+            AboutPage.Visibility = item == NavAbout ? Visibility.Visible : Visibility.Collapsed;
+        }
 
         private void GitHubCard_Click(object sender, RoutedEventArgs e) => OpenUrl(GitHubUrl);
 
