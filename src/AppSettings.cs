@@ -61,6 +61,19 @@ namespace task_monitor
         public bool? OverlaySnapToStart { get; set; }
 
         /// <summary>
+        /// 紧凑模式 (设置 → 外观): tighten the item pitch of the taskbar overlay and the
+        /// floating widget alike — narrower horizontal cells (65/78 vs 70/84 DIP, plus a
+        /// smaller row inset), a tighter vertical grid row (18 vs 24 DIP) and two-line block
+        /// (40 vs 44), and inside the multi-row strip blocks (GPU 两者 / 网络) natural-height
+        /// lines clustered tight instead of span-derived bands. null = off (the default —
+        /// only the enabled state is written). The floors of those values are text-fit
+        /// measurements at 13px Segoe UI — see the compact constants block in TaskbarWindow.
+        /// Pushed live via <see cref="TaskbarWindow.SetCompactLayout"/> (a layout change:
+        /// the overlay resizes at once).
+        /// </summary>
+        public bool? CompactLayout { get; set; }
+
+        /// <summary>
         /// 悬浮模式 (设置 → 外观): true = the overlay DETACHES from the taskbar (从任务栏脱离开来
         /// — the taskbar keeps no copy; mechanism + rules: gotchas §36) and lives on the desktop
         /// as a free-floating card widget; null = off (the default — only the enabled state is

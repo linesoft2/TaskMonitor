@@ -39,7 +39,11 @@ disagree, the code wins — fix this file.
     (44 DIP per row; the padding is what keeps a label with its own value — gotchas §44), a
     70–139-DIP bar keeps one one-line column, and 26H2's WIDENED vertical bar (320px @200% =
     160 DIP) flows the packed rows into two or more 70/84-DIP columns (the row flow is
-    `ComputeVerticalLayout`; arithmetic, rounding and the 2026-10-17 incident: gotchas §44). The
+    `ComputeVerticalLayout`; arithmetic, rounding and the 2026-10-17 incident: gotchas §44).
+    紧凑模式 (设置 → 外观, `CompactLayout`) tightens every form's pitch from the horizontal
+    cells to these row heights — one `compact` argument threaded through every
+    `ComputeLayout`/`ComputeTargetSize` call, values and their text-fit floors documented at
+    the constants block in `TaskbarWindow` (plumbing: settings-plumbing §10). The
     Win11 family anchors along the taskbar's axis (`CalcPositionVertical`: tray end by default,
     the top corner / above Start when 靠左显示) since it has no band to shrink. `DetailWindow`
     anchors its popup to the taskbar's screen edge (`GetTaskbarEdge`), and an orientation flip

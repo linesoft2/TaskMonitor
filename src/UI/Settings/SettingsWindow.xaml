@@ -157,6 +157,20 @@
                                  Visibility="Collapsed"
                                  Margin="0,0,0,4" />
 
+                <!-- 紧凑模式: tightens the item pitch of the taskbar overlay AND the floating
+                     widget — narrower cells (and a smaller row inset), a tighter vertical
+                     grid row and two-line block. The switch is live: the overlay re-lays
+                     out and resizes the moment it flips. Applies to both forms, so it is a
+                     plain card, never gated on 悬浮模式. -->
+                <ui:SettingsCard Header="紧凑模式"
+                                 Description="收紧任务栏与悬浮窗中各项目之间的间距。"
+                                 Margin="0,0,0,4">
+                    <ui:SettingsCard.HeaderIcon>
+                        <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.TextColumnOneNarrow_20_Regular}" />
+                    </ui:SettingsCard.HeaderIcon>
+                    <ui:ToggleSwitch x:Name="CompactSwitch" Toggled="CompactSwitch_Toggled" />
+                </ui:SettingsCard>
+
                 <!-- 悬浮模式: the overlay leaves the taskbar entirely and lives on the
                      desktop as a draggable acrylic widget (the detail popup's material).
                      Its four sub-settings (置顶显示 / 贴边隐藏 / 全屏时隐藏 / 透明度) are items

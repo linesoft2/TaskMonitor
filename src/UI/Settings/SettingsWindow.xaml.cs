@@ -14,7 +14,7 @@ namespace task_monitor
     /// holding ONE scrollable page (Win11 Settings style, cards grouped by 类别
     /// TextBlock headers): 通用 (开机自启动 / 采样间隔 / 检查更新 / 更新源), 外观 (主题 / 靠左显示 — an
     /// expander whose item is 靠左位置, or a plain card where that item does not exist,
-    /// i.e. on the classical Win10 taskbar), 采样 (one expander per metric, the toggle in
+    /// i.e. on the classical Win10 taskbar — plus 紧凑模式, the item-pitch switch), 采样 (one expander per metric, the toggle in
     /// its content area enabling/disabling that metric's sampling; 磁盘's and GPU's
     /// expanders also hold 显示方式 + the specific-device picker, GPU's additionally the
     /// 任务栏显示 (使用率/温度/两者) trio with 温度来源 and 温度单位, 网络's the 适配器
@@ -29,6 +29,7 @@ namespace task_monitor
         private readonly Action<bool, bool> _placementChanged;
         private readonly Action<bool> _autoStartChanged;
         private readonly Action<int> _themeChanged;           // 0=跟随系统 1=浅色 2=深色
+        private readonly Action<bool> _compactChanged;        // 紧凑模式 (the item pitch)
         private readonly Action<bool> _floatingChanged;       // 悬浮模式 (the whole form flips)
         private readonly Action<bool> _floatingTopmostChanged; // 悬浮模式 → 置顶显示
         private readonly Action<bool> _floatingEdgeHideChanged; // 悬浮模式 → 贴边隐藏
@@ -62,6 +63,9 @@ namespace task_monitor
         /// <param name="autoStartChanged">Reported with the requested on/off; on a schtasks
         /// failure App calls <see cref="SyncAutoStart"/> to snap the toggle back.</param>
         /// <param name="themeIndex">0=跟随系统 (yaml null) 1=浅色 2=深色.</param>
+        /// <param name="compactLayout">Current 紧凑模式 state (yaml null = the off default).</param>
+        /// <param name="compactLayoutChanged">Reported with the requested on/off — applied
+        /// live (the overlay re-lays out and resizes at once; both forms follow).</param>
         /// <param name="floatingMode">Current 悬浮模式 state (yaml null = the off default).</param>
         /// <param name="floatingChanged">Reported with the requested on/off — App rebuilds the
         /// overlay window in its other form (taskbar child ⟷ desktop widget).</param>
@@ -140,6 +144,7 @@ namespace task_monitor
         internal SettingsWindow(bool overlayOnLeft, bool snapToStart, Action<bool, bool> placementChanged,
             bool autoStartOn, Action<bool> autoStartChanged,
             int themeIndex, Action<int> themeChanged,
+            bool compactLayout, Action<bool> compactLayoutChanged,
             bool floatingMode, Action<bool> floatingChanged,
             bool floatingTopmost, Action<bool> floatingTopmostChanged,
             bool floatingEdgeHide, Action<bool> floatingEdgeHideChanged,
@@ -167,6 +172,7 @@ namespace task_monitor
             _placementChanged = placementChanged;
             _autoStartChanged = autoStartChanged;
             _themeChanged = themeChanged;
+            _compactChanged = compactLayoutChanged;
             _floatingChanged = floatingChanged;
             _floatingTopmostChanged = floatingTopmostChanged;
             _floatingEdgeHideChanged = floatingEdgeHideChanged;
@@ -208,6 +214,7 @@ namespace task_monitor
             }
             AutoStartSwitch.IsOn = autoStartOn;
             ThemeCombo.SelectedIndex = themeIndex < 0 || themeIndex > 2 ? 0 : themeIndex;
+            CompactSwitch.IsOn = compactLayout;
             FloatingSwitch.IsOn = floatingMode;
             FloatingTopmostSwitch.IsOn = floatingTopmost;
             // 置顶显示 only means anything in the floating form (the embedded overlay inherits
@@ -436,6 +443,21 @@ namespace task_monitor
             _loaded = false;
             FloatingFullscreenHideSwitch.IsOn = on;
             _loaded = true;
+        }
+
+        /// <summary>紧凑模式 was flipped from the taskbar right-click menu, without
+        /// re-firing the change callback.</summary>
+        public void SyncCompactLayout(bool on)
+        {
+            _loaded = false;
+            CompactSwitch.IsOn = on;
+            _loaded = true;
+        }
+
+        private void CompactSwitch_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded) return;
+            _compactChanged?.Invoke(CompactSwitch.IsOn);
         }
 
         private void OnLeftSwitch_Toggled(object sender, RoutedEventArgs e)

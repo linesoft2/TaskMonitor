@@ -284,6 +284,7 @@ namespace task_monitor
             // settings page reports later changes via OnOverlayPlacementChanged /
             // OnSampleIntervalChanged).
             _taskbar.SetPlacement(_config.OverlayOnLeft != false, _config.OverlaySnapToStart == true);
+            _taskbar.SetCompactLayout(_config.CompactLayout == true);   // null = off (the default)
             _taskbar.SetSampleInterval(_config.SampleIntervalMs ?? 1000);
             _taskbar.SetMetricSamplingMask(SamplingMaskOf(_config));
             _taskbar.SetMergeSamePathProcesses(_config.MergeSamePathProcesses != false); // null = on (the default)
@@ -679,6 +680,7 @@ namespace task_monitor
         private MenuItem _menuFloatingTopmost;
         private MenuItem _menuFloatingEdgeHide;
         private MenuItem _menuFloatingFullscreenHide;
+        private MenuItem _menuCompact;
         private Window _menuHost;
         // The settings window — at most one; a second menu click re-activates it.
         private SettingsWindow _settings;
@@ -701,6 +703,7 @@ namespace task_monitor
                 _config.OverlayOnLeft != false, _config.OverlaySnapToStart == true, OnOverlayPlacementChanged,
                 StartupTask.IsEnabled(), OnAutoStartChanged,
                 ThemeIndexOf(_config.Theme), OnThemeChanged,
+                _config.CompactLayout == true, OnCompactLayoutChanged,
                 _config.FloatingMode == true, OnFloatingModeChanged,
                 _config.FloatingTopmost != false, OnFloatingTopmostChanged,
                 _config.FloatingEdgeHide == true, OnFloatingEdgeHideChanged,
@@ -746,6 +749,21 @@ namespace task_monitor
             TrySaveConfig();
             _taskbar.SetPlacement(onLeft, snapToStart);
             CloseDetail();
+        }
+
+        // 设置 外观 → 紧凑模式 (or the right-click menu's checkable item): persist (null =
+        // off — only the enabled state is written) and hand the flip to the taskbar thread,
+        // whose WM_APP_SET_METRICS resize re-lays the overlay out at once (cells, row pitch
+        // and insets all change — in the floating form the card narrows with them). The
+        // transient flyout is dropped like a placement change: its anchor column's centre
+        // just moved. Pinned windows are user-placed and stay.
+        private void OnCompactLayoutChanged(bool on)
+        {
+            _config.CompactLayout = on ? true : (bool?)null;
+            TrySaveConfig();
+            CloseDetail();
+            _taskbar.SetCompactLayout(on);
+            _settings?.SyncCompactLayout(on);
         }
 
         // 设置 外观 → 悬浮模式 (or the right-click menu's checkable item): persist (null =
@@ -1129,8 +1147,29 @@ namespace task_monitor
             _menuFloatingFullscreenHide.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemStyle");
             _menuFloatingFullscreenHide.Click += (s, e) => OnFloatingFullscreenHideChanged(_menuFloatingFullscreenHide.IsChecked);
 
-            var separator = new Separator();
-            separator.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemSeparatorStyle");
+            // 紧凑模式 mirrors the 设置 → 外观 switch — unlike the four above it applies to
+            // BOTH forms (taskbar overlay and floating widget), so it never greys out. It
+            // sits in its own separator-bounded section: the four 悬浮模式-related items are
+            // one group, 设置/退出 below are the app actions, and this one stands alone
+            // between them (it belongs to neither group).
+            _menuCompact = new MenuItem
+            {
+                Header = "紧凑模式",
+                IsCheckable = true,
+                // Same glyph as the settings card's HeaderIcon; the icon set ships no _16_
+                // variant of TextColumnOneNarrow, so the 20-px glyph renders at the menu's
+                // 16 px like its siblings (font glyphs are vector — scaling is lossless).
+                Icon = new FontIcon { Icon = FluentSystemIcons.TextColumnOneNarrow_20_Regular, FontSize = 16 },
+            };
+            _menuCompact.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemStyle");
+            _menuCompact.Click += (s, e) => OnCompactLayoutChanged(_menuCompact.IsChecked);
+
+            Separator NewSeparator()
+            {
+                var s = new Separator();
+                s.SetResourceReference(FrameworkElement.StyleProperty, "DefaultMenuItemSeparatorStyle");
+                return s;
+            }
 
             var settings = new MenuItem
             {
@@ -1154,14 +1193,16 @@ namespace task_monitor
             _taskbarMenu.Items.Add(_menuFloatingTopmost);
             _taskbarMenu.Items.Add(_menuFloatingEdgeHide);
             _taskbarMenu.Items.Add(_menuFloatingFullscreenHide);
-            _taskbarMenu.Items.Add(separator);
+            _taskbarMenu.Items.Add(NewSeparator());
+            _taskbarMenu.Items.Add(_menuCompact);
+            _taskbarMenu.Items.Add(NewSeparator());
             _taskbarMenu.Items.Add(settings);
             _taskbarMenu.Items.Add(exit);
 
             // Reflect the live state on every open: 置顶显示/贴边隐藏 only mean anything in the
             // floating form, so they grey out with the mode — the same rule as the settings
-            // page's FloatingTopmostCard/FloatingEdgeHideCard. (Programmatic IsChecked sets
-            // don't fire Click.)
+            // page's FloatingTopmostCard/FloatingEdgeHideCard. 紧凑模式 applies to both forms
+            // and stays enabled. (Programmatic IsChecked sets don't fire Click.)
             _taskbarMenu.Opened += (s, e) =>
             {
                 bool isFloating = _config.FloatingMode == true;
@@ -1172,6 +1213,7 @@ namespace task_monitor
                 _menuFloatingEdgeHide.IsEnabled = isFloating;
                 _menuFloatingFullscreenHide.IsChecked = _config.FloatingFullscreenHide != false;
                 _menuFloatingFullscreenHide.IsEnabled = isFloating;
+                _menuCompact.IsChecked = _config.CompactLayout == true;
             };
 
             // There is no main window, so the menu needs an invisible host window to attach to.

@@ -209,6 +209,32 @@ grey out outside the floating form, same rule as their settings cards).
 Full mechanism, the measured material choice and the creation-time rules:
 [`gotchas.md` §36](gotchas.md#36-悬浮模式--the-same-window-detached).
 
+## 10. 紧凑模式 — `CompactLayout` (null = off)
+
+A TaskbarWindow-layout chain, not a sampler one — like §4's content, the value is read by
+every `ComputeLayout` call (it threads through `ComputeTargetSize`, Draw, HitTest and the
+UI-thread layout accessors as the trailing `compact` argument):
+
+| | |
+|---|---|
+| Setter | `TaskbarWindow.SetCompactLayout(bool)` |
+| Taskbar state | `_compactLayout` (volatile; **no sampler state** — pure geometry) |
+| WM_APP | **YES — `WM_APP_SET_METRICS`**: the item pitch changes with it, so the window resizes + redraws at once (`ResizeForLayout` reuses the 采样-toggle dance) |
+
+Tightens the item pitch of EVERY form — taskbar overlay and floating widget alike:
+horizontal cells 70/84 → 65/78 DIP (row inset 5 → 3), vertical multi-column grid row
+24 → 18 DIP, two-line block 44 → 40 (its pad 4 → 2), and — inside the multi-row strip
+blocks — GPU(两者)'s three lines and 网络's ↑/↓ four stack at natural line heights as a
+centred cluster instead of span-derived bands (row gaps ~8–10 → ~1.2 DIP; the plain
+two-line blocks keep the derived pair). The single-column one-line strip keeps its
+16-DIP pitch (already the compact form). The floors of those values are text-fit
+measurements at 13px Segoe UI (the widest row is 内存 + 100% = 57.7 DIP; the widest net
+value a 10-Gbit NIC's "1192.1 MB/s" ≈ 71.3 DIP) — derivation and constants: the compact
+block at the top of `TaskbarWindow`'s layout constants. Settings card (设置 → 外观,
+never gated on 悬浮模式 — it applies to both forms) **and** a checkable right-click
+menu item, both funnelling into `App.OnCompactLayoutChanged` (which also drops the
+transient flyout, like a placement change — its anchor column moved).
+
 ## Not in settings.yaml at all
 
 **开机自启动** — the scheduled task itself is the state (`src/StartupTask.cs`). Never add a
