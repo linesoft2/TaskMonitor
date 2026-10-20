@@ -1,4 +1,5 @@
 # 打 v* tag 推送后自动发布：windows-latest 构建单文件 exe → GitHub Release → CNB Release（镜像）。
+# 发布文案 = CHANGELOG.md 中该 tag 的段落（手写，缺失/为空直接 fail）。
 # CNB_TOKEN secret 需要 repo-code 读写（推 tag）+ repo-contents 读写（创建 release / 上传附件）。
 name: Release
 
@@ -15,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 变更日志需要完整 tag 历史
+          fetch-depth: 0 # 推 tag 到 CNB 镜像需要完整历史（浅克隆缺祖先提交无法推送）
 
       # 发版 tag 必须与 csproj <Version> 一致（版本号唯一来源，SDK 据此生成
       # AssemblyInformationalVersion —— 软件内"关于"版本号）——不一致直接失败，
@@ -40,26 +41,35 @@ jobs:
           $exe = "bin/Release/net48/task_monitor.exe"
           if (-not (Test-Path $exe)) { throw "artifact missing: $exe" }
 
-          # 自上一个 tag 以来的提交列表作为 release notes（首个 tag 则为全部历史）
-          $prev = git tag --sort=-v:refname | Where-Object { $_ -ne $tag } | Select-Object -First 1
-          $range = if ($prev) { "$prev..$tag" } else { $tag }
-          $notes = (git log --pretty='- %s' $range) -join "`n"
+          # release 文案 = CHANGELOG.md 中该 tag 的段落（下一个 '## ' 标题前为止）。
+          # 缺失/为空直接 fail，绝不悄悄回退到自动提取 commit 列表。
+          $heading = "^##\s+$([regex]::Escape($tag))\s*$"
+          $inSection = $false
+          $section = foreach ($line in Get-Content CHANGELOG.md -Encoding UTF8) {
+              if ($line -match '^##\s') {
+                  if ($inSection) { break }
+                  $inSection = $line -match $heading
+              } elseif ($inSection) { $line }
+          }
+          if (-not $inSection) { throw "CHANGELOG.md 缺少 '## $tag' 段落 —— 发版前先写好该版本文案" }
+          $notes = ($section -join "`n").Trim()
+          if (-not $notes) { throw "CHANGELOG.md 的 '## $tag' 段落为空 —— 发版前先写好该版本文案" }
+          # 走文件而非 GITHUB_ENV：不受多行 heredoc 定界符/大小限制
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8 -NoNewline
 
           # 附件名带架构（当前仅 x64）
           $asset = "task_monitor-$tag-x64.exe"
           Copy-Item $exe $asset
 
-          "RELEASE_NOTES<<EOF" >> $env:GITHUB_ENV
-          $notes >> $env:GITHUB_ENV
-          "EOF" >> $env:GITHUB_ENV
           "ASSET_NAME=$asset" >> $env:GITHUB_ENV
-          Write-Host "asset: $asset ($([math]::Round((Get-Item $asset).Length / 1MB, 2)) MB), prev tag: $prev"
+          Write-Host "asset: $asset ($([math]::Round((Get-Item $asset).Length / 1MB, 2)) MB)"
+          Write-Host "---- release notes ----`n$notes`n-----------------------"
 
       - name: Create GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create $env:GITHUB_REF_NAME $env:ASSET_NAME --title $env:GITHUB_REF_NAME --notes $env:RELEASE_NOTES
+        run: gh release create $env:GITHUB_REF_NAME $env:ASSET_NAME --title $env:GITHUB_REF_NAME --notes-file release-notes.md
 
       - name: Publish Release to CNB
         shell: pwsh
@@ -69,4 +79,4 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           # CNB 的 release 挂在 tag 上 —— 先把 tag（连同缺失的祖先提交）推到 CNB 镜像
           git push "https://cnb:$($env:CNB_TOKEN)@cnb.cool/linesoft2/TaskMonitor.git" "$tag"
-          tools/publish-cnb-release.ps1 -Tag $tag -Notes $env:RELEASE_NOTES
+          tools/publish-cnb-release.ps1 -Tag $tag -Notes (Get-Content -Raw release-notes.md)

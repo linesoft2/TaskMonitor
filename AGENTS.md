@@ -80,8 +80,9 @@ never proves "we never wrote it".
 - `release.yml`（v* tag）→ 校验 tag 与 csproj `<Version>` 一致（不一致直接 fail）→ `dotnet build -c Release` → `gh release create` → `tools/publish-cnb-release.ps1` 建 CNB release 并上传 `task_monitor-<tag>-x64.exe`。Secret `CNB_TOKEN` 需 repo-code + repo-contents 两个读写 scope。
 
 发布 = **先改 `task_monitor.csproj` 的 `<Version>`**（版本号唯一来源——SDK 据它生成
-`AssemblyInformationalVersion`，关于页与更新检测读它），再 `git tag vX.Y.Z && git push origin
-vX.Y.Z`，之后全自动。CNB 云端集群全是 Linux 节点跑不了 net48 WPF，所以构建放在 GitHub 托管
+`AssemblyInformationalVersion`，关于页与更新检测读它），并在 `CHANGELOG.md` 写好该 tag 的
+`## <tag>` 段落（release 文案从这里提取，缺失/为空直接 fail），再 `git tag vX.Y.Z && git
+push origin vX.Y.Z`，之后全自动。CNB 云端集群全是 Linux 节点跑不了 net48 WPF，所以构建放在 GitHub 托管
 Windows runner。`publish-cnb-release.ps1` 的三个坑（勿回退，见脚本注释）：CNB API 必须显式
 `Accept: application/json`；PUT/确认必须走 curl.exe（`System.Uri` 会解码 %2F 导致 500）；保持
 **UTF-8 BOM**（PowerShell 5.1 会按 GBK 误读）。
