@@ -174,7 +174,7 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 17. **Memory breakdown = `GlobalMemoryStatusEx` + NTQSI class-2/class-80**, not `GetPerformanceInfo`.
 18. **Charts are hand-drawn WPF** — hover = `HitTest` + a real `Popup`.
 19. **Scroll stack** — `Style="{DynamicResource {x:Type ScrollViewer}}"` on every scroller, or it silently falls back to the Aero bar.
-20. **Idle trim at event points only, never on a timer** — never burst, never `WaitForPendingFinalizers` (`TrimMemory`: 30 s rate limit, one plain `GC.Collect`).
+20. **Idle GC at event points only** — no timer/burst, `WaitForPendingFinalizers`, or working-set trim (`TrimMemory`: 30 s limit, one plain `GC.Collect`).
 21. **开机自启动 = a logon scheduled task, never the Run key** (XML-registered, not schtasks switches).
 
 **UI / theme / settings**

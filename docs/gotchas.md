@@ -310,25 +310,32 @@ scrollers must set `Style="{DynamicResource {x:Type ScrollViewer}}"` explicitly*
 keyless styles match `TargetType` exactly and do NOT reach derived controls, so without it
 the control silently falls back to the Aero scrollbar.
 
-## 20. Idle trim at event points only, never on a timer
+## 20. Idle GC at event points only; never trim the working set
 
 *`src/App.xaml.cs`: `ScheduleIdleTrim`, `src/Interop/SystemInfo.cs`: `TrimMemory`*
 
-`SystemInfo.TrimMemory` runs after the prewarm and when the last detail window closes,
-deferred to Background priority (the comments at the site explain why inline would be
-wrong).
+`SystemInfo.TrimMemory` runs after the prewarm and when the last WPF window (detail or
+settings) closes, deferred to Background priority (the comments at the site explain why
+inline would be wrong). It performs ONE plain `GC.Collect` and nothing else.
 
-**Two things it must NOT do again** (the 2026-09-22 卡死 investigation): burst, and wait for
-finalizers. Rapid 切换 detail 窗口 closes one popup per switch, so the old code ran a forced
-full GC per close; it now refuses a second trim within `TrimMinIntervalMs` (30 s) — the log
-line states the limit and the actual gap. And it no longer calls
-`GC.WaitForPendingFinalizers()`: waiting meant every unreachable DirectN/COM wrapper was
-released ON THE SPOT while the taskbar thread was concurrently inside its own COM calls
-(`Draw`), which is precisely the window a use-after-free shows up in. Without the wait those
-wrappers are still released — by the finalizer thread, in its own time, exactly as during
-normal operation. (The real crash of that night was the leaked SRUM registration behind the
-same trigger — §15 — but this is the same "don't force finalization under a live drawer"
-rule.)
+**Never restore `SetProcessWorkingSetSize(-1,-1)` here.** Forcing every not-recently-touched
+page out of the working set right after prewarm (or a close) also evicts the warm WPF
+JIT/BAML/style/render pages, so the next Detail open pays soft faults and can stall briefly.
+Keeping those pages resident is the point of prewarm; Windows remains responsible for normal
+paging under actual memory pressure. Closing a window still drops its App references and the
+rate-limited GC still collects the unreachable managed tree — this is not a hidden-window
+cache.
+
+**It must also NOT burst or wait for finalizers** (the 2026-09-22 卡死 investigation). Rapid
+切换 detail 窗口 closes one popup per switch, so the old code ran a forced full GC per close;
+it now refuses a second collection within `TrimMinIntervalMs` (30 s) — the log line states
+the limit and the actual gap. And it no longer calls `GC.WaitForPendingFinalizers()`:
+waiting meant every unreachable DirectN/COM wrapper was released ON THE SPOT while the
+taskbar thread was concurrently inside its own COM calls (`Draw`), which is precisely the
+window a use-after-free shows up in. Without the wait those wrappers are still released — by
+the finalizer thread, in its own time, exactly as during normal operation. (The real crash
+of that night was the leaked SRUM registration behind the same trigger — §15 — but this is
+the same "don't force finalization under a live drawer" rule.)
 
 ## 21. 开机自启动 = a Task Scheduler logon task, never the Run key
 

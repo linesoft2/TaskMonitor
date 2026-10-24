@@ -133,14 +133,14 @@ namespace task_monitor
 
         /// <summary>
         /// Called by <see cref="SystemInfo.TrimMemory"/> right before its forced GC. The reported
-        /// crash correlates with closing detail windows, i.e. with that trim — so every crash
+        /// crash correlates with closing detail windows, i.e. with that collection — so every crash
         /// record states how long ago one ran. Negative = none this run.
         /// </summary>
         public static void NoteTrim() => _lastTrimTick = (long)SystemInfo.GetTickCount64();
 
         private static long _lastTrimTick;
 
-        /// <summary>Milliseconds since the last forced trim, or -1 when none has run.</summary>
+        /// <summary>Milliseconds since the last forced collection, or -1 when none has run.</summary>
         public static long SinceTrimMs
         {
             get
@@ -276,7 +276,7 @@ namespace task_monitor
 
                 sb.Append("  当前步骤=").Append(_step ?? "(未标记)");
                 long sinceTrim = SinceTrimMs;
-                sb.Append("  距上次内存回收(GC+trim)=").Append(sinceTrim < 0 ? "本次运行未发生" : sinceTrim + "ms");
+                sb.Append("  距上次内存回收(GC)=").Append(sinceTrim < 0 ? "本次运行未发生" : sinceTrim + "ms");
                 sb.AppendLine();
 
                 // Best effort: the faulting thread's MANAGED frames are still on this stack.

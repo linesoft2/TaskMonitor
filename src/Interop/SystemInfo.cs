@@ -149,26 +149,17 @@ namespace task_monitor
         [DllImport("kernel32.dll", SetLastError = false)]
         internal static extern ulong GetTickCount64();
 
-        [DllImport("kernel32.dll", SetLastError = false)]
-        internal static extern IntPtr GetCurrentProcess();
-
-        [DllImport("kernel32.dll", SetLastError = false)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
-
-        // ---------- idle working-set trim (Task Manager "内存" column) ----------
+        // ---------- idle managed-memory collection ----------
         /// <summary>
-        /// <c>SetProcessWorkingSetSize(-1,-1)</c> after one plain GC: collect the managed garbage
-        /// so its pages are actually free, then hand every page not touched recently back to the
-        /// standby list. The app idles almost all the time (a 1s sample tick), so one-touch pages
-        /// — startup/JIT, prewarm, a closed popup's UI tree — are pure resident-ballast between
-        /// events. Reopening a panel pays a few ms of soft faults (pages come back from standby,
-        /// not disk) — an order of magnitude cheaper than the JIT/BAML cold-start the prewarm
-        /// exists to remove, so trimming right after prewarm does NOT undo the prewarm's value.
-        /// Called by App at event points only (post-prewarm, last detail window closed) — never
-        /// on a timer (periodic trims are pure page-fault churn).
+        /// One plain GC at event points: collect unreachable windows and UI trees without
+        /// forcing the process's warm pages out of its working set. In particular, trimming
+        /// right after prewarm or a close makes the next Detail open pay soft faults for the
+        /// WPF code, styles and render data that prewarm was meant to keep hot. Windows can
+        /// still page idle memory out naturally when the system is actually under pressure.
+        /// Called by App at event points only (post-prewarm, last WPF window closed) — never
+        /// on a timer (periodic forced collections are pure churn).
         ///
-        /// <para><b>Two things it deliberately does NOT do any more</b> (the reported 卡死, whose
+        /// <para><b>Two things it deliberately does NOT do</b> (the reported 卡死, whose
         /// crash lands in interop-stub code with an empty app log — see CrashTrace): it never
         /// runs more often than <see cref="TrimMinIntervalMs"/> — rapid 切换 detail 窗口 closes a
         /// popup per switch and used to fire a forced GC per close — and it does NOT
@@ -185,13 +176,12 @@ namespace task_monitor
             if (gap >= 0 && gap < TrimMinIntervalMs) return;
             _lastTrimTick = now;
             CrashTrace.NoteTrim();
-            Logger.Info($"空闲内存回收：GC + 工作集 trim（间隔 {TrimMinIntervalMs}ms 限流；距上次 {(gap < 0 ? "首次" : gap + "ms")}）");
+            Logger.Info($"空闲内存回收：GC（间隔 {TrimMinIntervalMs}ms 限流；距上次 {(gap < 0 ? "首次" : gap + "ms")}）");
             GC.Collect();
-            SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
         }
 
-        // A trim closer than this to the previous one is skipped: a burst of window closes must
-        // not become a burst of forced GCs.
+        // A collection closer than this to the previous one is skipped: a burst of window closes
+        // must not become a burst of forced GCs.
         private const int TrimMinIntervalMs = 30000;
         private static long _lastTrimTick;
 

@@ -151,8 +151,8 @@ namespace task_monitor
                 // never throws (it is a pure optimization).
                 if (_stopping) return;
                 new DetailWindow(_taskbar).Prewarm();
-                // Hand the one-touch startup pages (JIT of the show path, BAML parse,
-                // prewarm's UI trees) back to the standby list — see ScheduleIdleTrim.
+                // Collect the throwaway shell and view trees, but keep the warmed JIT/BAML/style/
+                // render pages resident — see ScheduleIdleTrim / SystemInfo.TrimMemory.
                 SystemInfo.TrimMemory();
             }), System.Windows.Threading.DispatcherPriority.Background);
 
@@ -513,12 +513,11 @@ namespace task_monitor
 
         // A detail window closing leaves its whole UI tree (BAML-built controls, charts,
         // acrylic resources) resident until a GC happens to run — which, for a process
-        // that then sits idle, may be never. Trim once the LAST window is gone. The check
+        // that then sits idle, may be never. Collect once the LAST window is gone. The check
         // is deferred to Background priority: Closed fires synchronously mid-ToggleDetail
         // (old window closes, new one hasn't been created yet), so checking inline would
-        // see a false "all closed" and trim right before the replacement window faults
-        // every page straight back in. Deferred, the toggle's new window already exists
-        // and the trim is correctly skipped.
+        // see a false "all closed" and run an unnecessary full GC before the replacement.
+        // Deferred, the toggle's new window already exists and the collection is skipped.
         private void ScheduleIdleTrim()
         {
             Dispatcher.BeginInvoke(new Action(() =>
@@ -1080,7 +1079,7 @@ namespace task_monitor
         // A metric expander's toggle flipped: persist (null = enabled), push the new mask
         // to the taskbar thread (the slot hides and the overlay reflows, its press is
         // suppressed) and close that column's open windows — they have no live data until
-        // re-enabled. The Closed handlers do their usual cleanup (unpin mask, idle trim)
+        // re-enabled. The Closed handlers do their usual cleanup (unpin mask, idle GC)
         // on the way out.
         private void OnMetricSamplingChanged(int slot, bool on)
         {

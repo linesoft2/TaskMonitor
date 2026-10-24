@@ -170,7 +170,7 @@ physical only, so XAML `x:Class`/`xmlns:local` never reference a folder.
 ```
 docs/            gotchas.md · architecture.md · settings-plumbing.md · scroll-stack.md
 src/
-  App.xaml(.cs)    entry: elevation gate → mutex → taskbar thread; prewarm; menu host; idle trim
+  App.xaml(.cs)    entry: elevation gate → mutex → taskbar thread; prewarm; menu host; idle GC
   Logger.cs        file log — logs/task_monitor-yyyy-MM-dd.log next to the exe (gotchas §5)
   AppSettings.cs   settings.yaml store — every key documented per-property in the file
   VersionInfo.cs   版本号读取口（读 SDK 按 csproj `<Version>` 生成的 AssemblyInformationalVersion）
