@@ -137,6 +137,70 @@ namespace task_monitor
             return result;
         }
 
+        public List<string> GetLocationDescriptions()
+        {
+            Entry[] entries;
+            lock (_sync) entries = _entries.FindAll(entry => entry.Desired).ToArray();
+            var displays = TaskbarDisplayCatalog.GetDisplays();
+            var result = new List<string>();
+            foreach (var entry in entries)
+            {
+                bool hasBounds = entry.Window.TryGetOverlayBounds(out var bounds);
+                TaskbarDisplayInfo display = entry.Floating
+                    ? FindFloatingDisplay(displays, entry.Window, hasBounds, bounds)
+                    : entry.Target;
+                string displayName = display?.Name ?? entry.Target?.Name ?? "未知显示器";
+                string displayLabel = display?.IsPrimary == true
+                    ? $"主显示器「{displayName}」" : $"显示器「{displayName}」";
+                string kind = entry.Floating ? "悬浮窗" : "任务栏覆盖层";
+                if (!hasBounds)
+                {
+                    result.Add($"- {displayLabel}：{kind}正在等待任务栏或重建。");
+                    continue;
+                }
+
+                string place;
+                if (entry.Floating)
+                {
+                    int edge = entry.Window.GetFloatingDockEdge(bounds);
+                    string dock = edge == 1 ? "，停靠在左侧边缘（贴边隐藏）"
+                        : edge == 2 ? "，停靠在右侧边缘（贴边隐藏）"
+                        : edge == 3 ? "，停靠在顶部边缘（贴边隐藏）" : string.Empty;
+                    place = kind + dock;
+                }
+                else
+                {
+                    place = _snapToStart ? "任务栏，开始按钮旁"
+                        : _onLeft ? "任务栏，靠开始按钮一侧"
+                        : "任务栏，靠近系统托盘";
+                }
+                string visibility = WindowInterop.IsWindowVisible(entry.Window.OverlayHwnd)
+                    ? string.Empty : "；当前不可见（可能开启了“全屏时隐藏”）";
+                result.Add($"- {displayLabel}：{place}；左上角屏幕坐标 ({bounds.left}, {bounds.top}){visibility}。");
+            }
+            return result;
+        }
+
+        private static TaskbarDisplayInfo FindFloatingDisplay(List<TaskbarDisplayInfo> displays,
+            TaskbarWindow window, bool hasBounds, WindowInterop.RECT bounds)
+        {
+            if (displays.Count == 0) return null;
+            int x, y;
+            if (!window.TryGetFloatingHome(out x, out y))
+            {
+                if (!hasBounds) return displays[0];
+                x = bounds.left + (bounds.right - bounds.left) / 2;
+                y = bounds.top + (bounds.bottom - bounds.top) / 2;
+            }
+            IntPtr monitor = WindowInterop.MonitorFromPoint(new WindowInterop.POINT { x = x, y = y },
+                WindowInterop.MONITOR_DEFAULTTONEAREST);
+            foreach (var display in displays)
+            {
+                if (display.MonitorHandle == monitor) return display;
+            }
+            return displays[0];
+        }
+
         public void PublishSnapshot(SystemSnapshot snapshot)
         {
             foreach (var window in _windows) window.PublishSnapshot(snapshot);

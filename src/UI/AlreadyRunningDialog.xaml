@@ -1,0 +1,33 @@
+<Window x:Class="task_monitor.AlreadyRunningDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+        Title="TaskMonitor"
+        Width="480"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        Topmost="True"
+        ui:WindowHelper.UseModernWindowStyle="True">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   x:Name="MessageText"
+                   TextWrapping="Wrap"
+                   Style="{DynamicResource BodyTextBlockStyle}" />
+
+        <Button Grid.Row="1"
+                Content="知道了"
+                MinWidth="88"
+                Margin="0,20,0,0"
+                HorizontalAlignment="Right"
+                Style="{DynamicResource AccentButtonStyle}"
+                IsDefault="True"
+                IsCancel="True"
+                Click="Close_Click" />
+    </Grid>
+</Window>

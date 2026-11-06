@@ -584,6 +584,36 @@ namespace task_monitor
         /// <summary>Screen HWND of the embedded overlay, once <see cref="Start"/> created it.</summary>
         public IntPtr OverlayHwnd;
 
+        internal bool TryGetOverlayBounds(out WindowInterop.RECT bounds)
+        {
+            IntPtr hwnd = OverlayHwnd;
+            WindowInterop.RECT current = default;
+            bool read = false;
+            bool completed = hwnd != IntPtr.Zero && RunOnNativeWorker(() =>
+            {
+                read = WindowInterop.GetWindowRect(hwnd, out current);
+            }, 300);
+            bounds = current;
+            return completed && read && current.right > current.left && current.bottom > current.top;
+        }
+
+        internal bool TryGetFloatingHome(out int x, out int y)
+        {
+            x = _floatingX;
+            y = _floatingY;
+            return _floatingHomeValid;
+        }
+
+        internal int GetFloatingDockEdge(WindowInterop.RECT bounds)
+        {
+            if (!_floatingEdgeHide || !_floatingHomeValid
+                || !FloatingWorkAreaAtPoint(_floatingX, _floatingY, out var work)) return 0;
+            uint dpi = OverlayHwnd == IntPtr.Zero ? 96 : WindowInterop.GetDpiForWindow(OverlayHwnd);
+            if (dpi == 0) dpi = 96;
+            return FloatEdgeOf(_floatingX, _floatingY, bounds.right - bounds.left,
+                bounds.bottom - bounds.top, work, dpi);
+        }
+
         /// <summary>
         /// <c>GetTickCount64</c> (ms since boot, via <see cref="SystemInfo"/>) of the last tick
         /// the taskbar thread STARTED, stamped before the tick does any work. App's UI-thread

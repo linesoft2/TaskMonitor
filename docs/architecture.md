@@ -134,7 +134,7 @@ Implementation in `DetailWindow`, comments at the sites:
   deselect so a newer selection is never wiped. There is still at most one pinned window per column
   globally, not one per display.
 
-## Startup: elevation gate → mutex → first-run guide
+## Startup: elevation gate → single-instance guard → first-run guide
 
 **The app always runs elevated, self-managed** (manifest `asInvoker`): `App.RunElevationGate`
 (src/App.xaml.cs) runs at the top of `OnStartup`, BEFORE the single-instance mutex — an exiting
@@ -153,9 +153,14 @@ displays. Exercising the consent dialog needs an unelevated launch (`explorer.ex
 
 **Single-instance:** a named `Global\` mutex right after the gate
 (`Global\TaskMonitor.exe__<guid>`, un-owned, existence test only; `Global\` so the guard holds
-across sessions — reachable only elevated, so `SeCreateGlobalPrivilege` is in hand). A second
-instance exits **silently** (the overlay is always visible anyway); a consented second launch still
-UAC-prompts first — inherent to the design.
+across sessions — reachable only elevated, so `SeCreateGlobalPrivilege` is in hand). The matching
+auto-reset event is created BEFORE the mutex, closing the startup race: any second process that can
+see the mutex can signal the running instance without losing the notification. The second process
+then exits; the first shows one `AlreadyRunningDialog` (repeat signals re-activate it) listing each
+overlay's live display, placement and screen coordinates. Floating locations resolve their display
+from the home point, so an edge-hidden widget is not attributed to its neighbour; hidden/rebuilding
+states are labelled rather than guessed. A consented second launch still UAC-prompts first —
+inherent to the design.
 
 **First-run guide:** after the mutex/sentinel guard and BEFORE `StartTaskbar`,
 `StartupGuideWindow` (iNKORE modern window + Mica) lets a new user choose 悬浮窗 or 任务栏窗口,
@@ -209,6 +214,7 @@ src/
     TaskbarDisplayCatalog.cs monitor IDs ↔ current taskbar HWNDs
     DetailWindow.xaml(.cs)  acrylic shell hosting one IDetailView
     ConsentDialog           first-run UAC-consent prompt (iNKORE modern window, unelevated)
+    AlreadyRunningDialog    二次启动通知（iNKORE modern window — 各覆盖层的实时位置）
     StartupGuideWindow      first-run display-mode/placement cards with vector diagrams (iNKORE + Mica)
     UpdateAvailableDialog   发现新版本提醒 (iNKORE modern window — 立即更新/不再提醒/稍后)
     Common/                 formatters · ProcessListTip · ProcessKillMenu (the process lists' right-click 结束进程: list-level menu + confirm card, same rebind-proof pattern as ProcessListTip) · ProcessIconCache (the shared per-exe icon cache) · ChartTipHost/ChartPalette (the shared chart hover tip + colors) · PivotNavButtonFix · FollowTagPanel · the scroll stack

@@ -35,10 +35,16 @@ namespace task_monitor
         // the transient flyout. All open windows get every snapshot push (one per tick).
         private readonly List<DetailWindow> _pinned = new List<DetailWindow>();
 
-        // Single-instance guard handle — see OnStartup. Kept alive for the whole process
-        // lifetime so the named mutex persists; process death closes the handle and the
-        // kernel object is destroyed, letting the next launch win it.
+        private const string SingleInstanceMutexName = @"Global\TaskMonitor.exe__7f3a2c9e-4b1d-4e8a-9f2c-6a5b8c7d1e0a";
+        private const string SecondInstanceEventName = SingleInstanceMutexName + ".AlreadyRunning";
+
+        // Both handles live for the whole process. The event is created BEFORE the mutex so
+        // any process that can observe the mutex can also signal this instance reliably.
         private Mutex _singleInstanceMutex;
+        private EventWaitHandle _secondInstanceEvent;
+        private RegisteredWaitHandle _secondInstanceWait;
+        private AlreadyRunningDialog _alreadyRunningDialog;
+        private bool _alreadyRunningPending;
 
         // Set in OnExit so the overlay-recreate loop in StartTaskbar stops re-entering
         // TaskbarWindow.Start() — a shutdown must not spawn a fresh overlay.
@@ -79,30 +85,27 @@ namespace task_monitor
             // unelevated path inside it ends in Shutdown(). This MUST come before the
             // single-instance mutex — an unelevated "launcher" instance that is about to
             // exit must never hold the mutex, or the elevated relaunched child would take
-            // itself for a second instance and exit silently.
+            // itself for a second instance and exit before doing any work.
             if (!RunElevationGate()) return;
 
-            // Single-instance guard: a named GLOBAL kernel mutex. Only reachable elevated
-            // (the gate above), so the SeCreateGlobalPrivilege the Global\ namespace
-            // needs is in hand, and the prefix makes the guard hold across every
-            // session/elevation. We create it un-owned (initiallyOwned=false) purely to
-            // test existence: createdNew=false means another instance already owns the
-            // name. A doomed second instance must never spin up the taskbar thread or
-            // open handles. The taskbar overlay is always visible, so the user can
-            // already see the running instance; exit this one silently (a message box
-            // from an elevated process would be intrusive). A consented user's second
-            // launch still UAC-prompts (the runas relaunch in the gate) before dying
-            // here — inherent to the always-elevated design.
+            // Both objects are GLOBAL and therefore reachable only after elevation. Creating
+            // the auto-reset event first closes the startup race: once another process can see
+            // the mutex, this event already exists and its Set() cannot be lost with the handle.
+            _secondInstanceEvent = new EventWaitHandle(false, EventResetMode.AutoReset, SecondInstanceEventName);
             _singleInstanceMutex = new Mutex(
                 initiallyOwned: false,
-                name: @"Global\TaskMonitor.exe__7f3a2c9e-4b1d-4e8a-9f2c-6a5b8c7d1e0a",
+                name: SingleInstanceMutexName,
                 createdNew: out bool createdNew);
             if (!createdNew)
             {
-                Logger.Info("全局互斥体已存在——另一实例正在运行，本实例静默退出");
+                Logger.Info("全局互斥体已存在——通知正在运行的实例显示位置，本实例退出");
+                try { _secondInstanceEvent.Set(); }
+                catch (Exception ex) { Logger.Warn("通知正在运行的实例失败", ex); }
                 Shutdown();
                 return;
             }
+            _secondInstanceWait = ThreadPool.RegisterWaitForSingleObject(
+                _secondInstanceEvent, OnSecondInstanceSignaled, null, Timeout.Infinite, false);
 
             // With the mutex held, any shutdown.sentinel on disk targeted a PREVIOUS
             // instance (the build flow's touch is always consumed by the still-running
@@ -130,6 +133,11 @@ namespace task_monitor
 
             if (ShouldShowStartupGuide()) ShowStartupGuide();
             StartTaskbar();
+            if (_alreadyRunningPending)
+            {
+                Dispatcher.BeginInvoke(new Action(ShowAlreadyRunning),
+                    System.Windows.Threading.DispatcherPriority.Background);
+            }
 
             // 卡死看门狗 — see CheckOverlayHealth. A freeze that heals itself leaves NOTHING
             // in the log, because the stalled thread is the very thread that would write it.
@@ -167,6 +175,10 @@ namespace task_monitor
         {
             Logger.Info("退出");
             _stopping = true;
+            _secondInstanceWait?.Unregister(null);
+            _secondInstanceWait = null;
+            _secondInstanceEvent?.Dispose();
+            _secondInstanceEvent = null;
             // Flush a pending 透明度 debounce first: the timer dies with the dispatcher, so
             // quitting within its 500ms window silently reverted the last slider step even
             // though the comment above the timer promises the value still lands.
@@ -176,12 +188,58 @@ namespace task_monitor
                 TrySaveConfig();
             }
             _taskbars?.StopAll();
+            TaskbarWindow.ReleaseNativeCallChannel();
             _sampling.Stop();
             // We never took ownership of the mutex (initiallyOwned=false), so there's
             // nothing to release — just drop the handle. Done explicitly so the lifetime
             // is unambiguous; process death would close it regardless.
             _singleInstanceMutex?.Dispose();
             base.OnExit(e);
+        }
+
+        private void OnSecondInstanceSignaled(object state, bool timedOut)
+        {
+            if (timedOut || _stopping) return;
+            try { Dispatcher.BeginInvoke(new Action(ShowAlreadyRunning)); }
+            catch (Exception ex)
+            {
+                if (!_stopping) Logger.Warn("二次启动通知未能投递到 UI 线程", ex);
+            }
+        }
+
+        private void ShowAlreadyRunning()
+        {
+            if (_stopping) return;
+            if (_alreadyRunningDialog != null)
+            {
+                _alreadyRunningDialog.Activate();
+                return;
+            }
+            if (_taskbars == null)
+            {
+                _alreadyRunningPending = true;
+                return;
+            }
+            _alreadyRunningPending = false;
+            List<string> locations;
+            try { locations = _taskbars.GetLocationDescriptions(); }
+            catch (Exception ex)
+            {
+                Logger.Warn("读取已运行窗口位置失败", ex);
+                locations = new List<string>();
+            }
+            string message = locations.Count == 0
+                ? "软件已经在运行，无需重复启动。\n\n窗口目前正在初始化或重建，请稍后再次点击软件查看位置。"
+                : "软件已经在运行，无需重复启动。\n\n当前窗口位置：\n" + string.Join("\n", locations);
+            Logger.Info("收到二次启动通知，显示已运行提示");
+            var dialog = new AlreadyRunningDialog(message);
+            _alreadyRunningDialog = dialog;
+            dialog.Closed += (s, e2) =>
+            {
+                if (ReferenceEquals(_alreadyRunningDialog, dialog)) _alreadyRunningDialog = null;
+            };
+            dialog.Show();
+            dialog.Activate();
         }
 
         // ---------- Elevation gate (first-run consent + runas self-relaunch) ----------
