@@ -1328,3 +1328,27 @@ back buffer 已按新高度重建，但锚点没变，于是 `MoveWindow` 被跳
 - 悬浮几何诊断按悬浮窗自己的 HMONITOR 报告；允许越界或贴边隐藏是用户选择，不能再
   拿主屏边界误报“部分内容不可见”。
 
+## 48. UAC / 锁屏后 WPF 停止渲染 = 多窗口 BitmapCache 缺陷
+
+*`src/App.xaml.cs`（静态构造函数）、`src/UI/Common/ScrollCacheDuringTouch.cs`、iNKORE
+`ShadowAssist` / Window 与 Popup 模板*
+
+2026-11-06 的表象是“设置窗口打开时第二次启动会卡住，右键菜单也弹不出来”。关闭新加的
+已运行提示框并不恢复，换成普通 WPF 窗口、原生消息框、把位置查询移出 UI 线程都无效。
+关键隔离实验：第二次启动时在 UAC 选“否”，完全不发送单实例通知，故障仍然出现。也就是
+触发点是 UAC 的安全桌面，不是通知或提示框；其他程序发起的 UAC 同样能触发。
+
+这是 WPF 已知的 **multi-window + BitmapCache + display reset** 缺陷（dotnet/wpf
+[#4276](https://github.com/dotnet/wpf/issues/4276)、
+[#8919](https://github.com/dotnet/wpf/issues/8919)）：UAC、锁屏、Ctrl+Alt+Del 造成的显示
+重置后，后续窗口可以停止渲染，而 managed Dispatcher、采样和日志仍继续运行。iNKORE 的
+`ShadowAssist.UseBitmapCache` 默认是 `true`，其源码注释也明确要求多窗口应用关闭；本项目的
+Window / Popup 模板、预热窗口、设置窗口和不可见菜单宿主正好组成多窗口场景，所以设置不
+重绘与菜单弹层失效会同时出现。
+
+修复是在 App 静态构造函数、**任何 WPF 窗口创建之前**设置
+`ShadowAssist.UseBitmapCache = false`。`ScrollCacheDuringTouch` 也必须服从同一开关，避免
+触屏拖拽重新引入一条临时 BitmapCache 路径。保留硬件渲染，不切 `SoftwareOnly`，不杀 DWM，
+最终也没有保留任何“第二次启动跳过 UAC”的规避逻辑。验证用外部 `cmd.exe /c exit` 的 runas
+触发 UAC 并取消：设置滚动/切换与任务栏右键均保持正常。不得仅为阴影或动画性能重新打开
+此开关；要恢复必须先证明当前 WPF/runtime 已解决该 display-reset 缺陷。

@@ -65,6 +65,10 @@ namespace task_monitor
             // Releases ship only the exe, not its .config. Opt in before WPF creates any
             // window so each one scales to its own monitor under the PerMonitorV2 manifest.
             AppContext.SetSwitch("Switch.System.Windows.DoNotScaleForDpiChanges", false);
+            // WPF multi-window BitmapCache defect: a UAC/lock-screen display reset can leave
+            // later windows unrenderable while the Dispatcher stays alive. iNKORE enables this
+            // cache in its Window/Popup templates by default; disable it before ANY window.
+            iNKORE.UI.WPF.Modern.Common.ShadowAssist.UseBitmapCache = false;
             Logger.Init();
             CrashReporter.Install();
         }

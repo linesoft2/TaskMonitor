@@ -8,7 +8,7 @@ Three files, one design. **`src/UI/Common/TouchDragScrollViewer.cs` is the singl
 |---|---|
 | `TouchDragScrollViewer.cs` | `FluentWpfCore.SmoothScrollViewer` subclass: the touch-drag gesture (延迟捕获), the `MaxOffset` push, the scrollbar binding dance |
 | `SnappyScrollPhysics.cs` | `IScrollPhysics` replacement: library-equivalent feel + two bugfixes |
-| `ScrollCacheDuringTouch.cs` | Attached behavior: windowed `BitmapCache` during touch drags only |
+| `ScrollCacheDuringTouch.cs` | Attached behavior: windowed `BitmapCache` during touch drags, gated by the process-wide UAC-safety switch (currently OFF) |
 
 **Where it is used:** the four settings pages (one per NavigationView 类别 in
 SettingsWindow) + the five detail views' process lists. All nine
@@ -90,11 +90,17 @@ values manually, then rebuilds them once the scroll settles.
 
 ## The BitmapCache window
 
-Never leave `BitmapCache` on permanently — hover/expand/switch animations would
-re-rasterize the whole page every frame, which is *worse*. The attached behavior makes it a
-window: threshold-crossing drag turns it on (a light tap pays no rasterization cost),
-inertia keeps it alive via `ScrollChanged`, and 600ms of silence restores the original
-`CacheMode`.
+**The process-wide gate is currently OFF** (gotchas §48): App sets
+`ShadowAssist.UseBitmapCache = false` before any window, and this behavior checks the same flag
+before engaging a cache. The gesture/physics stack stays active, but the bitmap cache itself does
+not engage at runtime. Do not turn the gate back on for performance without solving the WPF
+multi-window UAC/lock-screen display-reset defect first.
+
+If that defect is ever addressed, never leave `BitmapCache` on permanently either —
+hover/expand/switch animations would re-rasterize the whole page every frame, which is *worse*.
+The attached behavior makes it a window: threshold-crossing drag turns it on (a light tap pays no
+rasterization cost), inertia keeps it alive via `ScrollChanged`, and 600ms of silence restores the
+original `CacheMode`.
 
 Subscription **must** use `handledEventsToo` — `TouchDragScrollViewer`'s drag marks
 move/up as handled and class handlers run before instance handlers, so without the flag the

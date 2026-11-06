@@ -202,7 +202,8 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 40. **Win10 的 DetailWindow 没有亚克力** — `MaterialMode=None` + `AllowsTransparency` 分层窗口 + `RootBorder` 自绘圆角卡片；`ShowColumn` 末尾补 `InvalidateVisual` + `SWP_FRAMECHANGED`。
 41. **Prewarm 永不抛出，`_stopping` 时跳过；启动时在 mutex 之后清残留 sentinel**。
 42. **经典任务栏(Win10)下覆盖层自画不透明底色** — 被 `WS_CLIPCHILDREN` 冻住的残影擦不掉、只能遮盖（`CardBrush` alpha 恒 1 全幅填充）；底色每 tick 采样 `SampleTaskbarBackdropColor`（3-tick 稳定期）；Win11 保持全透明。
-43. **窗口死后消息循环不能被晾在空队列上；僵尸卡死要取证+自愈** — 裸 `WM_NCDESTROY` 也走 `TeardownOverlay` + `PostQuitMessage`；foreign calls use per-calling-thread workers with bounded waits (`SetParent` inline); entry exit removes its worker + CrashTrace slot; watchdog checks sampling + every expected overlay; 5s wake + 45s self-restart.
+43. **窗口死后必须退出消息循环；僵尸要自愈** — 裸 `WM_NCDESTROY` 也 teardown+quit；foreign calls 走有界 worker（`SetParent` inline）；entry 清理 worker/trace；watchdog 5s 唤醒、45s 重启。
+48. **UAC/锁屏后 WPF 不渲染 = 多窗口 BitmapCache 缺陷** — 首个窗口前设 `ShadowAssist.UseBitmapCache=false`；触屏临时缓存也走此开关，禁止单独恢复。
 
 ## Useful external references
 

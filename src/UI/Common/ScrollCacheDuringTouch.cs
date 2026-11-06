@@ -13,6 +13,8 @@ namespace task_monitor
     /// <see cref="TouchDragScrollViewer"/> 的类注释（单一起源，此处不重复）。
     /// 缓存后每帧只是位图位移 blit，渲染开销归零（与 SmoothScrollViewer 的
     /// RenderTransform 物理滚动也天然叠加：transform 滑动缓存位图）。
+    /// 全局开关在 App 首个窗口前关闭（UAC/锁屏的多窗口渲染缺陷，gotchas §48）；
+    /// 只有开关允许时下面的临时缓存才会启用。
     /// —— 缓存这里只管一件事：什么时候上 BitmapCache。不能常驻 —— hover/展开/切换
     /// 动画会每帧整页重栅格化，反而更卡。所以是窗口式：
     ///   TouchDown 记起点 → TouchMove 越过拖拽阈值(8 DIP, ≈PanningMode 自身阈值)才上缓存
@@ -107,7 +109,8 @@ namespace task_monitor
             if (Math.Abs(pos.Y - st.DownPoint.Y) < DragThresholdDip &&
                 Math.Abs(pos.X - st.DownPoint.X) < DragThresholdDip) return;
 
-            if (st.Viewer.Content is UIElement content)
+            if (iNKORE.UI.WPF.Modern.Common.ShadowAssist.UseBitmapCache
+                && st.Viewer.Content is UIElement content)
             {
                 st.Content = content;
                 st.SavedCache = content.CacheMode;
