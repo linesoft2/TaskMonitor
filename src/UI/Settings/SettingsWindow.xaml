@@ -215,6 +215,15 @@
                                          Visibility="Collapsed"
                                          Margin="0,0,0,4" />
 
+                        <ui:SettingsExpander x:Name="DisplayExpander" Header="任务栏显示器"
+                                             IsExpanded="True"
+                                             Description="选择要同时显示任务栏窗口的显示器，至少保留一项。副屏需开启 Windows 的“在所有显示器上显示任务栏”。"
+                                             Margin="0,0,0,4">
+                            <ui:SettingsExpander.HeaderIcon>
+                                <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.WindowMultiple_20_Regular}" />
+                            </ui:SettingsExpander.HeaderIcon>
+                        </ui:SettingsExpander>
+
                         <!-- 紧凑模式: tightens the item pitch of the taskbar overlay AND the floating
                              widget — narrower cells (and a smaller row inset), a tighter vertical
                              grid row and two-line block. The switch is live: the overlay re-lays
@@ -231,7 +240,7 @@
 
                         <!-- 悬浮模式: the overlay leaves the taskbar entirely and lives on the
                              desktop as a draggable acrylic widget (the detail popup's material).
-                             Its four sub-settings (置顶显示 / 贴边隐藏 / 全屏时隐藏 / 透明度) are items
+                             Its five sub-settings (置顶显示 / 允许越界 / 贴边隐藏 / 全屏时隐藏 / 透明度) are items
                              inside, enabled only while the mode is on — the same shape as
                              靠左显示/靠左位置 above. -->
                         <ui:SettingsExpander x:Name="FloatingExpander" Header="悬浮模式"
@@ -245,6 +254,10 @@
                             <ui:SettingsExpander.Items>
                                 <ui:SettingsCard x:Name="FloatingTopmostCard" Header="置顶显示">
                                     <ui:ToggleSwitch x:Name="FloatingTopmostSwitch" Toggled="FloatingTopmostSwitch_Toggled" />
+                                </ui:SettingsCard>
+                                <ui:SettingsCard x:Name="FloatingOutOfBoundsCard" Header="允许超出屏幕边界"
+                                                 Description="允许把悬浮窗拖到屏幕边缘之外；关闭时会立即拉回工作区。">
+                                    <ui:ToggleSwitch x:Name="FloatingOutOfBoundsSwitch" Toggled="FloatingOutOfBoundsSwitch_Toggled" />
                                 </ui:SettingsCard>
                                 <!-- 贴边隐藏: drag the widget onto the 左/右/上 screen edge and it
                                      slides out of sight, leaving a narrow strip; hovering the strip

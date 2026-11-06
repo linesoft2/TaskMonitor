@@ -9,19 +9,19 @@ the chain per setting.
 ```
 AppSettings (settings.yaml, YamlDotNet)
   → App reads it at startup and on every settings-page change
-  → TaskbarWindow.SetXxx(...)            (UI thread; marshals to the taskbar thread)
-  → SystemSampler volatile field         (single writer = UI thread, reader = taskbar tick)
+  → TaskbarOverlayManager (layout broadcast) and/or SamplingController (one sampler setting)
+  → SystemSampler volatile field         (single writer = UI thread, reader = sampling thread)
   → per-tick hand-off to the sampler     (SystemSampler.Sample)
-  → re-applied to every FRESH sampler in TaskbarWindow.Start()
+  → re-applied only when the controller reconstructs a failed sampler
 ```
 
 Conventions that hold for all of them:
 
 - **null = the default**, and only the non-default state is written to yaml. A missing
   key must behave exactly like the documented default.
-- **`Start()` re-apply is mandatory.** An explorer restart recreates the overlay and a
-  brand-new `SystemSampler`; without the re-apply the recreate path silently reverts to
-  defaults (that is how a disabled metric would come back to life).
+- **Re-apply belongs to the owner.** New overlays inherit layout state from the manager;
+  only a sampler failure makes the controller replay sampler configuration. Overlay/Explorer
+  rebuilds no longer construct a fresh `SystemSampler`.
 - **`WM_APP_SET_METRICS` only when the OVERLAY LAYOUT changes** — i.e. the sampling mask
   (§2) and the GPU 任务栏显示 content (§4: its row count, and so the width, changes with
   it). Everything else takes effect on the next tick — posting a WM_APP for a
@@ -145,69 +145,42 @@ live config, so switching 检查更新 off cancels it and a 更新源 change is 
 wire up, it reads the same `AppSettings` instance. See
 [`gotchas.md` §33](gotchas.md#33-更新检测).
 
-## 9. 悬浮模式 — `FloatingMode` + `FloatingX`/`FloatingY` + `FloatingTopmost` + `FloatingEdgeHide` + `FloatingFullscreenHide` + `FloatingOpacity`
+## 9. 悬浮模式 — `FloatingMode` + home + topmost/out-of-bounds/edge/fullscreen/opacity
 
-Not a sampler chain either — this one moves the WINDOW. The shape is still the same
-(field → volatile → WM_APP → re-applied on every fresh `Start()`), only the payload differs:
+Not a sampler chain. `TaskbarOverlayManager` stores the complete floating configuration and
+applies it to the SINGLE floating entry; entering floating removes all embedded entries first.
 
 | | |
 |---|---|
-| Setter | `TaskbarWindow.SetFloatingMode(on, x, y)` / `SetFloatingTopmost(bool)` / `SetFloatingEdgeHide(bool)` / `SetFloatingFullscreenHide(bool)` / `SetFloatingDark(bool)` / `SetFloatingOpacity(double)` |
-| Taskbar state | `_floating` / `_floatingTopmost` / `_floatingEdgeHide` / `_floatingFullscreenHide` / `_floatingDark` / `_floatingOpacity` (+ `_floatingX`/`_floatingY` — the home position) |
-| WM_APP | **`WM_APP_SET_FLOATING`** = the form flipped → the window is DESTROYED and App's recreate loop builds the other form (150ms, `ConsumeQuickRestart`); **`WM_APP_UPDATE_FLOATING`** = 置顶显示, 透明度, or the app theme changed → re-applied in place, no rebuild; **`WM_APP_SET_FLOAT_EDGE_HIDE`** = 贴边隐藏 flipped → the dock is re-derived from the home (ON at an edge slides out, OFF slides home); **`WM_APP_SET_FLOAT_FULLSCREEN_HIDE`** = 全屏时隐藏 flipped → the fullscreen probe runs at once (ON with a fullscreen foreground hides immediately, OFF restores unconditionally) |
+| Setter | `TaskbarOverlayManager.SetFloatingMode(on, int? x, int? y)` and the other `SetFloatingXxx` |
+| Window state | `_floating` / `_floatingHomeValid` / `_floatingX`/`_floatingY` / `_floatingAllowOutOfBounds` / the existing topmost, edge, fullscreen, dark and opacity fields |
+| WM_APP | `WM_APP_SET_FLOATING` (creation-time form flip), `WM_APP_UPDATE_FLOATING` (live style), `WM_APP_SET_FLOAT_KEEPOUT`, `WM_APP_SET_FLOAT_EDGE_HIDE`, `WM_APP_SET_FLOAT_FULLSCREEN_HIDE`, `WM_APP_SET_FLOAT_OUT_OF_BOUNDS` |
 
-Two entry points, one handler each: the 设置 → 外观 switches AND the overlay right-click
-menu's checkable 悬浮模式/置顶显示/贴边隐藏/全屏时隐藏 items (`App.EnsureTaskbarMenu`) both call
-`OnFloatingModeChanged`/`OnFloatingTopmostChanged`/`OnFloatingEdgeHideChanged`/
-`OnFloatingFullscreenHideChanged`; an open
-SettingsWindow is pushed back via `SyncFloatingMode`/`SyncFloatingTopmost`/
-`SyncFloatingEdgeHide`/`SyncFloatingFullscreenHide`, and the menu re-reads `_config` on every
-`Opened` (置顶显示/贴边隐藏/全屏时隐藏
-grey out outside the floating form, same rule as their settings cards).
+- **`FloatingMode`** (null = off): the manager closes every embedded overlay and creates one
+  floating window; turning it off recreates exactly the selected embedded set.
+- **`FloatingX`/`FloatingY`** (null = never dragged): a nullable coordinate PAIR, not a `-1`
+  sentinel. Negative values are valid on left/top monitors and for out-of-bounds homes. Start
+  chooses the work area nearest the saved home rather than always using the primary taskbar.
+  Drag end and disabling out-of-bounds report home through `FloatingPositionChanged`; a dodge
+  or slide never writes it.
+- **`FloatingTopmost`** (null = on): live; changes the topmost and (for the ordinary non-topmost
+  form) activation bits, with the tick re-asserting the band.
+- **`FloatingAllowOutOfBounds`** (null = off): live through
+  `SetFloatingAllowOutOfBounds` → `WM_APP_SET_FLOAT_OUT_OF_BOUNDS`. ON skips the ordinary
+  creation/drag/reposition `ClampFloatingToWorkArea`; OFF clamps immediately and normalizes
+  live position, home and YAML once. DetailWindow keeps its own work-area clamp, and the
+  edge-hide/peek derived positions remain edge-relative.
+- **`FloatingEdgeHide`** (null = off): only left/right/top, using ABSOLUTE distance ≤8 DIP, so
+  a far out-of-bounds negative coordinate cannot masquerade as an edge drop. The 8-DIP strip,
+  slide/peek ownership and arming rules remain unchanged (gotchas §38).
+- **`FloatingFullscreenHide`** (null = on): visibility only, using the fullscreen window on the
+  widget's own monitor; it never owns or clamps position (gotchas §39).
+- **`FloatingOpacity`** (null = 1.0; 0.2–1.0): brush alpha for the self-drawn card, not layered
+  window alpha. Applied live per slider step; App debounces only the YAML write.
+- **`FloatingDark`** is effective APP theme state, not a yaml key. Embedded overlays follow the
+  taskbar's system theme instead.
 
-- **`FloatingMode`** (null = off): 悬浮模式 on/off. The window form — parent, ex-style,
-  backdrop — is creation-time state, so this is the one setting that rebuilds the window
-  instead of mutating it (`Start()` is the single construction site for either form).
-- **`FloatingX`/`FloatingY`** (null = never dragged): the widget's home in screen px. Read by
-  `Start()` (which records the opening spot it computed as the home when none is saved), and
-  written by **App** from `TaskbarWindow.FloatingPositionChanged` when a drag ends — the only
-  settings write triggered by the taskbar thread (marshaled to the UI thread). The home is also
-  what the widget returns to after stepping aside for a detail window that covers it
-  (`SetFloatingKeepOut` → `WM_APP_SET_FLOAT_KEEPOUT`, a runtime-state push, not a setting); a
-  dodge is never written back here.
-- **`FloatingTopmost`** (null = on): live, no rebuild — it moves BOTH ex-style bits
-  (`WS_EX_TOPMOST` for the band, `WS_EX_NOACTIVATE` because the non-topmost form is an ordinary
-  window that must be activatable to be raiseable, §36 of the gotchas).
-- **`FloatingEdgeHide`** (null = off): 贴边隐藏, floating form only — a drop within 8 DIP of the
-  work area's 左/右/上 edge docks the widget there (slides out, a strip stays; hover peeks it
-  back, mouse-out re-hides). Live, no rebuild — and the dock itself is DERIVED from the home
-  (`FloatingX`/`FloatingY`, which is why a docked home reopens hidden), so nothing but the
-  switch and the home are stored. Mechanism + the slide/peek/armed rules:
-  [`gotchas.md` §38](gotchas.md#38-贴边隐藏--the-dock-is-derived-from-the-home-and-the-slide-owns-the-position).
-  Settings card + right-click menu item (checkable, greyed outside the floating form).
-- **`FloatingFullscreenHide`** (null = on): 全屏时隐藏, floating form only — a fullscreen app
-  in the foreground on the widget's monitor (borderless game, F11 video, slideshow; NOT a
-  maximized window) hides the widget until the foreground stops being fullscreen. Live, no
-  rebuild — the switch is the ONLY stored state; the fullscreen condition is probed by the
-  tick (`FullscreenAppOnScreen`), and the hide/restore is a plain `SW_HIDE`/
-  `SW_SHOWNOACTIVATE` that touches no positional state. Mechanism + the visibility-only
-  rules: [`gotchas.md` §39](gotchas.md#39-全屏时隐藏--the-probe-owns-visibility-never-the-position).
-  Settings card + right-click menu item (checkable, greyed outside the floating form).
-- **`FloatingOpacity`** (null = 1.0; 0.2–1.0, `double`): the widget's BACKGROUND opacity —
-  brush-alpha scaling in `ApplyTaskbarTheme` (NOT `WS_EX_LAYERED`; scope, why and the 0.2
-  floor: §36): the card's alpha IS the value (100% = fully opaque card), the card's outline
-  scales with it, text/labels/interaction fills keep fixed alphas (文字不要有透明度). Live per
-  slider step (the widget re-tints under the thumb; App debounces only the yaml write,
-  500ms — the Clash text boxes' reason); clamped in the setter because settings.yaml is
-  hand-editable. Settings-page only — a percent slider has no menu shape, and
-  `FloatingOpacityCard` greys out outside the floating form like `FloatingTopmostCard`.
-- **`FloatingDark`** is NOT in settings.yaml — it is the effective APP theme
-  (`ThemeManager.Current.ActualApplicationTheme`), pushed by App at startup and from the
-  `ActualApplicationThemeChanged` hook, because the floating widget's material is the detail
-  popup's (the taskbar form instead follows the SYSTEM theme).
-
-Full mechanism, the measured material choice and the creation-time rules:
-[`gotchas.md` §36](gotchas.md#36-悬浮模式--the-same-window-detached).
+Full mechanism and the creation-time rules: [`gotchas.md` §36](gotchas.md#36-悬浮模式--the-same-window-detached).
 
 ## 10. 紧凑模式 — `CompactLayout` (null = off)
 
@@ -234,6 +207,31 @@ block at the top of `TaskbarWindow`'s layout constants. Settings card (设置 �
 never gated on 悬浮模式 — it applies to both forms) **and** a checkable right-click
 menu item, both funnelling into `App.OnCompactLayoutChanged` (which also drops the
 transient flyout, like a placement change — its anchor column moved).
+
+## 11. 任务栏显示器 — `TaskbarDisplays`
+
+Not a sampler setting. `TaskbarDisplayCatalog` enumerates every active monitor with
+`EnumDisplayMonitors` + `MONITORINFOEX`, obtains its interface ID/name with
+`EnumDisplayDevicesW`, and associates current primary/secondary taskbar HWNDs through
+`MonitorFromWindow`.
+
+- **Yaml shape:** a list of `{ id, name }`; never an enum index, HWND, HMONITOR or rect. null =
+  legacy/default “current primary”. A user change saves the COMPLETE checked set. Disconnected
+  entries remain visible in settings and are not deleted; they become active again on return.
+- **UI:** `SettingsWindow` builds one `SettingsCard` + `CheckBox` per display (plus disconnected
+  saved entries). The last checked item cannot be unchecked. `CatalogChanged` → `RefreshDisplays`
+  rebuilds that list live on hotplug/taskbar changes without writing config or resetting selection.
+  **Assign a NEW `Items` list, never Clear/Add the old one**: `SettingsExpander`'s `ItemsRepeater`
+  only observes replacement, not plain `List<object>` mutations. Cards without a current taskbar
+  explain the Windows prerequisite; floating mode disables the expander.
+- **Runtime:** `App.OnTaskbarDisplaysChanged` → `TaskbarOverlayManager.SetDisplaySelection` →
+  reconcile. Every valid selected target gets its own STA/HWND/render pipeline and the same
+  layout/snapshot. If no selected target is currently usable, primary is used temporarily WITHOUT
+  rewriting the saved set. A selected secondary never falls back to primary individually.
+- **Topology:** `SystemEvents.DisplaySettingsChanged` is only a debounced hint; the 2s catalog
+  rescan also covers delayed secondary taskbars and Explorer changes. Entries are compared by
+  stable ID and current HWND/HMONITOR association, cancelled entries cannot restart, and every
+  fresh entry inherits the manager's complete visual configuration.
 
 ## Not in settings.yaml at all
 

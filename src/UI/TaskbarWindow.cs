@@ -28,22 +28,28 @@ namespace task_monitor
     /// 任务栏位置 — transposes both families' overlay into a COLUMN GRID whose column count
     /// follows the bar's thickness (see the STRIP_H block below).
     ///
-    /// Runs on whatever thread calls <see cref="Start"/> — the caller (App)
-    /// is expected to spin up a dedicated STA thread, since this method ends
-    /// by pumping a Win32 message loop until the window is destroyed.
+    /// Runs on whatever thread calls <see cref="Start"/> — TaskbarOverlayManager gives each
+    /// selected display its own STA/message loop and RenderState, all fed by one SamplingController.
     ///
-    /// TWO FORMS, one window class, one drawing, one sampler (设置 → 外观 → 悬浮模式):
+    /// TWO FORMS, one window class, one drawing, shared snapshots (设置 → 外观 → 悬浮模式):
     /// the taskbar-embedded overlay above, and the FLOATING one — the same metric grid
     /// standing on the desktop, never reparented, drawn on its own self-painted card
     /// (the detail popup's tint, no blur) with a rounded window region and NO system window
     /// frame (its rounding opt-in would bring a drop shadow), draggable, topmost by default.
     /// The form is fixed for a window's lifetime (parent/ex-style/shell are creation-time
-    /// state), so flipping the switch destroys the window and App's recreate loop builds the
+    /// state), so flipping the switch destroys the window and the manager's rebuild loop builds the
     /// other form — see <see cref="SetFloatingMode"/> and the floating-form section below.
     /// The taskbar keeps NO copy while the floating form is up.
     /// </summary>
     public sealed class TaskbarWindow
     {
+        private readonly SamplingController _sampling;
+
+        internal TaskbarWindow(SamplingController sampling)
+        {
+            _sampling = sampling ?? throw new ArgumentNullException(nameof(sampling));
+        }
+
         // The overlay is a fixed-width-cell grid of up to four VISUAL GROUPS side by
         // side — groups 0-2 are two-row stacked cells, group 3 is the 网络 column
         // (↑ over ↓, one whole-height slot).
@@ -570,13 +576,6 @@ namespace task_monitor
         public Action<int> ToggleCallback;
 
         /// <summary>
-        /// Invoked on the taskbar thread right after a fresh snapshot is published, so
-        /// the detail window can refresh in lockstep with the taskbar (push, not poll).
-        /// The owner (App) marshals this onto the UI thread.
-        /// </summary>
-        public Action SnapshotChanged;
-
-        /// <summary>
         /// Invoked on the taskbar thread when the overlay is right-clicked. The owner
         /// (App) marshals this onto the UI thread to show the context menu.
         /// </summary>
@@ -595,44 +594,17 @@ namespace task_monitor
         /// </summary>
         public long LastTickTickCount;
 
-        /// <summary>
-        /// The latest system snapshot, published by the taskbar thread on each sample
-        /// and read by the detail window (UI thread). Single source of truth — the
-        /// overlay and the popup show the same numbers. Reference assignment of a fresh,
-        /// never-mutated object, so cross-thread reads are safe.
-        /// </summary>
+        /// <summary>The latest shared snapshot. The controller publishes one reference;
+        /// every overlay applies it to its own RenderState on its own HWND thread.</summary>
         private volatile SystemSnapshot _latestShared;
         internal SystemSnapshot LatestSnapshot => _latestShared;
 
-        // The SystemSampler is created inside Start() on the taskbar thread and stashed on the
-        // per-HWND RenderState for the WM_TIMER path. This field exposes it to UI-thread instance
-        // methods (RequestWifiDetails) so DetailWindow can forward the Network-panel-opened signal.
-        // Volatile: written once on the taskbar thread, read on the UI thread.
-        private volatile SystemSampler _sampler;
-
-        /// <summary>
-        /// Called by App's rebuild loop when <see cref="Start"/> THREW before entering its
-        /// message loop: the WM_DESTROY teardown (which owns the sampler's release — SRUM
-        /// unregister etc.) never runs on that path, and the next re-entry builds a fresh
-        /// sampler with a fresh SRUM registration. Without this, a persistent Start()
-        /// failure re-registers once per 2s retry and floods srumapi (the 2026-10-17
-        /// incident: 124 leaked registrations from a 4-minute crash loop; after the
-        /// instance was force-killed the engine stopped delivering frames and the
-        /// per-process network list sat empty for the rest of the session). The unregister
-        /// runs on a pool thread exactly like the WM_DESTROY path (SruUnregister may wait
-        /// out an in-flight callback — never block this thread, gotchas §43); the Retired
-        /// list inside ProcessNetSampler.Shutdown keeps the callback delegate rooted for a
-        /// call that is already in flight. Safe when Start() failed before creating a
-        /// sampler (null → no-op), and idempotent with the WM_DESTROY release should both
-        /// ever run for the same sampler.
-        /// </summary>
-        internal void AbandonSamplerAfterFailedStart()
+        internal void PublishSnapshot(SystemSnapshot snapshot)
         {
-            var s = _sampler;
-            _sampler = null;
-            if (s == null) return;
-            try { System.Threading.Tasks.Task.Run((Action)s.Shutdown); }
-            catch (Exception ex) { Logger.Warn("失败轮次的 sampler 释放异常（忽略）", ex); }
+            if (snapshot == null) return;
+            _latestShared = snapshot;
+            if (OverlayHwnd != IntPtr.Zero)
+                WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SNAPSHOT, IntPtr.Zero, IntPtr.Zero);
         }
 
         // Placement settings: which side of the taskbar the overlay sits on, and (on the
@@ -686,8 +658,13 @@ namespace task_monitor
         /// slot's press.</summary>
         public void SetMetricSamplingMask(int mask)
         {
+            _sampling.SetEnabledMask(mask);
+            SetOverlayMetricSamplingMask(mask);
+        }
+
+        internal void SetOverlayMetricSamplingMask(int mask)
+        {
             _samplingEnabledMask = mask;
-            _sampler?.SetEnabledMask(mask);
             if (OverlayHwnd != IntPtr.Zero)
                 WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SET_METRICS, IntPtr.Zero, IntPtr.Zero);
         }
@@ -709,141 +686,37 @@ namespace task_monitor
                 WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SET_METRICS, IntPtr.Zero, IntPtr.Zero);
         }
 
-        // 设置 → 采样项目 → 合并相同程序 (ProcessListMerger): same volatile single-writer
-        // contract as _samplingEnabledMask. No posted message — the overlay layout doesn't
-        // change, so the next tick's snapshot rebuilds the detail lists on its own.
-        private volatile bool _mergeSamePathProcesses;
+        public void SetMergeSamePathProcesses(bool on) => _sampling.SetMergeByPath(on);
+        public void SetDiskDisplay(int mode, int index) => _sampling.SetDiskDisplay(mode, index);
+        public void SetGpuDisplay(int mode, int index) => _sampling.SetGpuDisplay(mode, index);
 
-        /// <summary>Thread-safe: toggle same-path process merging in the per-process
-        /// detail lists. Called by App once before <see cref="Start"/> (HWND still zero →
-        /// field only; Start applies it to the fresh sampler, like the sampling mask) and
-        /// whenever the settings page flips the switch.</summary>
-        public void SetMergeSamePathProcesses(bool on)
-        {
-            _mergeSamePathProcesses = on;
-            _sampler?.SetMergeByPath(on);
-        }
-
-        // 设置 → 采样项目 → 磁盘 → 显示方式 (所有磁盘平均 / 最高 / 某个特定磁盘): same
-        // volatile single-writer contract as _mergeSamePathProcesses. No posted message —
-        // the overlay layout doesn't change, so the next tick's snapshot redraws with the
-        // new headline (DiskSampler clears its history on a mode change, so the detail
-        // chart doesn't mix old-semantics values either).
-        private volatile int _diskDisplayMode;    // (int)MetricDisplayMode — 0=Average, the default
-        private volatile int _diskDisplayIndex;   // PhysicalDrive N for MetricDisplayMode.Specific
-
-        /// <summary>Thread-safe: set the disk headline display mode (0=Average 1=Max
-        /// 2=Specific) and the specific disk's PhysicalDrive index. Called by App once
-        /// before <see cref="Start"/> (HWND still zero → fields only; Start applies them
-        /// to the fresh sampler, like the sampling mask) and whenever the settings page
-        /// changes the value.</summary>
-        public void SetDiskDisplay(int mode, int index)
-        {
-            _diskDisplayMode = mode;
-            _diskDisplayIndex = index;
-            _sampler?.SetDiskDisplay(mode, index);
-        }
-
-        // 设置 → 采样项目 → GPU → 显示方式 (所有 GPU 平均 / 最高 / 特定 GPU): same contract
-        // as the disk one above — no posted message, the next tick redraws with the new
-        // headline (GpuSampler clears its history on a mode change). The GPU default is
-        // 最高 (Task Manager's sidebar rule), unlike the disk's 平均.
-        private volatile int _gpuDisplayMode = (int)MetricDisplayMode.Max;
-        private volatile int _gpuDisplayIndex;    // the "GPU N" number for MetricDisplayMode.Specific
-
-        /// <summary>Thread-safe: set the GPU headline display mode (0=Average 1=Max
-        /// 2=Specific) and the specific adapter's "GPU N" number. Called by App once
-        /// before <see cref="Start"/> and whenever the settings page changes the value
-        /// (same field-then-Start contract as <see cref="SetDiskDisplay"/>).</summary>
-        public void SetGpuDisplay(int mode, int index)
-        {
-            _gpuDisplayMode = mode;
-            _gpuDisplayIndex = index;
-            _sampler?.SetGpuDisplay(mode, index);
-        }
-
-        // 设置 → 采样项目 → GPU → 任务栏显示 / 温度来源 / 温度单位: WHAT the taskbar GPU
-        // slot shows — the utilization row (the default), a temperature row (温度), or both
-        // stacked rows (两者 — slot 3 packs two positions, one more visual group, a wider
-        // overlay). The content is LAYOUT, not just a value: unlike the 显示方式 pair above,
-        // a change POSTS WM_APP_SET_METRICS so the window resizes and redraws immediately
-        // (ResizeForLayout is a no-op when the row count — and so the width — didn't move).
-        // Same volatile single-writer contract as the rest.
         private volatile GpuTaskbarContent _gpuTaskbarContent = GpuTaskbarContent.Usage;
-        private volatile int _gpuTempIndex = -1;        // -1 = 最高温度 (the default), ≥0 = "GPU N"
-        private volatile bool _gpuTempFahrenheit;       // false = 摄氏度 (the default)
+        private volatile bool _gpuTempFahrenheit;
 
-        /// <summary>Thread-safe: set the GPU taskbar row content, the temperature headline
-        /// source (-1 = the hottest adapter, ≥0 = that "GPU N") and its display unit. Called
-        /// by App once before <see cref="Start"/> (HWND still zero → fields only) and
-        /// whenever the settings page changes any of the three.</summary>
         public void SetGpuTempDisplay(GpuTaskbarContent content, int tempIndex, bool fahrenheit)
         {
+            _sampling.SetGpuTempConfig(tempIndex, fahrenheit);
+            SetOverlayGpuTempDisplay(content, fahrenheit);
+        }
+
+        internal void SetOverlayGpuTempDisplay(GpuTaskbarContent content, bool fahrenheit)
+        {
             _gpuTaskbarContent = content;
-            _gpuTempIndex = tempIndex;
             _gpuTempFahrenheit = fahrenheit;
-            _sampler?.SetGpuTempConfig(tempIndex, fahrenheit);
             if (OverlayHwnd != IntPtr.Zero)
                 WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SET_METRICS, IntPtr.Zero, IntPtr.Zero);
         }
 
-        // 设置 → 采样项目 → 网络 → 适配器 (自动 / 指定某个适配器): same contract as the
-        // disk one above. null = 自动 (NetSampler's max-traffic pick; a pinned adapter
-        // that's gone falls back to 自动 inside the sampler).
-        private volatile string _netAdapterId;
-
-        /// <summary>Thread-safe: pin the sampled network adapter by NetworkInterface.Id
-        /// (GUID), or null for 自动. Called by App once before <see cref="Start"/> and
-        /// whenever the settings page changes the value (same field-then-Start contract
-        /// as <see cref="SetDiskDisplay"/>).</summary>
-        public void SetNetAdapter(string id)
-        {
-            _netAdapterId = id;
-            _sampler?.SetNetAdapter(id);
-        }
-
-        // 设置 → 采样项目 → 网络 → Clash/Mihomo (开关 + external-controller 地址 + 密钥):
-        // same contract as the adapter one above — no posted message; the sampler's poll
-        // thread retargets/idles on change. enabled default on; null/empty address = the
-        // 127.0.0.1:9090 default.
-        private volatile bool _clashEnabled = true;
-        private volatile string _clashApiAddress;
-        private volatile string _clashApiSecret;
-
-        /// <summary>Thread-safe: switch the Clash/Mihomo integration and set the
-        /// external-controller endpoint (host:port — null/empty = the conventional
-        /// 127.0.0.1:9090 default) and API secret (null/empty = none). Called by App once
-        /// before <see cref="Start"/> and whenever the settings page changes the value
-        /// (same field-then-Start contract as <see cref="SetNetAdapter"/>).</summary>
-        public void SetClashApi(bool enabled, string address, string secret)
-        {
-            _clashEnabled = enabled;
-            _clashApiAddress = address;
-            _clashApiSecret = secret;
-            _sampler?.SetClashApi(enabled, address, secret);
-        }
-
-        // 设置 → 采样项目 → 网络 → 公网 IP (switch, default on): same contract as the
-        // Clash one above — no posted message; NetInfoSampler's poll thread drops its
-        // cached address and stops BOTH the HTTP lookups and the 公网延迟 ICMP probe on off.
-        private volatile bool _publicIpLookupEnabled = true;
-
-        /// <summary>Thread-safe: switch the public-IP lookup (the Network panel's 公网
-        /// IPv4/IPv6). Called by App once before <see cref="Start"/> and whenever the
-        /// settings page changes the value (same field-then-Start contract as
-        /// <see cref="SetNetAdapter"/>).</summary>
-        public void SetPublicIpLookup(bool enabled)
-        {
-            _publicIpLookupEnabled = enabled;
-            _sampler?.SetPublicIpLookup(enabled);
-        }
+        public void SetNetAdapter(string id) => _sampling.SetNetAdapter(id);
+        public void SetClashApi(bool enabled, string address, string secret) => _sampling.SetClashApi(enabled, address, secret);
+        public void SetPublicIpLookup(bool enabled) => _sampling.SetPublicIpLookup(enabled);
 
         // ---------- 悬浮模式 (floating form) ----------
         // top-level WS_POPUP standing on the desktop — the SAME window class, layout, drawing,
-        // hit-testing and sampler as the taskbar form, plus its own card background and a
+        // hit-testing and shared snapshot as the taskbar form, plus its own card background and a
         // rounded window region (WindowBackdropInterop) — and the taskbar keeps no copy of it.
         // The form is creation-time state (parent + ex-style + shell), so a flip destroys the
-        // window and App's recreate loop immediately builds the other form (ConsumeQuickRestart).
+        // window and the manager's rebuild loop immediately builds the other form (ConsumeQuickRestart).
         private volatile bool _floating;
 
         // 置顶显示 (settings.yaml null = on). WS_EX_TOPMOST rides in WS_EX_COMPOSITE_EX, so
@@ -883,31 +756,28 @@ namespace task_monitor
         // (FullscreenAppOnScreen) runs on the tick and owns VISIBILITY only — never the
         // position; see the 全屏时隐藏 section below the edge-hide one.
         private volatile bool _floatingFullscreenHide = true;
+        private volatile bool _floatingAllowOutOfBounds;
 
-        // Home of the next floating window: screen px, -1 = nothing saved yet → Start opens it
-        // where the taskbar overlay would have been anchored. Written by App from settings.yaml
-        // before Start, and refreshed by the taskbar thread itself when a drag ends, so a
-        // rebuild (explorer restart, mode flip) reopens where the user left it.
-        private volatile int _floatingX = -1;
-        private volatile int _floatingY = -1;
-
-        // Set when a 悬浮模式 flip destroys the window, so App's recreate loop comes back in
-        // ~150ms instead of the 2s explorer-restart backoff (the widget must not vanish for
-        // two seconds because the user flipped a switch).
+        private volatile int _floatingX;
+        private volatile int _floatingY;
+        private volatile bool _floatingHomeValid;
         private volatile bool _quickRestart;
 
-        /// <summary>Thread-safe: 悬浮模式 on/off (设置 → 外观) plus the saved home position
-        /// (<paramref name="x"/>/<paramref name="y"/> &lt; 0 = none saved). Called by App once
-        /// before <see cref="Start"/> (HWND still zero → plain fields; Start builds the right
-        /// form) and whenever the settings page flips it — which tears the current window down
-        /// and recreates the other form.</summary>
-        public void SetFloatingMode(bool on, int x, int y)
+        public void SetFloatingMode(bool on, int? x, int? y)
         {
             _floating = on;
-            _floatingX = x;
-            _floatingY = y;
+            _floatingHomeValid = x.HasValue && y.HasValue;
+            _floatingX = x ?? 0;
+            _floatingY = y ?? 0;
             if (OverlayHwnd != IntPtr.Zero)
                 WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SET_FLOATING, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        public void SetFloatingAllowOutOfBounds(bool on)
+        {
+            _floatingAllowOutOfBounds = on;
+            if (OverlayHwnd != IntPtr.Zero)
+                WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SET_FLOAT_OUT_OF_BOUNDS, IntPtr.Zero, IntPtr.Zero);
         }
 
         /// <summary>Thread-safe: 置顶显示 (设置 → 外观 → 悬浮模式), floating form only.
@@ -995,7 +865,7 @@ namespace task_monitor
                 WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SET_FLOAT_KEEPOUT, IntPtr.Zero, IntPtr.Zero);
         }
 
-        /// <summary>App's recreate loop: true when the last <see cref="Start"/> return was a
+        /// <summary>the manager's rebuild loop: true when the last <see cref="Start"/> return was a
         /// deliberate 悬浮模式 rebuild (re-enter at once), false for the ordinary
         /// explorer-restart / init-failure case (2s backoff). Clears the flag.</summary>
         public bool ConsumeQuickRestart()
@@ -1110,56 +980,80 @@ namespace task_monitor
                 WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SELECT, new IntPtr(column), IntPtr.Zero);
         }
 
-        /// <summary>UI thread: the Network detail panel just opened. Forwards to the sampler's
-        /// background thread, which refreshes the Wi-Fi cache on its next tick IF stale (a fresh
-        /// cache is reused with zero wlanapi calls). This is what keeps the taskbar location
-        /// indicator off unless the user actually opens the Network panel. Thread-safe; a no-op
-        /// before Start() has run (_sampler still null, e.g. during Prewarm).</summary>
-        public void RequestWifiDetails() => _sampler?.RequestWifiDetails();
+        /// <summary>UI thread: the Network detail panel just opened. Forwarded to
+        /// SamplingController, which refreshes Wi-Fi only when its cache is stale.</summary>
+        public void RequestWifiDetails() => _sampling.RequestWifiDetails();
 
         /// <summary>The taskbar thread's NATIVE id, stamped at the top of Start() — the
         /// stall watchdog needs it for CrashTrace.CaptureStackOf (a native context grab).</summary>
         public int NativeThreadId;
+        private volatile bool _stopRequested;
 
-        public void Start()
+        public void RequestStop()
+        {
+            _stopRequested = true;
+            if (OverlayHwnd != IntPtr.Zero)
+                WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            else if (NativeThreadId > 0)
+                WindowInterop.PostThreadMessageW((uint)NativeThreadId, WindowInterop.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        internal void AbortStart()
+        {
+            if (OverlayHwnd == IntPtr.Zero) return;
+            WindowInterop.DestroyWindow(OverlayHwnd);
+            DrainThreadQueue();
+            OverlayHwnd = IntPtr.Zero;
+        }
+
+        internal void Start(TaskbarDisplayInfo target = null)
+        {
+            // This native window owns physical-pixel D2D geometry. Its whole message loop
+            // explicitly uses PerMonitorV2 so DPI queries and virtual-desktop rects always
+            // reflect the actual monitor, regardless of the calling thread's former context.
+            IntPtr previousDpiContext = WindowInterop.SetThreadDpiAwarenessContext(
+                WindowInterop.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            if (previousDpiContext == IntPtr.Zero)
+                Logger.WarnOnce("overlay-dpi-context", "原生覆盖层无法启用 PerMonitorV2——回退进程 DPI 上下文");
+            try { StartCore(target); }
+            finally
+            {
+                if (previousDpiContext != IntPtr.Zero)
+                    WindowInterop.SetThreadDpiAwarenessContext(previousDpiContext);
+            }
+        }
+
+        private void StartCore(TaskbarDisplayInfo target)
         {
             NativeThreadId = (int)CrashTrace.CurrentNativeThreadId();
-            // === Step 1: locate taskbar, query DPI, compute size ===
-            // WAIT for a real taskbar rather than giving up: at boot the scheduled-task
-            // logon trigger can fire BEFORE explorer has created (or laid out)
-            // Shell_TrayWnd. The old code returned silently here, leaving the process
-            // running forever with no overlay and no retry ("auto-start works but
-            // nothing shows on the taskbar"). The rect must be non-zero too — an
-            // overlay created against an unlaid-out taskbar would get height 0 and
-            // stay invisible (RepositionOverlay's height tracking skips a 0-height
-            // band — it can't recover from starting at 0). A TRANSIENT wrong height
-            // (taller taskbar mid-layout) is fine: the 1s RepositionOverlay re-measures
-            // and resizes to the settled height.
-            // Unbounded on purpose: without a taskbar an overlay is pointless anyway,
-            // and this dedicated thread has nothing else to do meanwhile.
+            if (_stopRequested) return;
+            string displayId = target?.Id;
+            string displayName = target?.Name ?? "主显示器";
             OverlayHwnd = IntPtr.Zero;   // a re-entered Start() must not post to the previous run's dead HWND
-            IntPtr taskbar;
-            WindowInterop.RECT taskbarRect;
+            IntPtr taskbar = IntPtr.Zero;
+            WindowInterop.RECT taskbarRect = default;
             int probeWaits = 0;
-            while (true)
+            while (!_stopRequested)
             {
-                // Stamp the heartbeat on every probe pass — the rebuild gap (destroy →
-                // Start() return → 2s backoff → probe → first tick) is a LEGITIMATE
-                // several-second tick pause, and without stamps the watchdog reads it
-                // as a stall (the 19:40:30 false positive, gotchas §43).
+                // Re-resolve on every wait/rebuild: taskbar HWNDs and HMONITORs are runtime
+                // handles, and a selected secondary display must never fall back to primary.
+                target = displayId == null
+                    ? TaskbarDisplayCatalog.GetPrimaryDisplay()
+                    : TaskbarDisplayCatalog.FindDisplay(displayId);
                 LastTickTickCount = (long)SystemInfo.GetTickCount64();
-                taskbar = WindowInterop.FindWindowW("Shell_TrayWnd", null);
+                taskbar = target?.TaskbarHwnd ?? IntPtr.Zero;
                 if (taskbar != IntPtr.Zero
-                    && TryGetWindowRectGuarded(taskbar, 500, out taskbarRect)   // dying taskbar deadlocks a direct read (gotchas §43)
+                    && TryGetWindowRectGuarded(taskbar, 500, out taskbarRect)
                     && taskbarRect.right - taskbarRect.left > 0
                     && taskbarRect.bottom - taskbarRect.top > 0)
-                break;
+                    break;
                 if (probeWaits++ == 0)
-                    Logger.Info("Shell_TrayWnd 尚未就绪（开机时登录任务可能先于 explorer）——每秒重试等待任务栏");
+                    Logger.Info($"显示器 {displayName} 的任务栏尚未就绪——每秒重试，等待可取消");
                 Thread.Sleep(1000);
             }
+            if (_stopRequested) return;
             if (probeWaits > 0)
-            Logger.Info($"任务栏已就绪（等待 {probeWaits}s），rect=({taskbarRect.left},{taskbarRect.top})-({taskbarRect.right},{taskbarRect.bottom})");
+                Logger.Info($"显示器 {displayName} 的任务栏已就绪（等待 {probeWaits}s），rect=({taskbarRect.left},{taskbarRect.top})-({taskbarRect.right},{taskbarRect.bottom})");
 
             // Taskbar family (TrafficMonitor's CheckWindows11Taskbar): the OS says Win11
             // AND the XAML taskbar's DesktopWindowContentBridge child exists → the Win11
@@ -1176,6 +1070,7 @@ namespace task_monitor
             {
                 for (int i = 0; i < 10; i++)
                 {
+                    if (_stopRequested) break;
                     if (IsWindows11Taskbar(taskbar)) break;   // the bridge child appeared meanwhile
                     if (TryFindClassicalChain(taskbar, out hBar, out hMin, out rcBar, out rcMin))
                     {
@@ -1186,6 +1081,7 @@ namespace task_monitor
                     TryGetWindowRectGuarded(taskbar, 500, out taskbarRect);   // boot layout still settling (guarded, gotchas §43)
                 }
             }
+            if (_stopRequested) return;
             if (!classical && !IsWindows11Taskbar(taskbar))
             Logger.Warn("任务栏族探测 10s 超时：既无 Win11 XAML 桥（DesktopWindowContentBridge）也无经典 ReBar 链——回退 Win11 锚点定位（TrayNotifyWnd 两族均有，优雅降级）");
 
@@ -1214,6 +1110,16 @@ namespace task_monitor
             // A side-docked taskbar has the same reservation along its own axis
             // (TaskbarBandCross), and the classical family carves the band itself.
             TaskbarBand(taskbar, taskbarRect, out int taskbarBandH, out int taskbarBandY);
+            if (floating && _floatingHomeValid
+                && DisplayInterop.TryGetDpiAtPoint(_floatingX, _floatingY, out uint homeDpi))
+            {
+                // A saved floating home can be on another monitor before its HWND exists.
+                // Preserve the card's logical height, but derive its first frame from the
+                // HOME monitor's DPI rather than briefly creating a primary-sized clipped card.
+                taskbarBandH = DpiScaleCeil(
+                    taskbarBandH * (float)USER_DEFAULT_SCREEN_DPI / dpi, homeDpi);
+                dpi = homeDpi;
+            }
             int taskbarBandW = TaskbarBandCross(taskbar, taskbarRect, out int taskbarBandX);
             int verticalBandW = vertical ? (classical ? rcMin.right - rcMin.left : taskbarBandW) : 0;
             // The width the vertical layout is built against (band minus the breathing margin);
@@ -1224,9 +1130,9 @@ namespace task_monitor
                 verticalBandW, classical ? rcBar.bottom - rcBar.top : taskbarBandH, _compactLayout,
                 out int physicalWidth, out int physicalHeight);
             var startupLayout = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, vertical, verticalAvail, _compactLayout);
-            Logger.Info($"任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical}"
+            Logger.Info($"显示器={displayName} 任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical}"
                 + (vertical ? $"（任务栏 {taskbarRect.right - taskbarRect.left}x{taskbarRect.bottom - taskbarRect.top}px，条带宽 {taskbarBandW}px，{VerticalFormName(startupLayout)}）" : "")
-                + $" DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms 紧凑={_compactLayout}{AnchorDiag()}");
+                + $" DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms 紧凑={_compactLayout}{AnchorDiag(dpi)}");
             // DXGI can't create 0-sized buffers — a 1px stub draws nothing (Draw skips
             // an empty layout) and resizes out the moment a metric comes back.
             physicalWidth = Math.Max(1, physicalWidth);
@@ -1253,21 +1159,25 @@ namespace task_monitor
             int floatDockEdge = 0;
             if (floating)
             {
-                // 悬浮模式: the saved home wins; with none saved, open where the taskbar
-                // overlay would have sat — the same anchor x, 8px clear of the taskbar (below
-                // a top-docked one, above it otherwise) — then keep it inside the work area.
                 (int anchorX, _) = CalcPosition(taskbar, taskbarRect, taskbarRect.right - taskbarRect.left,
                     physicalWidth, dpi, _onLeft, _snapToStart);
-                xScreen = _floatingX >= 0 ? _floatingX : anchorX;
-                yScreen = _floatingY >= 0 ? _floatingY : FloatingDefaultY(taskbar, taskbarRect, physicalHeight, dpi);
-                ClampFloatingToWorkArea(taskbar, ref xScreen, ref yScreen, physicalWidth, physicalHeight);
-                // The derived spot IS the home from here on. ComputeFloatTarget always measures
-                // from the home, so leaving "no home yet" (-1) in place would make it measure
-                // from the LIVE position — and every dodge would ratchet the widget further
-                // across the screen instead of being undone when the popup goes away.
+                xScreen = _floatingHomeValid ? _floatingX : anchorX;
+                yScreen = _floatingHomeValid ? _floatingY : FloatingDefaultY(taskbar, taskbarRect, physicalHeight, dpi);
+                WindowInterop.RECT dockWork = default;
+                bool hasDockWork = _floatingHomeValid
+                    && FloatingWorkAreaAtPoint(_floatingX, _floatingY, out dockWork);
+                if (!hasDockWork) hasDockWork = FloatingWorkArea(taskbar, out dockWork);
+                if (!_floatingAllowOutOfBounds)
+                {
+                    if (hasDockWork)
+                        ClampFloatingToWorkArea(dockWork, ref xScreen, ref yScreen, physicalWidth, physicalHeight);
+                    else
+                        ClampFloatingToWorkArea(taskbar, ref xScreen, ref yScreen, physicalWidth, physicalHeight);
+                }
                 _floatingX = xScreen;
                 _floatingY = yScreen;
-                if (_floatingEdgeHide && FloatingWorkArea(taskbar, out var dockWork))
+                _floatingHomeValid = true;
+                if (_floatingEdgeHide && hasDockWork)
                 {
                     floatDockEdge = FloatEdgeOf(xScreen, yScreen, physicalWidth, physicalHeight, dockWork, dpi);
                     if (floatDockEdge != 0)
@@ -1331,6 +1241,7 @@ namespace task_monitor
             uint exStyle = WindowInterop.WS_EX_COMPOSITE_EX | WindowInterop.WS_EX_NOACTIVATE;
             if (floating && !_floatingTopmost)
                 exStyle &= ~(WindowInterop.WS_EX_TOPMOST | WindowInterop.WS_EX_NOACTIVATE);
+            if (_stopRequested) return;
             IntPtr hwnd = WindowInterop.CreateWindowExW(
                 exStyle,
                 "TaskMonitorTaskbar",
@@ -1354,23 +1265,8 @@ namespace task_monitor
             // below never returns, so a local wrapper would stay rooted for the whole run
             // (the 2026-07-30 flood — ResizeBackBuffer's remark) — and RecoverDevice must be
             // able to dispose and rebuild it in place after a device loss.
-            var sampler = new SystemSampler();
-            // A fresh sampler defaults to all-metrics-on — apply the settings mask (a
-            // re-entered Start after an explorer restart must not silently re-enable
-            // metrics the user turned off).
-            sampler.SetEnabledMask(_samplingEnabledMask);
-            // Same re-apply for 合并相同程序 — a re-entered Start must not silently
-            // reset the user's merge toggle either.
-            sampler.SetMergeByPath(_mergeSamePathProcesses);
-            sampler.SetDiskDisplay(_diskDisplayMode, _diskDisplayIndex);
-            sampler.SetGpuDisplay(_gpuDisplayMode, _gpuDisplayIndex);
-            // …and the GPU 温度 trio (任务栏显示 content re-reads _gpuTaskbarContent here
-            // via ComputeLayout, so it survives a re-entered Start on its own).
-            sampler.SetGpuTempConfig(_gpuTempIndex, _gpuTempFahrenheit);
-            sampler.SetNetAdapter(_netAdapterId);
-            sampler.SetClashApi(_clashEnabled, _clashApiAddress, _clashApiSecret);
-            sampler.SetPublicIpLookup(_publicIpLookupEnabled);
-            _sampler = sampler;   // expose to UI-thread instance methods (RequestWifiDetails)
+            if (_latestShared == null)
+                _latestShared = _sampling.LatestSnapshot ?? new SystemSnapshot { NetInfo = NetInfo.Empty };
             var state = new RenderState
             {
                 TaskbarHwnd = taskbar,
@@ -1386,11 +1282,11 @@ namespace task_monitor
                 PhysicalHeight = physicalHeight,
                 AvailWidthDip = verticalAvail,
                 LogicalHeight = logicalHeight,
+                FloatingHeightDip = floating ? logicalHeight : 0f,
                 Dpi = dpi,
                 Hovered = -1,
                 TrackingMouse = false,
-                Sampler = sampler,
-                Snapshot = sampler.Sample(),
+                Snapshot = _latestShared,
             };
             state.Selected = -1;
             state.ToggleCallback = ToggleCallback;
@@ -1409,6 +1305,8 @@ namespace task_monitor
             WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, GCHandle.ToIntPtr(_stateHandle));
 
             // === Step 5: DirectWrite text formats (font size in DIPs) ===
+            // One ISOLATED factory per HWND: shared factories caused cross-STA RCW failures
+            // with multiple overlays. RenderState roots it until final teardown.
             // Stacked-group rows are "label … value": label flush-LEFT, value flush-RIGHT, so
             // every value lines up on the group's right edge (one right-aligned numeric column,
             // easy to scan across rows) and every label on its left. All three formats are
@@ -1416,7 +1314,8 @@ namespace task_monitor
             // wrap to two lines. Labels/values are visually distinguished: labels draw at
             // reduced alpha (LabelBrush below) so they recede and the eye lands on the
             // full-alpha value first.
-            var dwrite = DWriteFunctions.DWriteCreateFactory();
+            var dwrite = DWriteFunctions.DWriteCreateFactory(DWRITE_FACTORY_TYPE.DWRITE_FACTORY_TYPE_ISOLATED);
+            state.DWriteFactory = dwrite;
             var labelFormat = dwrite.CreateTextFormat("Segoe UI", 13f);
             labelFormat.Object.SetTextAlignment(DWRITE_TEXT_ALIGNMENT.DWRITE_TEXT_ALIGNMENT_LEADING);
             labelFormat.Object.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT.DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -1601,6 +1500,8 @@ namespace task_monitor
                     WindowInterop.MoveWindow(hwnd, placeX, placeY, physicalWidth, physicalHeight, true);
                     state.LastPlaceX = placeX;
                     state.LastPlaceY = placeY;
+                    state.LastPlaceW = physicalWidth;
+                    state.LastPlaceH = physicalHeight;
                 }
             }
             WindowInterop.SetWindowPos(hwnd, WindowInterop.HWND_TOP, 0, 0, 0, 0,
@@ -1627,11 +1528,24 @@ namespace task_monitor
             if (classical)
                 WindowInterop.SetTimer(hwnd, (IntPtr)TIMER_ID_POS, POS_INTERVAL_MS, IntPtr.Zero);
 
+            if (_stopRequested)
+            {
+                WindowInterop.DestroyWindow(hwnd);
+                DrainThreadQueue();
+                OverlayHwnd = IntPtr.Zero;
+                return;
+            }
+
             // === Step 12: message loop ===
             while (WindowInterop.GetMessageW(out var msg, IntPtr.Zero, 0, 0) > 0)
             {
                 WindowInterop.TranslateMessage(ref msg);
                 WindowInterop.DispatchMessageW(ref msg);
+            }
+            if (_stopRequested && WindowInterop.IsWindow(hwnd))
+            {
+                WindowInterop.DestroyWindow(hwnd);
+                DrainThreadQueue();
             }
 
             // The window is gone (its taskbar parent died, or we self-destructed) —
@@ -1654,7 +1568,7 @@ namespace task_monitor
             // No usable device: the rebuild belongs to RecoverDevice (the tick calls it), and
             // a dead context can only fail again — this is also what keeps the per-mouse-move
             // Draw calls harmless while the device is down.
-            if (s.DeviceLost) return;
+            if (s == null || s.DeviceLost || s.D2dContext == null) return;
 
             var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical,
                 s.AvailWidthDip, s.Owner._compactLayout);
@@ -2161,20 +2075,12 @@ namespace task_monitor
                 s.Owner._gpuTempFahrenheit);
         }
 
-        // One sampling pass: sample → stamp the cadence → publish → push to the UI thread →
-                // redraw. Shared by the WM_TIMER tick and WM_APP_SET_METRICS (an immediate re-sample
-        // after a 设置 → 采样 toggle).
-        private static void SamplePublishDraw(RenderState s)
+        // Apply the controller's latest publication on this HWND's own thread. Sampling
+        // never runs here: every overlay draws the same snapshot independently.
+        private static void DrawPublishedSnapshot(RenderState s)
         {
-            CrashTrace.NoteStep("采样阶段");
-            s.Snapshot = s.Sampler.Sample();
-            if (s.Owner != null)
-            {
-                CrashTrace.NoteStep("发布快照");
-                s.Snapshot.SampleIntervalMs = s.Owner._sampleIntervalMs;
-                s.Owner._latestShared = s.Snapshot;   // publish
-                s.Owner.SnapshotChanged?.Invoke();    // push → UI refresh
-            }
+            var snapshot = s.Owner?._latestShared;
+            if (snapshot != null) s.Snapshot = snapshot;
             CrashTrace.NoteStep("绘制阶段");
             Draw(s);
         }
@@ -2193,7 +2099,7 @@ namespace task_monitor
         //      (D2DERR_RECREATE_TARGET) is already lost by then, so a handler cannot tell a
         //      driver update from a genuine bug. Read the HRESULT instead (Draw,
         //      ResizeBackBuffer).
-        //   2. Rebuild in place. The overlay window, its taskbar embed, the sampler and the
+        //   2. Rebuild in place. The overlay window, its taskbar embed, the shared snapshot and
         //      geometry all stay; only the pipeline is recreated, so recovery costs one
         //      frozen frame and needs no re-embed (the expensive/fragile part of the
         //      explorer-restart path).
@@ -2389,6 +2295,23 @@ namespace task_monitor
             s.D3dDevice = null;
         }
 
+        private static void ReleaseTextResources(RenderState s)
+        {
+            ReleaseCom(ref s.StripValueFormat);
+            ReleaseCom(ref s.StripLabelFormat);
+            ReleaseCom(ref s.NetFormat);
+            ReleaseCom(ref s.ValueFormat);
+            ReleaseCom(ref s.LabelFormat);
+            ReleaseCom(ref s.DWriteFactory);
+        }
+
+        private static void ReleaseCom<T>(ref IComObject<T> obj)
+        {
+            try { obj?.Dispose(); }
+            catch { }
+            finally { obj = null; }
+        }
+
         // Deterministically drop a raw (un-wrapped) COM reference — DirectN generates no
         // IDisposable wrapper for IDCompositionTarget/IDCompositionVisual, and for the
         // composition target the release timing is semantically load-bearing (above).
@@ -2474,14 +2397,42 @@ namespace task_monitor
             }
         }
 
+        private static void ComputeFloatingTargetSize(RenderState s, uint dpi, out int width, out int height)
+        {
+            var layout = ComputeLayout(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent,
+                false, 0f, s.Owner._compactLayout);
+            width = layout.Width > 0f ? DpiScaleCeil(layout.Width, dpi) : 0;
+            height = layout.Width > 0f ? DpiScaleCeil(s.FloatingHeightDip, dpi) : 0;
+        }
+
+        private static uint FloatingEffectiveDpi(RenderState s, uint actualDpi)
+        {
+            // Windows follows the monitor holding most of the LIVE rect. A seam hide moves that
+            // rect onto the neighbour, but the dock (and its strip) still belongs to the HOME
+            // monitor. Only a real drag or an undocked window follows the live monitor's DPI.
+            if (s.FloatDockEdge != 0 && !s.FloatDragging && s.Owner._floatingHomeValid
+                && DisplayInterop.TryGetDpiAtPoint(s.Owner._floatingX, s.Owner._floatingY, out uint homeDpi))
+                return homeDpi;
+            return actualDpi;
+        }
+
         private static void HandleDpiChange(IntPtr hwnd, uint newDpi, RenderState s)
         {
-            GetBandSize(s, out int bandW, out int bandH);
-            if (!s.Vertical && bandH <= 0) return;   // the band isn't laid out yet
-            if (s.Vertical && bandW <= 0) return;
-            if (s.Vertical) s.AvailWidthDip = VerticalAvailWidth(bandW, newDpi);
-            ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical, newDpi, bandW, bandH,
-                s.Owner._compactLayout, out int newPhysicalWidth, out int newPhysicalHeight);
+            if (s == null || newDpi == s.Dpi) return;
+            int newPhysicalWidth, newPhysicalHeight;
+            if (s.Floating)
+            {
+                ComputeFloatingTargetSize(s, newDpi, out newPhysicalWidth, out newPhysicalHeight);
+            }
+            else
+            {
+                GetBandSize(s, out int bandW, out int bandH);
+                if (!s.Vertical && bandH <= 0) return;   // the band isn't laid out yet
+                if (s.Vertical && bandW <= 0) return;
+                if (s.Vertical) s.AvailWidthDip = VerticalAvailWidth(bandW, newDpi);
+                ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical, newDpi, bandW, bandH,
+                    s.Owner._compactLayout, out newPhysicalWidth, out newPhysicalHeight);
+            }
             Logger.Info($"DPI 变化 {s.Dpi}→{newDpi}——覆盖层重设 {newPhysicalWidth}x{newPhysicalHeight}px");
 
             // Empty layout (every metric's sampling off): no buffers to resize — just
@@ -2524,10 +2475,18 @@ namespace task_monitor
         // --------------------------------------------------------------------
         private static void ResizeForLayout(IntPtr hwnd, RenderState s)
         {
-            GetBandSize(s, out int bandW, out int bandH);
-            if (s.Vertical) s.AvailWidthDip = VerticalAvailWidth(bandW, s.Dpi);
-            ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical, s.Dpi, bandW, bandH,
-                s.Owner._compactLayout, out int newWidth, out int newHeight);
+            int newWidth, newHeight;
+            if (s.Floating)
+            {
+                ComputeFloatingTargetSize(s, s.Dpi, out newWidth, out newHeight);
+            }
+            else
+            {
+                GetBandSize(s, out int bandW, out int bandH);
+                if (s.Vertical) s.AvailWidthDip = VerticalAvailWidth(bandW, s.Dpi);
+                ComputeTargetSize(s.Owner._samplingEnabledMask, s.Owner._gpuTaskbarContent, s.Vertical, s.Dpi, bandW, bandH,
+                    s.Owner._compactLayout, out newWidth, out newHeight);
+            }
             if (newWidth == s.PhysicalWidth && newHeight == s.PhysicalHeight) return;
             Logger.Debug($"采样布局变化——覆盖层重设 {s.PhysicalWidth}x{s.PhysicalHeight}→{newWidth}x{newHeight}px");
 
@@ -2631,7 +2590,7 @@ namespace task_monitor
             // read failure, the reserve above) and an off-screen overlay renders
             // nothing — keep it inside, degraded rather than invisible.
             xr = Math.Max(0, Math.Min(xr, taskbarWidth - windowWidth));
-            xs = Math.Max(0, Math.Min(xs, taskbarRect.right - windowWidth));
+            xs = Math.Max(taskbarRect.left, Math.Min(xs, taskbarRect.right - windowWidth));
             return (xs, xr);
         }
 
@@ -2762,13 +2721,12 @@ namespace task_monitor
         private static string _widgetsReserveReason = "";
         private static bool? _webExperiencePackDetected;
 
-        private static string AnchorDiag()
+        private static string AnchorDiag(uint dpi)
         {
             bool shown = EvaluateWidgetsReserve();
             string align = IsTaskbarCenterAligned() ? "居中" : "靠左";
             if (!shown)
                 return $"，任务栏对齐={align}，小组件预留=无（{_widgetsReserveReason}）";
-            uint dpi = WindowInterop.GetDpiForWindow(WindowInterop.FindWindowW("Shell_TrayWnd", null));
             return $"，任务栏对齐={align}，小组件预留={WidgetsReserve(dpi)}px";
         }
 
@@ -2947,17 +2905,32 @@ namespace task_monitor
         // and never a "frame". Paired with CardBorderAlpha* (WindowBackdropInterop).
         private const float CardBorderWidthDip = 1f;
 
+        private static WindowInterop.RECT FloatingVisibleClip(IntPtr hwnd, RenderState s)
+        {
+            int w = s.PhysicalWidth, h = s.PhysicalHeight;
+            var clip = new WindowInterop.RECT { right = w, bottom = h };
+            if (s.FloatDockEdge == 0 || s.FloatPressed || !FloatingHomeWorkArea(hwnd, s, out var work))
+                return clip;
+
+            // Intersect the LIVE rect with the HOME work area in window-relative coordinates.
+            // A seam dock still moves its HWND across the seam, but only the home-side strip
+            // is visible or clickable. A held button drops the clip so a drag can cross freely.
+            clip.left = Math.Max(0, Math.Min(w, work.left - s.FloatX));
+            clip.top = Math.Max(0, Math.Min(h, work.top - s.FloatY));
+            clip.right = Math.Max(clip.left, Math.Min(w, work.right - s.FloatX));
+            clip.bottom = Math.Max(clip.top, Math.Min(h, work.bottom - s.FloatY));
+            return clip;
+        }
+
         /// <summary>
-        /// Keeps the widget's rounded WINDOW REGION in step with its size and DPI — the region
-        /// is what actually cuts the corners, and its radius is deliberately the DRAWN radius
-        /// plus a little slack (the card's corners are antialiased in D2D; a region is a hard
-        /// mask, so it must land outside that edge rather than shave it).
+        /// Keeps the widget's rounded WINDOW REGION in step with its size, DPI and dock clip —
+        /// the region is what actually cuts the corners, and its radius is deliberately the DRAWN
+        /// radius plus a little slack (the card's corners are antialiased in D2D; a region is a
+        /// hard mask, so it must land outside that edge rather than shave it).
         ///
-        /// <para>Change-gated on the state, so the per-tick call costs one comparison: every
-        /// resize path (采样 toggle → ResizeForLayout, DPI change → HandleDpiChange, the
-        /// embedded/float form builders) lands here through the tick instead of each having to
-        /// remember the region. A collapsed stub (every metric off) drops the region, since a
-        /// 0-sized region would clip the window away entirely.</para>
+        /// <para>Change-gated on the state: every resize and slide lands here instead of each
+        /// caller owning a separate region. A collapsed stub (every metric off) drops the region,
+        /// since a 0-sized region would clip the window away entirely.</para>
         /// </summary>
         private static void EnsureFloatingRegion(IntPtr hwnd, RenderState s)
         {
@@ -2965,16 +2938,25 @@ namespace task_monitor
             int w = s.PhysicalWidth, h = s.PhysicalHeight;
             if (w <= 0 || h <= 0)
             {
-                if (s.RegionW != 0) { WindowBackdropInterop.ClearRegion(hwnd); s.RegionW = s.RegionH = 0; }
+                if (s.RegionW != 0)
+                {
+                    WindowBackdropInterop.ClearRegion(hwnd);
+                    s.RegionW = s.RegionH = 0;
+                    s.RegionClip = default;
+                }
                 return;
             }
-            if (w == s.RegionW && h == s.RegionH && s.Dpi == s.RegionDpi) return;
+            var clip = FloatingVisibleClip(hwnd, s);
+            if (w == s.RegionW && h == s.RegionH && s.Dpi == s.RegionDpi
+                && clip.left == s.RegionClip.left && clip.top == s.RegionClip.top
+                && clip.right == s.RegionClip.right && clip.bottom == s.RegionClip.bottom) return;
 
             int radius = (int)Math.Round(CardCornerRadiusDip * s.Dpi / (double)USER_DEFAULT_SCREEN_DPI) + 2;
-            WindowBackdropInterop.SetRoundedRegion(hwnd, w, h, radius);
+            WindowBackdropInterop.SetRoundedRegion(hwnd, w, h, radius, clip);
             s.RegionW = w;
             s.RegionH = h;
             s.RegionDpi = s.Dpi;
+            s.RegionClip = clip;
         }
 
         /// <summary>
@@ -3037,12 +3019,33 @@ namespace task_monitor
             return true;
         }
 
-        /// <summary>Pull a floating position back inside its monitor's work area (both axes).
-        /// The widget is user-placed, so a monitor unplug / resolution change must not strand
-        /// it off-screen. <paramref name="reference"/> only picks the monitor.</summary>
+        private static bool FloatingWorkAreaAtPoint(int x, int y, out WindowInterop.RECT work)
+        {
+            work = default;
+            var point = new WindowInterop.POINT { x = x, y = y };
+            IntPtr mon = WindowInterop.MonitorFromPoint(point, WindowInterop.MONITOR_DEFAULTTONEAREST);
+            var mi = new WindowInterop.MONITORINFO { cbSize = (uint)Marshal.SizeOf<WindowInterop.MONITORINFO>() };
+            if (mon == IntPtr.Zero || !WindowInterop.GetMonitorInfoW(mon, ref mi)) return false;
+            work = mi.rcWork;
+            return true;
+        }
+
+        private static bool FloatingHomeWorkArea(IntPtr hwnd, RenderState s, out WindowInterop.RECT work)
+        {
+            if (s.Owner._floatingHomeValid
+                && FloatingWorkAreaAtPoint(s.Owner._floatingX, s.Owner._floatingY, out work))
+                return true;
+            return FloatingWorkArea(hwnd, out work);
+        }
+
         private static void ClampFloatingToWorkArea(IntPtr reference, ref int x, ref int y, int width, int height)
         {
-            if (!FloatingWorkArea(reference, out var work)) return;
+            if (FloatingWorkArea(reference, out var work))
+                ClampFloatingToWorkArea(work, ref x, ref y, width, height);
+        }
+
+        private static void ClampFloatingToWorkArea(in WindowInterop.RECT work, ref int x, ref int y, int width, int height)
+        {
             int maxX = Math.Max(work.left, work.right - width);
             int maxY = Math.Max(work.top, work.bottom - height);
             x = Math.Max(work.left, Math.Min(x, maxX));
@@ -3073,9 +3076,9 @@ namespace task_monitor
         private static int FloatEdgeOf(int homeX, int homeY, int width, int height, in WindowInterop.RECT work, uint dpi)
         {
             int thr = DpiScaleInt(EdgeSnapDip, dpi);
-            if (homeX - work.left <= thr) return 1;
-            if (work.right - (homeX + width) <= thr) return 2;
-            if (homeY - work.top <= thr) return 3;
+            if (Math.Abs(homeX - work.left) <= thr) return 1;
+            if (Math.Abs(work.right - (homeX + width)) <= thr) return 2;
+            if (Math.Abs(homeY - work.top) <= thr) return 3;
             return 0;
         }
 
@@ -3102,6 +3105,7 @@ namespace task_monitor
         /// writes the home.</summary>
         private static void StartFloatSlide(IntPtr hwnd, RenderState s, int tx, int ty)
         {
+            EnsureFloatingRegion(hwnd, s);
             if (tx == s.FloatX && ty == s.FloatY)
             {
                 s.FloatSliding = false;
@@ -3129,6 +3133,7 @@ namespace task_monitor
             s.FloatY += Math.Sign(dy) * Math.Min(Math.Abs(dy), Math.Max(2, Math.Abs(dy) / 3));
             WindowInterop.SetWindowPos(hwnd, IntPtr.Zero, s.FloatX, s.FloatY, 0, 0,
                 WindowInterop.SWP_NOSIZE | WindowInterop.SWP_NOZORDER | WindowInterop.SWP_NOACTIVATE);
+            EnsureFloatingRegion(hwnd, s);
             if (s.FloatX == s.FloatSlideX && s.FloatY == s.FloatSlideY)
             {
                 s.FloatSliding = false;
@@ -3139,7 +3144,7 @@ namespace task_monitor
                 // pop the widget straight back out. Such a cursor disarms until it leaves
                 // once (WM_MOUSELEAVE re-arms); a cursor elsewhere (the settings toggle
                 // path) is already a "fresh hover pending" and stays armed.
-                if (!s.FloatPeekOpen) s.FloatPeekArmed = !CursorOnFloat(hwnd);
+                if (!s.FloatPeekOpen) s.FloatPeekArmed = !CursorOnFloat(hwnd, s);
             }
         }
 
@@ -3160,20 +3165,23 @@ namespace task_monitor
         /// home — edge-relative, work-area-clamped on the free axis).</summary>
         private static void SlideFloatHidden(IntPtr hwnd, RenderState s)
         {
-            if (!FloatingWorkArea(hwnd, out var work)) return;
+            if (!FloatingHomeWorkArea(hwnd, s, out var work)) return;
             int hx = s.Owner._floatingX, hy = s.Owner._floatingY;
-            ClampFloatingToWorkArea(hwnd, ref hx, ref hy, s.PhysicalWidth, s.PhysicalHeight);
+            ClampFloatingToWorkArea(work, ref hx, ref hy, s.PhysicalWidth, s.PhysicalHeight);
             FloatHiddenPos(s.FloatDockEdge, work, hx, hy, s.PhysicalWidth, s.PhysicalHeight, s.Dpi, out hx, out hy);
             s.FloatPeekOpen = false;
             StartFloatSlide(hwnd, s, hx, hy);
         }
 
-        /// <summary>Whether the cursor is currently over the widget's rect (the region
-        /// doesn't shrink the rect — the card fills it).</summary>
-        private static bool CursorOnFloat(IntPtr hwnd)
+        /// <summary>Whether the cursor is over the VISIBLE part of the widget — a seam-clipped
+        /// rect on the neighbour is neither drawn nor clickable and must not disarm the peek.</summary>
+        private static bool CursorOnFloat(IntPtr hwnd, RenderState s)
         {
-            return WindowInterop.GetCursorPos(out var cur) && WindowInterop.GetWindowRect(hwnd, out var rc)
-                && cur.x >= rc.left && cur.x < rc.right && cur.y >= rc.top && cur.y < rc.bottom;
+            if (!WindowInterop.GetCursorPos(out var cur) || !WindowInterop.GetWindowRect(hwnd, out var rc))
+                return false;
+            var clip = FloatingVisibleClip(hwnd, s);
+            return cur.x >= rc.left + clip.left && cur.x < rc.left + clip.right
+                && cur.y >= rc.top + clip.top && cur.y < rc.top + clip.bottom;
         }
 
         /// <summary>Re-hide a peeked widget whose flyout just closed — but only when the
@@ -3182,7 +3190,7 @@ namespace task_monitor
         private static void TryRehideFloat(IntPtr hwnd, RenderState s)
         {
             if (s.FloatDockEdge == 0 || !s.FloatPeekOpen || s.FloatPressed || s.Selected >= 0) return;
-            if (CursorOnFloat(hwnd)) return;
+            if (CursorOnFloat(hwnd, s)) return;
             Logger.Info("悬浮模式：贴边隐藏——detail 关闭且鼠标已移开，收起");
             SlideFloatHidden(hwnd, s);
         }
@@ -3305,7 +3313,7 @@ namespace task_monitor
             x = s.FloatX;
             y = s.FloatY;
             dodged = false;
-            if (homeX < 0 || homeY < 0) return;
+            if (!s.Owner._floatingHomeValid) return;
 
             if (!CoveringRect(s, homeX, homeY, out var overHome))   // rule 1: nothing covers home
             {
@@ -3315,7 +3323,12 @@ namespace task_monitor
             }
             dodged = true;
             if (!CoveringRect(s, s.FloatX, s.FloatY, out var overHere)) return;   // rule 2: already clear — don't move
-            if (!FloatingWorkArea(hwnd, out var work)) return;
+            WindowInterop.RECT work;
+            if (s.FloatDockEdge != 0)
+            {
+                if (!FloatingHomeWorkArea(hwnd, s, out work)) return;
+            }
+            else if (!FloatingWorkArea(hwnd, out work)) return;
 
             // Rule 3: encroached where we are too (a popup clamped onto us, a pinned window
             // dragged over us) — step clear of everything that covers either spot.
@@ -3370,18 +3383,27 @@ namespace task_monitor
         /// The floating form's stand-in for RepositionOverlay: there is no taskbar anchor to
         /// track — the widget stays where the user dragged it, steps aside for an open detail
         /// window (ComputeFloatTarget) and goes back home once none covers it. The 1s poll
-        /// re-derives and re-clamps it (moving the window only when the result changed), so the
+        /// re-derives and re-clamps it (moving/resizing only when the result changed), so the
         /// steady-state per-tick cost is a monitor query plus one GetWindowRect per open detail
         /// window.
         /// </summary>
         private static void FloatingReposition(IntPtr hwnd, RenderState s, bool force)
         {
+            // Position and SIZE are separate: a slide/held button owns the former, but a DPI
+            // or layout change must still resize the real HWND. Resizing only the swap chain
+            // leaves the old window clipping the new frame (notably half a card after cross-DPI
+            // drags), exactly like the embedded form's LastPlaceW/H rule.
+            bool resize = s.LastPlaceW != s.PhysicalWidth || s.LastPlaceH != s.PhysicalHeight;
             // An in-flight 贴边隐藏 slide owns the position (its target was derived when it
             // started; re-deriving mid-slide would teleport the widget). The tick re-derives
             // the moment the slide ends. A HELD button owns it too, press-through: a press
             // on the hidden strip sits OUTSIDE the work area until the drag threshold passes,
             // and this clamp would yank the widget in from under the pointer mid-press.
-            if (s.FloatSliding || s.FloatPressed) return;
+            if (s.FloatSliding || s.FloatPressed)
+            {
+                if (resize) ApplyFloatingBounds(hwnd, s, s.FloatX, s.FloatY, resize: true);
+                return;
+            }
             // While resting HIDDEN the dodge is suppressed: an invisible widget (docked and
             // not peeked, or hidden by 全屏时隐藏) has nothing to keep clear of, and a pinned
             // window parked on its spot must not walk it along — the home is the whole
@@ -3390,6 +3412,10 @@ namespace task_monitor
             // edge-0 fallthrough would wrongly treat it as a top dock).
             bool dockedRest = s.FloatDockEdge != 0 && !s.FloatPeekOpen;
             bool hiddenRest = dockedRest || s.FloatFullscreenHidden;
+            // Hiding across a monitor seam puts most of the LIVE rect on the neighbour.
+            // The home still owns the dock, or the next tick re-docks to that neighbour's far edge.
+            WindowInterop.RECT dockWork = default;
+            bool hasDockWork = s.FloatDockEdge != 0 && FloatingHomeWorkArea(hwnd, s, out dockWork);
             int x = s.FloatX, y = s.FloatY;
             bool dodged = s.FloatAvoiding;
             // Derive the target. A HELD button never reaches here — the FloatPressed return
@@ -3403,10 +3429,21 @@ namespace task_monitor
                 dodged = false;
             }
             else ComputeFloatTarget(hwnd, s, out x, out y, out dodged);
-            ClampFloatingToWorkArea(hwnd, ref x, ref y, s.PhysicalWidth, s.PhysicalHeight);
-            if (dockedRest && FloatingWorkArea(hwnd, out var hideWork))
-                FloatHiddenPos(s.FloatDockEdge, hideWork, x, y, s.PhysicalWidth, s.PhysicalHeight, s.Dpi, out x, out y);
-            if (x == s.FloatX && y == s.FloatY) { s.FloatAvoiding = dodged; return; }
+            if (!s.Owner._floatingAllowOutOfBounds)
+            {
+                if (hasDockWork)
+                    ClampFloatingToWorkArea(dockWork, ref x, ref y, s.PhysicalWidth, s.PhysicalHeight);
+                else
+                    ClampFloatingToWorkArea(hwnd, ref x, ref y, s.PhysicalWidth, s.PhysicalHeight);
+            }
+            if (dockedRest && hasDockWork)
+                FloatHiddenPos(s.FloatDockEdge, dockWork, x, y, s.PhysicalWidth, s.PhysicalHeight, s.Dpi, out x, out y);
+            if (x == s.FloatX && y == s.FloatY)
+            {
+                s.FloatAvoiding = dodged;
+                if (resize) ApplyFloatingBounds(hwnd, s, x, y, resize: true);
+                return;
+            }
             if (dodged != s.FloatAvoiding)
                 Logger.Info(dodged
                     ? $"悬浮模式：detail 窗口侵占悬浮口 ({s.FloatX},{s.FloatY})——自动让位到 ({x},{y})"
@@ -3418,8 +3455,36 @@ namespace task_monitor
             s.FloatAvoiding = dodged;
             s.FloatX = x;
             s.FloatY = y;
-            WindowInterop.SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
-                WindowInterop.SWP_NOSIZE | WindowInterop.SWP_NOZORDER | WindowInterop.SWP_NOACTIVATE);
+            ApplyFloatingBounds(hwnd, s, x, y, resize);
+        }
+
+        private static void ApplyFloatingBounds(IntPtr hwnd, RenderState s, int x, int y, bool resize)
+        {
+            uint flags = WindowInterop.SWP_NOZORDER | WindowInterop.SWP_NOACTIVATE;
+            if (!resize) flags |= WindowInterop.SWP_NOSIZE;
+            if (!WindowInterop.SetWindowPos(hwnd, IntPtr.Zero, x, y,
+                s.PhysicalWidth, s.PhysicalHeight, flags))
+            {
+                if (resize)
+                    Logger.Warn($"悬浮模式：应用窗口尺寸失败 err={Marshal.GetLastWin32Error()}——下一 tick 重试");
+                return;
+            }
+            if (resize)
+            {
+                s.LastPlaceW = s.PhysicalWidth;
+                s.LastPlaceH = s.PhysicalHeight;
+            }
+            EnsureFloatingRegion(hwnd, s);
+            if (!resize) return;
+            if (WindowInterop.GetWindowRect(hwnd, out var actual))
+            {
+                int actualW = actual.right - actual.left, actualH = actual.bottom - actual.top;
+                string message = $"悬浮模式：HWND 实际位置=({actual.left},{actual.top})，尺寸={actualW}x{actualH}px，DPI={s.Dpi}";
+                if (actualW != s.PhysicalWidth || actualH != s.PhysicalHeight)
+                    Logger.Warn(message + $"——与绘制尺寸 {s.PhysicalWidth}x{s.PhysicalHeight}px 不一致");
+                else
+                    Logger.Info(message);
+            }
         }
 
         // 悬浮模式的拖拽（一次按住 = 拖动，没超过阈值才算点击）: the press records the cursor's
@@ -3538,10 +3603,15 @@ namespace task_monitor
             var (_, xRel) = CalcPosition(s.TaskbarHwnd, taskbarRect, taskbarWidth, s.PhysicalWidth, s.Dpi,
                 s.Owner._onLeft, s.Owner._snapToStart);
             s.Owner.PublishLayout(false, 0f);
-            if (!force && xRel == s.LastPlaceX && bandY == s.LastPlaceY) return;
+            // The anchor may be unchanged while the band height changes. Skipping on X/Y alone
+            // resizes only the back buffer and leaves the startup-height HWND clipped.
+            if (!force && xRel == s.LastPlaceX && bandY == s.LastPlaceY
+                && s.PhysicalWidth == s.LastPlaceW && s.PhysicalHeight == s.LastPlaceH) return;
             Logger.Debug($"重定位（Win11 锚点{(force ? "，强制" : "")}）：xRel {s.LastPlaceX}→{xRel}，y {s.LastPlaceY}→{bandY}，尺寸={s.PhysicalWidth}x{s.PhysicalHeight}");
             s.LastPlaceX = xRel;
             s.LastPlaceY = bandY;
+            s.LastPlaceW = s.PhysicalWidth;
+            s.LastPlaceH = s.PhysicalHeight;
             WindowInterop.MoveWindow(hwnd, xRel, bandY, s.PhysicalWidth, s.PhysicalHeight, true);
         }
 
@@ -3631,8 +3701,8 @@ namespace task_monitor
         // window rect AND client rect (a non-client border would offset our child
         // coords), the client origin in screen space, the monitor and work area,
         // the visible height the overlay actually lays out to, and our own overlay
-        // rect — WARN when any part of it falls outside the monitor (the
-        // "part of the window is cut off" symptom).
+        // rect. Floating reads its OWN monitor, not its primary-taskbar anchor; deliberate
+        // out-of-bounds/edge docking is not a clipping warning.
         private static void LogGeometry(IntPtr taskbar, IntPtr overlayHwnd, string context)
         {
             string msg = $"几何（{context}）：";
@@ -3672,7 +3742,10 @@ namespace task_monitor
             }, 300);
             if (clientOk)
                 msg += $"，任务栏客户区={cr.right - cr.left}x{cr.bottom - cr.top}px 原点=({pt.x},{pt.y})";
-            IntPtr mon = WindowInterop.MonitorFromWindow(taskbar, WindowInterop.MONITOR_DEFAULTTONEAREST);
+            var floating = overlayHwnd == IntPtr.Zero ? null : StateOf(overlayHwnd);
+            bool isFloating = floating?.Floating == true;
+            IntPtr mon = WindowInterop.MonitorFromWindow(isFloating ? overlayHwnd : taskbar,
+                WindowInterop.MONITOR_DEFAULTTONEAREST);
             var mi = new WindowInterop.MONITORINFO { cbSize = (uint)Marshal.SizeOf<WindowInterop.MONITORINFO>() };
             bool hasMon = mon != IntPtr.Zero && WindowInterop.GetMonitorInfoW(mon, ref mi);
             if (hasMon)
@@ -3681,7 +3754,9 @@ namespace task_monitor
             if (overlayHwnd != IntPtr.Zero && WindowInterop.GetWindowRect(overlayHwnd, out var ov))
             {
                 msg += $"，覆盖层=({ov.left},{ov.top})-({ov.right},{ov.bottom}) {ov.right - ov.left}x{ov.bottom - ov.top}px";
-                if (hasMon && (ov.left < mi.rcMonitor.left || ov.top < mi.rcMonitor.top
+                bool mayLeaveMonitor = isFloating
+                    && (floating.Owner._floatingAllowOutOfBounds || floating.FloatDockEdge != 0);
+                if (hasMon && !mayLeaveMonitor && (ov.left < mi.rcMonitor.left || ov.top < mi.rcMonitor.top
                     || ov.right > mi.rcMonitor.right || ov.bottom > mi.rcMonitor.bottom))
                 {
                     clipped = true;
@@ -3887,71 +3962,112 @@ namespace task_monitor
         // dead on the dying band. Worse, the block is CIRCULAR: win32k's teardown of the
         // ReBar waits for OUR child window's destruction — which only a PUMPING message
         // loop delivers — while the loop is parked inside the foreign call and cannot pump.
-        // So this loop never makes such calls: they all go to a sacrificial worker (the ONE
-        // thread allowed to block, IsBackground) and the caller collects the result with a
-        // BOUNDED, non-pumping wait (WaitForSingleObject — a CLR STA wait would pump and
-        // re-enter). If the worker deadlocks, this loop keeps pumping: the teardown
-        // completes, and the worker's call eventually returns — the circle cannot close.
-        // IsWindow / GetWindowLong / FindWindow / own-window calls stay inline (no sync) —
-        // and SetParent MUST stay inline too: it delivers messages to OUR window mid-call,
-        // so the caller must be able to pump (from the worker it deadlocks by construction
-        // — the worker waits for this loop to pump while this loop waits for the worker).
+        // So this loop never makes such calls: they all go to a sacrificial worker for THIS
+        // calling native thread (one per channel, IsBackground) and the caller collects the
+        // result with a BOUNDED, non-pumping wait (WaitForSingleObject — a CLR STA wait would
+        // pump and re-enter). A stuck worker can therefore stall only its own channel, never
+        // the overlays on every other screen. If a worker deadlocks, its caller's loop keeps
+        // pumping: the teardown completes, and the worker's call eventually returns — the
+        // circle cannot close. IsWindow / GetWindowLong / FindWindow / own-window calls stay
+        // inline (no sync) — and SetParent MUST stay inline too: it delivers messages to OUR
+        // window mid-call, so the caller must be able to pump (from a worker it deadlocks by
+        // construction — the worker waits for this loop to pump while this loop waits for it).
         private sealed class NativeCallRequest
         {
             public Action Run;
             public ManualResetEventSlim Done;
         }
         private const int NATIVE_CALL_QUEUE_CAP = 16;
-        private static readonly Queue<NativeCallRequest> _nativeCalls = new Queue<NativeCallRequest>();
-        private static readonly AutoResetEvent _nativeCallReady = new AutoResetEvent(false);
-        private static Thread _nativeWorker;
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, NativeCallChannel> _nativeCallChannels =
+            new System.Collections.Concurrent.ConcurrentDictionary<int, NativeCallChannel>();
 
-        // Run `work` on the worker and wait for it (bounded, non-pumping). False = timed
-        // out: the target's owner is dead/dying, or the worker is stuck on an earlier one —
-        // every caller treats that as "skip this round" (the poll/tick/probe all retry).
+        // Run `work` on this calling thread's worker and wait for it (bounded, non-pumping).
+        // False = timed out: the target's owner is dead/dying, or this channel's worker is
+        // stuck on an earlier one — every caller treats that as "skip this round" and retries.
         private static bool RunOnNativeWorker(Action work, int timeoutMs)
         {
-            if (_nativeWorker == null)
+            int callerNativeThreadId = (int)CrashTrace.CurrentNativeThreadId();
+            var channel = _nativeCallChannels.GetOrAdd(callerNativeThreadId, id => new NativeCallChannel(id));
+            return channel.Run(work, timeoutMs);
+        }
+
+        internal static void ReleaseNativeCallChannel()
+        {
+            int callerNativeThreadId = (int)CrashTrace.CurrentNativeThreadId();
+            if (_nativeCallChannels.TryRemove(callerNativeThreadId, out var channel)) channel.Stop();
+        }
+
+        private sealed class NativeCallChannel
+        {
+            private readonly Queue<NativeCallRequest> _calls = new Queue<NativeCallRequest>();
+            private readonly AutoResetEvent _ready = new AutoResetEvent(false);
+            private readonly Thread _worker;
+            private bool _workerStarted;
+            private volatile bool _stopping;
+
+            public NativeCallChannel(int callerNativeThreadId)
             {
-                lock (_nativeCalls)
+                _worker = new Thread(WorkerLoop)
                 {
-                    if (_nativeWorker == null)
+                    IsBackground = true,
+                    Name = "native-worker-" + callerNativeThreadId,
+                };
+            }
+
+            public bool Run(Action work, int timeoutMs)
+            {
+                using (var done = new ManualResetEventSlim(false))
+                {
+                    lock (_calls)
                     {
-                        _nativeWorker = new Thread(NativeWorkerLoop) { IsBackground = true, Name = "native-worker" };
-                        _nativeWorker.Start();
+                        if (_stopping) return false;
+                        if (!_workerStarted)
+                        {
+                            _worker.Start();
+                            _workerStarted = true;
+                        }
+                        _calls.Enqueue(new NativeCallRequest { Run = work, Done = done });
+                        while (_calls.Count > NATIVE_CALL_QUEUE_CAP)
+                        {
+                            var dropped = _calls.Dequeue();
+                            try { dropped.Done?.Set(); } catch { }
+                        }
                     }
+                    _ready.Set();
+                    return WindowInterop.WaitForSingleObject(
+                        done.WaitHandle.SafeWaitHandle.DangerousGetHandle(), (uint)timeoutMs) == 0;
                 }
             }
-            using (var done = new ManualResetEventSlim(false))
+
+            public void Stop()
             {
-                lock (_nativeCalls)
+                _stopping = true;
+                lock (_calls)
                 {
-                    _nativeCalls.Enqueue(new NativeCallRequest { Run = work, Done = done });
-                    while (_nativeCalls.Count > NATIVE_CALL_QUEUE_CAP)
+                    while (_calls.Count > 0)
                     {
-                        // Superseded (the worker is stuck): releasing its waiter is the
-                        // only dequeue that must not leak one.
-                        var dropped = _nativeCalls.Dequeue();
+                        var dropped = _calls.Dequeue();
                         try { dropped.Done?.Set(); } catch { }
                     }
                 }
-                _nativeCallReady.Set();
-                return WindowInterop.WaitForSingleObject(
-                    done.WaitHandle.SafeWaitHandle.DangerousGetHandle(), (uint)timeoutMs) == 0;   // WAIT_OBJECT_0
+                _ready.Set();
+                // A wedged native call cannot be killed safely. Removing the channel above
+                // keeps it out of the next generation even if the OS reuses the native id.
             }
-        }
 
-        private static void NativeWorkerLoop()
-        {
-            while (true)
+            private void WorkerLoop()
             {
-                _nativeCallReady.WaitOne();
-                NativeCallRequest req;
-                lock (_nativeCalls) req = _nativeCalls.Count > 0 ? _nativeCalls.Dequeue() : null;
-                if (req == null) continue;
-                try { req.Run(); }
-                catch { /* the worker lives on regardless */ }
-                finally { try { req.Done?.Set(); } catch { } }
+                while (!_stopping)
+                {
+                    _ready.WaitOne();
+                    if (_stopping) break;
+                    NativeCallRequest req;
+                    lock (_calls) req = _calls.Count > 0 ? _calls.Dequeue() : null;
+                    if (req == null) continue;
+                    try { req.Run(); }
+                    catch { }
+                    finally { try { req.Done?.Set(); } catch { } }
+                }
             }
         }
 
@@ -4158,7 +4274,7 @@ namespace task_monitor
         // TrafficMonitor's CheckWindows11Taskbar: the OS says Win11 AND the XAML taskbar
         // is present. On a Win11 WITHOUT the bridge child (ExplorerPatcher's restored
         // classic taskbar) the classical chain exists and is the one that works.
-        private static bool IsWindows11Taskbar(IntPtr taskbar)
+        internal static bool IsWindows11Taskbar(IntPtr taskbar)
             => _isWin11OrLater && taskbar != IntPtr.Zero
                 && WindowInterop.FindWindowExW(taskbar, IntPtr.Zero, "Windows.UI.Composition.DesktopWindowContentBridge", null) != IntPtr.Zero;
 
@@ -4287,7 +4403,8 @@ namespace task_monitor
                         {
                             s.FloatPeekOpen = true;
                             ComputeFloatTarget(hwnd, s, out int px, out int py, out _);
-                            ClampFloatingToWorkArea(hwnd, ref px, ref py, s.PhysicalWidth, s.PhysicalHeight);
+                            if (FloatingHomeWorkArea(hwnd, s, out var peekWork))
+                                ClampFloatingToWorkArea(peekWork, ref px, ref py, s.PhysicalWidth, s.PhysicalHeight);
                             Logger.Info("悬浮模式：贴边隐藏——鼠标移入，弹出悬浮窗");
                             StartFloatSlide(hwnd, s, px, py);
                         }
@@ -4306,7 +4423,8 @@ namespace task_monitor
                                 && Math.Abs(ny - s.FloatY) < FloatDragThreshold(s))
                                 return IntPtr.Zero;   // still a click, not a drag yet
                             s.FloatDragging = true;
-                            ClampFloatingToWorkArea(hwnd, ref nx, ref ny, s.PhysicalWidth, s.PhysicalHeight);
+                            if (!s.Owner._floatingAllowOutOfBounds)
+                                ClampFloatingToWorkArea(hwnd, ref nx, ref ny, s.PhysicalWidth, s.PhysicalHeight);
                             if (nx != s.FloatX || ny != s.FloatY)
                             {
                                 int dx = nx - s.FloatX, dy = ny - s.FloatY;
@@ -4337,15 +4455,16 @@ namespace task_monitor
                             s.Hovered = -1;
                             Draw(s);
                         }
-                        // 贴边隐藏: the mouse left a peeked widget → slide back out. Suppressed
-                        // while a column is selected — its flyout is the reason the widget is
-                        // out, and the user's next move is usually INTO that flyout; the flyout
-                        // closing (WM_APP_DESELECT) re-hides once the cursor is elsewhere.
+                        // 贴边隐藏: a genuinely departed cursor slides a peeked widget back out.
+                        // A changing window REGION can also emit WM_MOUSELEAVE under a stationary
+                        // cursor; re-check the VISIBLE clip or that synthetic leave cancels the
+                        // peek after a few ms. A selected column keeps the widget out for its flyout.
                         // Leaving also re-arms the peek for a cursor that docked onto the strip.
                         if (s.Floating)
                         {
                             s.FloatPeekArmed = true;
-                            if (s.FloatDockEdge != 0 && s.FloatPeekOpen && !s.FloatPressed && s.Selected < 0)
+                            if (s.FloatDockEdge != 0 && s.FloatPeekOpen && !s.FloatPressed && s.Selected < 0
+                                && !CursorOnFloat(hwnd, s))
                             {
                                 Logger.Info("悬浮模式：贴边隐藏——鼠标移开，收起");
                                 SlideFloatHidden(hwnd, s);
@@ -4380,6 +4499,7 @@ namespace task_monitor
                         ds.FloatDragging = false;
                         ds.FloatGrabX = grab.x - ds.FloatX;
                         ds.FloatGrabY = grab.y - ds.FloatY;
+                        EnsureFloatingRegion(hwnd, ds);
                     }
                     return IntPtr.Zero;
                 }
@@ -4400,6 +4520,7 @@ namespace task_monitor
                         {
                             s.Owner._floatingX = s.FloatX;
                             s.Owner._floatingY = s.FloatY;
+                            s.Owner._floatingHomeValid = true;
                             Logger.Debug($"悬浮模式：拖动到 ({s.FloatX},{s.FloatY})");
                             s.Owner.FloatingPositionChanged?.Invoke(s.FloatX, s.FloatY);
                             // 贴边隐藏: a drop within EdgeSnapDip of an eligible work-area edge
@@ -4409,7 +4530,7 @@ namespace task_monitor
                             // rest is edge-relative, derived, never stored.
                             bool wasDocked = s.FloatDockEdge != 0;
                             s.FloatDockEdge = 0;
-                            if (s.Owner._floatingEdgeHide && FloatingWorkArea(hwnd, out var dropWork))
+                            if (s.Owner._floatingEdgeHide && FloatingHomeWorkArea(hwnd, s, out var dropWork))
                                 s.FloatDockEdge = FloatEdgeOf(s.FloatX, s.FloatY, s.PhysicalWidth, s.PhysicalHeight, dropWork, s.Dpi);
                             if (s.FloatDockEdge != 0)
                             {
@@ -4503,14 +4624,18 @@ namespace task_monitor
                 case WindowInterop.WM_DPICHANGED:
                 {
                     uint newDpi = (uint)(wParam.ToInt64() & 0xFFFF);
-                    if (newDpi > 0) HandleDpiChange(hwnd, newDpi, StateOf(hwnd));
+                    var ds = StateOf(hwnd);
+                    if (ds != null && ds.Floating) newDpi = FloatingEffectiveDpi(ds, newDpi);
+                    if (newDpi > 0) HandleDpiChange(hwnd, newDpi, ds);
                     return IntPtr.Zero;
                 }
 
                 case WindowInterop.WM_DPICHANGED_AFTERPARENT:
                 {
                     uint newDpi = WindowInterop.GetDpiForWindow(hwnd);
-                    if (newDpi > 0) HandleDpiChange(hwnd, newDpi, StateOf(hwnd));
+                    var ds = StateOf(hwnd);
+                    if (ds != null && ds.Floating) newDpi = FloatingEffectiveDpi(ds, newDpi);
+                    if (newDpi > 0) HandleDpiChange(hwnd, newDpi, ds);
                     return IntPtr.Zero;
                 }
 
@@ -4575,7 +4700,7 @@ namespace task_monitor
                     if (es == null || !es.Floating || es.FloatPressed) return IntPtr.Zero;
                     if (es.Owner._floatingEdgeHide)
                     {
-                        if (FloatingWorkArea(hwnd, out var dw))
+                        if (FloatingHomeWorkArea(hwnd, es, out var dw))
                         {
                             int edge = FloatEdgeOf(es.Owner._floatingX, es.Owner._floatingY,
                                 es.PhysicalWidth, es.PhysicalHeight, dw, es.Dpi);
@@ -4592,13 +4717,35 @@ namespace task_monitor
                     }
                     else if (es.FloatDockEdge != 0)
                     {
-                        es.FloatDockEdge = 0;
-                        es.FloatPeekOpen = false;
                         Logger.Info("悬浮模式：贴边隐藏关闭——悬浮窗滑回原位");
                         ComputeFloatTarget(hwnd, es, out int x, out int y, out _);
-                        ClampFloatingToWorkArea(hwnd, ref x, ref y, es.PhysicalWidth, es.PhysicalHeight);
+                        es.FloatDockEdge = 0;
+                        es.FloatPeekOpen = false;
+                        if (!es.Owner._floatingAllowOutOfBounds
+                            && FloatingHomeWorkArea(hwnd, es, out var homeWork))
+                            ClampFloatingToWorkArea(homeWork, ref x, ref y, es.PhysicalWidth, es.PhysicalHeight);
                         StartFloatSlide(hwnd, es, x, y);
                     }
+                    return IntPtr.Zero;
+                }
+
+                case WindowInterop.WM_APP_SET_FLOAT_OUT_OF_BOUNDS:
+                {
+                    var os = StateOf(hwnd);
+                    if (os == null || !os.Floating || os.FloatPressed) return IntPtr.Zero;
+                    if (!os.Owner._floatingAllowOutOfBounds && os.Owner._floatingHomeValid)
+                    {
+                        int hx = os.Owner._floatingX, hy = os.Owner._floatingY;
+                        if (FloatingHomeWorkArea(hwnd, os, out var homeWork))
+                            ClampFloatingToWorkArea(homeWork, ref hx, ref hy, os.PhysicalWidth, os.PhysicalHeight);
+                        if (hx != os.Owner._floatingX || hy != os.Owner._floatingY)
+                        {
+                            os.Owner._floatingX = hx;
+                            os.Owner._floatingY = hy;
+                            os.Owner.FloatingPositionChanged?.Invoke(hx, hy);
+                        }
+                    }
+                    FloatingReposition(hwnd, os, force: true);
                     return IntPtr.Zero;
                 }
 
@@ -4644,8 +4791,15 @@ namespace task_monitor
                         if (s.Selected >= 0 && (mask & (1 << s.Selected)) == 0) s.Selected = -1;
                         if (s.Hovered >= 0 && (mask & (1 << s.Hovered)) == 0) s.Hovered = -1;
                         ResizeForLayout(hwnd, s);
-                        SamplePublishDraw(s);
+                        DrawPublishedSnapshot(s);
                     }
+                    return IntPtr.Zero;
+                }
+
+                case WindowInterop.WM_APP_SNAPSHOT:
+                {
+                    var s = StateOf(hwnd);
+                    if (s != null) DrawPublishedSnapshot(s);
                     return IntPtr.Zero;
                 }
 
@@ -4742,16 +4896,16 @@ namespace task_monitor
                         // A LOST DEVICE owns this tick (显卡驱动更新/重置/TDR): rebuild the
                         // pipeline first — DPI tracking, repositioning and the sample-draw all
                         // funnel into Draw/ResizeBuffers, which a dead device can only reject.
-                        // While the rebuild keeps failing (the driver is still coming back)
-                        // only the sampler runs, so the detail popups keep ticking; the
-                        // overlay itself holds its last frame until the device returns.
+                        // While the rebuild keeps failing, the shared controller keeps the
+                        // detail popups ticking; this overlay holds its last frame.
                         if (s.DeviceLost && !RecoverDevice(hwnd, s))
                         {
-                            SamplePublishDraw(s);   // sampling + publish; Draw no-ops while lost
+                            DrawPublishedSnapshot(s);   // Draw no-ops while the device is lost
                             return IntPtr.Zero;
                         }
 
                         uint curDpi = WindowInterop.GetDpiForWindow(hwnd);
+                        if (s.Floating) curDpi = FloatingEffectiveDpi(s, curDpi);
                         if (curDpi > 0 && curDpi != s.Dpi)
                             HandleDpiChange(hwnd, curDpi, s);
 
@@ -4771,9 +4925,9 @@ namespace task_monitor
                         {
                             CrashTrace.NoteStep("置顶");
                             ApplyFloatingTopmost(hwnd, s.Owner._floatingTopmost);
-                            // …and keep the rounded region in step with the widget's size/DPI
-                            // (a 采样 toggle or a DPI change resizes it; the call is
-                            // change-gated, so the steady state is one comparison).
+                            // …and keep the rounded/clipped region in step with size, DPI and
+                            // dock position (change-gated; an undocked steady state needs no
+                            // monitor query).
                             CrashTrace.NoteStep("圆角区域");
                             EnsureFloatingRegion(hwnd, s);
                             // 全屏时隐藏: the visibility probe rides the same tick. It runs
@@ -4797,7 +4951,7 @@ namespace task_monitor
                             SampleTaskbarBackdropColor(hwnd, s);
                         }
 
-                        SamplePublishDraw(s);
+                        DrawPublishedSnapshot(s);
                     }
                     return IntPtr.Zero;
                 }
@@ -4833,44 +4987,20 @@ namespace task_monitor
         }
 
         // The full overlay teardown, runnable from EITHER WM_DESTROY or a bare
-        // WM_NCDESTROY (see its case): restore the band (bounded worker wait; a dead band
-        // IsWindow-skips), unregister SRUM (bounded pool wait), kill the timers, release
-        // the D3D/D2D/DComp pipeline and free the state handle. Every step tolerates a
-        // dead explorer/device; the once-guard makes the two-message path idempotent.
+        // WM_NCDESTROY (see its case): restore the band, kill the timers, release
+        // the D3D/D2D/DComp pipeline and free the state handle. The shared sampler
+        // has a process-level owner and deliberately does NOT die with an overlay.
         private static void TeardownOverlay(IntPtr hwnd)
         {
             var dying = StateOf(hwnd);
             if (dying == null || dying.TeardownRan) return;
             dying.TeardownRan = true;
+            dying.Owner.OverlayHwnd = IntPtr.Zero;
             // Classical path: give the task-buttons band its size back BEFORE we
             // disappear (RestoreMinWindow) — nothing else re-expands it promptly.
             // Explorer-restart: the band is already dead, IsWindow skips it.
             CrashTrace.NoteStep("恢复按钮带");
             RestoreMinWindow(dying);
-            // The sampler holds a NATIVE SRUM registration whose callback pointer must
-            // not survive this sampler (the 卡死 crash: a leaked registration + a
-            // collected delegate = srumapi calling a freed stub). Shutdown before the
-            // state — and with it the sampler — becomes garbage.
-            CrashTrace.NoteStep("SRUM注销");
-            // SRUM's unregister is an undocumented API that may block (an RPC
-            // or an in-flight-callback drain) — on the message loop it would
-            // hang the teardown exactly the way the band move hung the poll
-            // (gotchas §43). Bounded: a pool thread runs it and we wait at most
-            // 500ms; the Retired list keeps the delegate rooted meanwhile, and
-            // a leaked pool thread is background by construction.
-            try
-            {
-                var sampler = dying.Sampler;
-                if (sampler != null)
-                {
-                    var unreg = System.Threading.Tasks.Task.Run((Action)sampler.Shutdown);
-                    // Same raw-wait rule as BandMoveAndWait: no CLR pumping
-                    // wait on this STA thread (gotchas §43).
-                    WindowInterop.WaitForSingleObject(
-                        ((System.IAsyncResult)unreg).AsyncWaitHandle.SafeWaitHandle.DangerousGetHandle(), 500);
-                }
-            }
-            catch (Exception ex) { Logger.Warn("注销 SRUM 实时 API 失败（忽略）", ex); }
             WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID);
             WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID_POS);
             WindowInterop.KillTimer(hwnd, (IntPtr)TIMER_ID_FLOAT_SLIDE);
@@ -4885,6 +5015,7 @@ namespace task_monitor
                 CrashTrace.NoteStep("释放设备资源");
                 try { if (s != null) ReleaseDeviceResources(s); }
                 catch (Exception ex) { Logger.Warn("覆盖层退出时释放 D3D/D2D/DComp 资源失败（进程即将退出，忽略）", ex); }
+                if (s != null) ReleaseTextResources(s);
                 handle.Free();
                 WindowInterop.SetWindowLongPtr(hwnd, WindowInterop.GWLP_USERDATA, IntPtr.Zero);
             }
@@ -5040,8 +5171,9 @@ namespace task_monitor
             // wrappers must be DISPOSED before ResizeBuffers (see ResizeBackBuffer).
             public IComObject<IDXGISurface> BackBufferSurface;
             public IComObject<ID2D1Bitmap1> BackBufferBitmap;
-            // DirectWrite formats: device-INDEPENDENT, created once per Start() and kept across
-            // a device loss (CreateDeviceResources never touches them).
+            // DirectWrite factory + formats: kept alive for the whole HWND lifetime, not just
+            // the Start() stack. Device-loss recovery keeps them; final teardown releases them.
+            public IComObject<IDWriteFactory> DWriteFactory;
             public IComObject<IDWriteTextFormat> LabelFormat;
             public IComObject<IDWriteTextFormat> ValueFormat;
             public IComObject<IDWriteTextFormat> NetFormat;   // flush-right (TRAILING), for the net rates
@@ -5073,6 +5205,7 @@ namespace task_monitor
             // change-gate for EnsureFloatingRegion, which the tick calls every second.
             public int RegionW, RegionH;
             public uint RegionDpi;
+            public WindowInterop.RECT RegionClip;
             public int FloatX, FloatY;          // its live screen position (the drag owns it)
             public bool FloatAvoiding;          // …currently stepped aside for an open detail window (ComputeFloatTarget)
             public bool FloatPressed;           // left button went down on us (mouse captured)
@@ -5099,6 +5232,9 @@ namespace task_monitor
             public int PendingBackdropCount;    // …its consecutive-sample count so far
             public int PhysicalWidth;
             public int PhysicalHeight;
+            // The floating card's creation-derived logical height; unlike LogicalHeight it
+            // survives an every-metric-off stub and never depends on another monitor's DPI.
+            public float FloatingHeightDip;
             // VERTICAL only: the band thickness (DIP) the layout is built against — the ONE
             // width all layout callers use (VerticalAvailWidth). 0 = not measured yet (the
             // layout falls back to its natural 70/84-DIP width). Never derive a layout from
@@ -5108,6 +5244,7 @@ namespace task_monitor
             public int LastPlaceX;      // taskbar-relative x last applied by MoveWindow (Win11 path)
             public int LastPlaceY;      // taskbar-relative y last applied (band bottom-alignment horizontal,
                                         // the vertical anchor along the side taskbar's axis)
+            public int LastPlaceW, LastPlaceH;  // last applied HWND size, on either form (0 = not applied yet)
             // Placement diagnostics (LogGeometry): the rects at the last dump — the
             // per-tick dump is change-gated on these so the steady state stays quiet.
             public bool DiagLogged;
@@ -5123,7 +5260,6 @@ namespace task_monitor
             public Action<int> ToggleCallback;
             public Action RightClickRequested;
             public TaskbarWindow Owner;
-            public SystemSampler Sampler;
             public SystemSnapshot Snapshot;
         }
     }

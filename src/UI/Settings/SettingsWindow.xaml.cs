@@ -16,7 +16,7 @@ namespace task_monitor
     /// hamburger below): 通用 (开机自启动 / 采样间隔 / 检查更新 / 更新源), 外观 (主题 / 靠左显示 — an
     /// expander whose item is 靠左位置, or a plain card where that item does not exist,
     /// i.e. on the classical Win10 taskbar — plus 紧凑模式, the item-pitch switch, and
-    /// 悬浮模式 with its four sub-cards), 采样项目 (one expander per metric, the toggle in
+    /// 悬浮模式 with its five sub-cards), 采样项目 (one expander per metric, the toggle in
     /// its content area enabling/disabling that metric's sampling; 磁盘's and GPU's
     /// expanders also hold 显示方式 + the specific-device picker, GPU's additionally the
     /// 任务栏显示 (使用率/温度/两者) trio with 温度来源 and 温度单位, 网络's the 适配器
@@ -39,11 +39,13 @@ namespace task_monitor
     public partial class SettingsWindow : Window
     {
         private readonly Action<bool, bool> _placementChanged;
+        private readonly Action<IReadOnlyList<TaskbarDisplaySelection>> _displaySelectionChanged;
         private readonly Action<bool> _autoStartChanged;
         private readonly Action<int> _themeChanged;           // 0=跟随系统 1=浅色 2=深色
         private readonly Action<bool> _compactChanged;        // 紧凑模式 (the item pitch)
         private readonly Action<bool> _floatingChanged;       // 悬浮模式 (the whole form flips)
         private readonly Action<bool> _floatingTopmostChanged; // 悬浮模式 → 置顶显示
+        private readonly Action<bool> _floatingOutOfBoundsChanged; // 悬浮模式 → 允许超出屏幕边界
         private readonly Action<bool> _floatingEdgeHideChanged; // 悬浮模式 → 贴边隐藏
         private readonly Action<bool> _floatingFullscreenHideChanged; // 悬浮模式 → 全屏时隐藏
         private readonly Action<double> _floatingOpacityChanged; // 悬浮模式 → 透明度 (0.2–1.0)
@@ -58,7 +60,7 @@ namespace task_monitor
         private readonly Action<bool, string, string> _clashApiChanged; // (enabled, controller address or "" = default, API secret)
         private readonly Action<bool> _updateCheckChanged;  // 检查更新
         private readonly Action<int> _updateSourceChanged;  // 0=CNB 1=GitHub
-        // Reads the overlay-owned SystemSampler's latest snapshot — the About page's live
+        // Reads SamplingController's latest snapshot — the About page's live
         // CPU waveform; the same single-source push model as the detail windows.
         private readonly Func<SystemSnapshot> _snapshotProvider;
         // 500ms single-shot debounce for the two Clash text boxes — a yaml write +
@@ -159,11 +161,16 @@ namespace task_monitor
         // internal: the signature mentions internal sampler types — App (same assembly) is
         // the only caller; the window is never instantiated from XAML.
         internal SettingsWindow(bool overlayOnLeft, bool snapToStart, Action<bool, bool> placementChanged,
+            bool snapToStartSupported,
+            IReadOnlyList<TaskbarDisplayInfo> displays,
+            IReadOnlyList<TaskbarDisplaySelection> selectedDisplays,
+            Action<IReadOnlyList<TaskbarDisplaySelection>> displaySelectionChanged,
             bool autoStartOn, Action<bool> autoStartChanged,
             int themeIndex, Action<int> themeChanged,
             bool compactLayout, Action<bool> compactLayoutChanged,
             bool floatingMode, Action<bool> floatingChanged,
             bool floatingTopmost, Action<bool> floatingTopmostChanged,
+            bool floatingAllowOutOfBounds, Action<bool> floatingAllowOutOfBoundsChanged,
             bool floatingEdgeHide, Action<bool> floatingEdgeHideChanged,
             bool floatingFullscreenHide, Action<bool> floatingFullscreenHideChanged,
             double floatingOpacity, Action<double> floatingOpacityChanged,
@@ -188,11 +195,13 @@ namespace task_monitor
         {
             InitializeComponent();
             _placementChanged = placementChanged;
+            _displaySelectionChanged = displaySelectionChanged;
             _autoStartChanged = autoStartChanged;
             _themeChanged = themeChanged;
             _compactChanged = compactLayoutChanged;
             _floatingChanged = floatingChanged;
             _floatingTopmostChanged = floatingTopmostChanged;
+            _floatingOutOfBoundsChanged = floatingAllowOutOfBoundsChanged;
             _floatingEdgeHideChanged = floatingEdgeHideChanged;
             _floatingFullscreenHideChanged = floatingFullscreenHideChanged;
             _floatingOpacityChanged = floatingOpacityChanged;
@@ -220,7 +229,7 @@ namespace task_monitor
             // cleared first, or its template would claim the same children the moment it
             // applies.
             _onLeftHost = OnLeftExpander;
-            if (!TaskbarWindow.IsWindows11Taskbar())
+            if (!snapToStartSupported)
             {
                 var icon = OnLeftExpander.HeaderIcon;
                 OnLeftExpander.HeaderIcon = null;
@@ -231,6 +240,7 @@ namespace task_monitor
                 OnLeftCard.Visibility = Visibility.Visible;
                 _onLeftHost = OnLeftCard;
             }
+            PopulateDisplayPicker(displays, selectedDisplays);
             AutoStartSwitch.IsOn = autoStartOn;
             ThemeCombo.SelectedIndex = themeIndex < 0 || themeIndex > 2 ? 0 : themeIndex;
             CompactSwitch.IsOn = compactLayout;
@@ -239,6 +249,8 @@ namespace task_monitor
             // 置顶显示 only means anything in the floating form (the embedded overlay inherits
             // the taskbar's band), so it follows the mode switch — same shape as 靠左位置.
             FloatingTopmostCard.IsEnabled = floatingMode;
+            FloatingOutOfBoundsSwitch.IsOn = floatingAllowOutOfBounds;
+            FloatingOutOfBoundsCard.IsEnabled = floatingMode;
             // …and so does 贴边隐藏 (the embedded overlay is anchored to the taskbar; it has
             // no edges to dock to).
             FloatingEdgeHideSwitch.IsOn = floatingEdgeHide;
@@ -256,6 +268,7 @@ namespace task_monitor
             // …and the two are mutually exclusive: a floating widget is positioned by dragging,
             // not by the taskbar anchors, so 靠左显示/靠左位置 do nothing while it is on.
             _onLeftHost.IsEnabled = !floatingMode;
+            DisplayExpander.IsEnabled = !floatingMode;
             IntervalCombo.SelectedIndex = IntervalToIndex(intervalMs);
             CpuSwitch.IsOn = (samplingMask & SystemSampler.MaskCpu) != 0;
             RamSwitch.IsOn = (samplingMask & SystemSampler.MaskRam) != 0;
@@ -287,6 +300,131 @@ namespace task_monitor
             UpdateSourceCombo.IsEnabled = updateCheckOn;   // the source only matters while 检查更新 is on
             VersionText.Text = $"版本 {VersionInfo.Current}";   // AssemblyInformationalVersion — 与发版 tag 一致
             _loaded = true;
+        }
+
+        private void PopulateDisplayPicker(IReadOnlyList<TaskbarDisplayInfo> displays,
+            IReadOnlyList<TaskbarDisplaySelection> selectedDisplays)
+        {
+            var cards = new List<object>();
+            var selectedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (selectedDisplays != null)
+            {
+                foreach (var selected in selectedDisplays)
+                {
+                    if (selected != null && !string.IsNullOrWhiteSpace(selected.Id)) selectedIds.Add(selected.Id);
+                }
+            }
+
+            if (displays != null)
+            {
+                foreach (var display in displays)
+                {
+                    if (display == null || string.IsNullOrWhiteSpace(display.Id)) continue;
+                    bool selected = selectedDisplays == null ? display.IsPrimary : selectedIds.Contains(display.Id);
+                    AddDisplayCard(cards, display.Id, display.Name, display.DeviceName, display.IsPrimary,
+                        display.HasTaskbar, selected, false);
+                    seen.Add(display.Id);
+                }
+            }
+
+            if (selectedDisplays != null)
+            {
+                foreach (var selected in selectedDisplays)
+                {
+                    if (selected == null || string.IsNullOrWhiteSpace(selected.Id) || seen.Contains(selected.Id)) continue;
+                    AddDisplayCard(cards, selected.Id, TaskbarDisplayCatalog.ResolveDisplayName(selected.Id, selected.Name),
+                        null, false, false, true, true);
+                    seen.Add(selected.Id);
+                }
+            }
+            DisplayExpander.Items = cards;
+            if (CountCheckedDisplays() == 0)
+            {
+                foreach (var item in DisplayExpander.Items)
+                {
+                    if (item is SettingsCard card && card.Content is CheckBox check && check.IsEnabled)
+                    {
+                        check.IsChecked = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        internal void RefreshDisplays(IReadOnlyList<TaskbarDisplayInfo> displays,
+            IReadOnlyList<TaskbarDisplaySelection> selectedDisplays)
+        {
+            bool wasLoaded = _loaded;
+            _loaded = false;
+            PopulateDisplayPicker(displays, selectedDisplays);
+            DisplayExpander.UpdateLayout();
+            _loaded = wasLoaded;
+            Logger.Debug($"设置显示器列表已重建：在线={displays?.Count ?? 0}，保存选择={selectedDisplays?.Count ?? 0}");
+        }
+
+        private void AddDisplayCard(List<object> cards, string id, string name, string deviceName, bool primary,
+            bool hasTaskbar, bool selected, bool offline)
+        {
+            var selection = new TaskbarDisplaySelection
+            {
+                Id = id,
+                Name = string.IsNullOrWhiteSpace(name) ? "显示器" : name
+            };
+            var check = new CheckBox
+            {
+                Content = selection.Name,
+                Tag = selection,
+                IsChecked = selected,
+                IsEnabled = hasTaskbar || selected,
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            check.Checked += DisplayCheckChanged;
+            check.Unchecked += DisplayCheckChanged;
+            string title = selection.Name;
+            if (primary) title += "（主显示器）";
+            if (offline) title += "（未连接）";
+            string description = offline
+                ? "保留此选择，重新连接后自动恢复。"
+                : hasTaskbar ? deviceName : "当前没有任务栏；请在 Windows 中开启“在所有显示器上显示任务栏”。";
+            cards.Add(new SettingsCard
+            {
+                Header = title,
+                Description = description,
+                Content = check
+            });
+        }
+
+        private void DisplayCheckChanged(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded || !(sender is CheckBox changed)) return;
+            if (changed.IsChecked != true && CountCheckedDisplays() == 0)
+            {
+                _loaded = false;
+                changed.IsChecked = true;
+                _loaded = true;
+                return;
+            }
+            var selected = new List<TaskbarDisplaySelection>();
+            foreach (var item in DisplayExpander.Items)
+            {
+                if (item is SettingsCard card && card.Content is CheckBox check
+                    && check.IsChecked == true && check.Tag is TaskbarDisplaySelection display)
+                {
+                    selected.Add(new TaskbarDisplaySelection { Id = display.Id, Name = display.Name });
+                }
+            }
+            _displaySelectionChanged?.Invoke(selected);
+        }
+
+        private int CountCheckedDisplays()
+        {
+            int count = 0;
+            foreach (var item in DisplayExpander.Items)
+            {
+                if (item is SettingsCard card && card.Content is CheckBox check && check.IsChecked == true) count++;
+            }
+            return count;
         }
 
         // The 特定磁盘 picker: one item per present physical disk ("磁盘 0 (C: D:) · model"),
@@ -430,10 +568,12 @@ namespace task_monitor
             _loaded = false;
             FloatingSwitch.IsOn = on;
             FloatingTopmostCard.IsEnabled = on;
+            FloatingOutOfBoundsCard.IsEnabled = on;
             FloatingEdgeHideCard.IsEnabled = on;
             FloatingFullscreenHideCard.IsEnabled = on;
             FloatingOpacityCard.IsEnabled = on;
             _onLeftHost.IsEnabled = !on;
+            DisplayExpander.IsEnabled = !on;
             _loaded = true;
         }
 
@@ -508,10 +648,12 @@ namespace task_monitor
         {
             if (!_loaded) return;
             FloatingTopmostCard.IsEnabled = FloatingSwitch.IsOn;
+            FloatingOutOfBoundsCard.IsEnabled = FloatingSwitch.IsOn;
             FloatingEdgeHideCard.IsEnabled = FloatingSwitch.IsOn;
             FloatingFullscreenHideCard.IsEnabled = FloatingSwitch.IsOn;
             FloatingOpacityCard.IsEnabled = FloatingSwitch.IsOn;
             _onLeftHost.IsEnabled = !FloatingSwitch.IsOn;   // anchors don't apply to a dragged widget
+            DisplayExpander.IsEnabled = !FloatingSwitch.IsOn;
             _floatingChanged?.Invoke(FloatingSwitch.IsOn);
         }
 
@@ -519,6 +661,12 @@ namespace task_monitor
         {
             if (!_loaded) return;
             _floatingTopmostChanged?.Invoke(FloatingTopmostSwitch.IsOn);
+        }
+
+        private void FloatingOutOfBoundsSwitch_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded) return;
+            _floatingOutOfBoundsChanged?.Invoke(FloatingOutOfBoundsSwitch.IsOn);
         }
 
         private void FloatingEdgeHideSwitch_Toggled(object sender, RoutedEventArgs e)

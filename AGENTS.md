@@ -9,7 +9,7 @@ This file provides guidance to AI coding agents when working with code in this r
 | When you touch… | Read |
 |---|---|
 | taskbar geometry, boot/explorer-restart, D2D/DXGI, samplers, theme, process rows, 悬浮模式/贴边隐藏/全屏时隐藏, crash & stall forensics | `docs/gotchas.md` |
-| anything spanning files: the two threads, cross-thread contract, detail/pin model, startup & elevation, project layout | `docs/architecture.md` |
+| anything spanning files: thread ownership, cross-thread contract, detail/pin model, startup & elevation, project layout | `docs/architecture.md` |
 | a 设置 item's wiring to its sampler | `docs/settings-plumbing.md` |
 | any of the nine scroll views | `docs/scroll-stack.md` |
 
@@ -89,17 +89,14 @@ Windows runner。`publish-cnb-release.ps1` 的三个坑（勿回退，见脚本�
 
 ## Architecture (the part that spans files)
 
-**Two threads, one process.** ① A native Win32 overlay owned by `TaskbarWindow` on its own STA
-message loop (DirectN), embedded with `SetParent`; up to 4 visual groups (3 stacked + 网络) → 5
-hit slots (GPU 温度 row / 两者块 shares slot 3), geometry DYNAMIC
-from the sampling mask + GPU 任务栏显示 content; two taskbar families (Win11 `Shell_TrayWnd` / classical Win10 `ReBarWindow32`
-band-shrink, restored on exit), plus side-docked and 悬浮模式 forms. ② The WPF UI thread: on-demand
-`DetailWindow`s (shell + one `IDetailView`), `SettingsWindow`, the lazily-created right-click menu,
-and a startup `Prewarm()`.
+**One process: WPF UI + one sampling STA + N overlay STAs.** `SamplingController` owns the only
+`SystemSampler`; `TaskbarOverlayManager` creates one native `TaskbarWindow` per selected display,
+each with its own `RenderState`, DirectN pipeline and `SetParent` target. Layout still has 5 hit
+slots and two taskbar families plus side-docked forms; floating mode remains a SINGLE window.
+The WPF thread owns detail/settings/menu windows.
 
-**Single source of truth, push not poll:** `TaskbarWindow` owns the **only** `SystemSampler`; popups
-read `LatestSnapshot` and have no timer. The tick also carries the stall diagnostics — don't drop
-them as dead code.
+**Single source of truth:** controller publishes one snapshot; overlays redraw it independently,
+popups read the controller. Sampling and per-overlay heartbeats/diagnostics must all stay live.
 
 **Cross-thread contract** (Taskbar→UI callbacks, UI→taskbar `Set*`/`Request*` methods) and the
 pinned-mode invariants: `docs/architecture.md`; the 设置→sampler chains: `docs/settings-plumbing.md`.
@@ -151,15 +148,17 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 **Taskbar / boot**
 
 1. **Classical band is ours to restore** — `RestoreMinWindow` before ANY re-measure of our own, in `WM_DESTROY`, on an orientation flip, and on exit.
-2. **Boot/explorer-restart:** `Start()` polls for a real taskbar; ANY return → App re-enters after 2s; the WndProc delegate is a process-lifetime `static readonly` (a per-`Start()` one orphans the thunk → AV).
+2. **Boot/explorer-restart:** `Start(target)` polls its own taskbar; ANY return → the manager re-resolves and re-enters after 2s; cancelled entries never revive; the WndProc delegate stays process-lifetime `static readonly`.
 3. **Nothing escapes `WndProc`** — per-message try/catch → `CrashReporter`; an escaping managed exception is `0xC000041D`.
 4. **Global crashes** = log file FIRST, then a code-only `CrashDialog`; a fatal report blocks the dying thread on it.
 5. **`Logger`** — `logs/task_monitor-<date>.log`, 7-day retention, never throws; hot per-tick paths never log (`WarnOnce`). Keep the line truthful.
 6. **The overlay must never steal focus** — full no-activate set, incl. `SWP_NOACTIVATE` on every `SetWindowPos`; sole exception: 悬浮模式 with 置顶显示 OFF (§36).
 7. **`SetWindowPos(HWND_TOPMOST)` no-ops when not foreground** — activate first; `EnsureTopmost` verifies the exstyle bit.
 8. **Acrylic** — FluentWpfCore `UseWindowComposition=True` on every WPF window, never hand-rolled Accent P/Invoke (carve-out: DetailWindow on Win10, §40); the native floating overlay has NO material (§36); the menu host needs `WS_EX_TOOLWINDOW`.
-44. **竖直（侧边停靠）任务栏与任务栏族无关** — the orientation probe is the taskbar rect's aspect, never `classical` (Win11 26H2's native 左侧/右侧 taskbar is still the Win11 family). Missing it sizes the horizontal grid (~200 DIP) to the 48-DIP column, which covers the WHOLE taskbar and swallows its clicks; a side taskbar always takes the column grid + the tray-end/top-corner anchor, and its THICKNESS picks the form: one narrow column two-line (threshold capped by the 70/84-DIP natural cell), a 70–139-DIP bar one one-line column, and several 70/84-DIP columns once the widened 26H2 bar fits them (`ComputeVerticalLayout`, built against the band width — never the rounded window).
+44. **竖直任务栏与任务栏族无关** — orientation comes ONLY from the target rect's aspect, never `classical`; always use the column grid + tray/top anchor. Thickness selects two-line strip / one-line column / multi-column (`ComputeVerticalLayout` against BAND width, never the rounded window).
 45. **`SetParent` 嵌入任务栏偶发 err=87（跨线程瞬态）** — retry in place (5×250ms), judge by `GetAncestor(GA_PARENT)`, and a failed embed DESTROYS the round (never fall through top-level in parent-relative coords → 屏幕左上角滞留); drain the teardown's WM_QUIT before returning; the tick holds the embed invariant.
+46. **多显示器 = one SamplingController + N overlays** — persist monitor interface IDs, never indices/HWNDs; each selected target has its own STA/RenderState/taskbar and cancellable lifecycle, never its own sampler. DWrite = per-HWND ISOLATED factory rooted in RenderState; failed Start aborts cleanly. Detail data comes from controller, placement from CLICKED overlay; floating stays singleton. Full rules: gotchas §46.
+47. **Native overlay STAs are PerMonitorV2; resize must reach the HWND** — compare X/Y + width/height; floating derives DPI/height independently of the primary band; docked hide/peek keeps home DPI (real drag/undock follows live); update region in the same pass. Back-buffer-only resize clips the card.
 
 **Samplers / metrics**
 
@@ -169,7 +168,7 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 12. **Disk/GPU replicate Taskmgr exactly** (`IOCTL_DISK_PERFORMANCE` / DXCore COM); disk handles are opened and closed per query, never held. On Win10 fetch the base `IDXCoreAdapter` + all four attribute passes; capability gates — never OS-version checks — drive the fallbacks.
 13. **Per-process GPU% is PDH, not DXCore** — encoding and aggregation at `ProcessGpuSampler.cs`; no elevation, unlike SRUM.
 14. **Process-row tooltip = view-owned `Popup` on `MouseMove`**, never a row `ToolTip`.
-15. **Per-process net = SRUM real-time API** (why we elevate); rates re-diff only when the frame version advances. **Unregister on EVERY rebuild AND on a `Start()` throw** (`Shutdown`/`AbandonSamplerAfterFailedStart`) — srumapi holds a raw callback pointer (the 2026-09-22 卡死), and leaked registrations + a hard kill wedge the engine for the whole boot session (empty net list, 注册成功但零帧; reboot-only).
+15. **Per-process net = SRUM real-time API** (why we elevate). `SamplingController` owns the only registration; never unregister on overlay teardown. Failed SRUM/poller cleanup retries ≤3, then BLOCKS rebuild — never accumulate registrations or retire the callback root early.
 16. **Wi-Fi `wlanapi` is on-demand only** — never on the per-tick path.
 17. **Memory breakdown = `GlobalMemoryStatusEx` + NTQSI class-2/class-80**, not `GetPerformanceInfo`.
 18. **Charts are hand-drawn WPF** — hover = `HitTest` + a real `Popup`.
@@ -196,14 +195,14 @@ statement is a comment at the code site named there. Companion: [`settings-plumb
 **Floating widget / rendering / forensics**
 
 35. **A lost D3D device is recoverable, never a crash** — only the raw `EndDraw`/`Present`/`ResizeBuffers` HRESULTs can tell (DirectN's helpers lose the code as E_FAIL): latch `RenderState.DeviceLost`, rebuild in place, release DComp with `Marshal.FinalReleaseComObject`.
-36. **悬浮模式 = the same window, detached** — no `SetParent`, the taskbar keeps no copy, and the body is its OWN drawn card (popup tint, no blur, no system frame: radius from the window region, 1px outline drawn by us last); creation-time state, so a flip rebuilds the window; **the drag moves the pair, the dodge separates it**. Long and load-bearing — read gotchas §36 first.
-37. **A native crash is invisible to every managed handler** — `CrashTrace`'s VEH is the only record; don't add a WndProc handler for one. A WER **reflection** is not a second instance. Crashless stalls → `CheckOverlayHealth` + the phase-name ring + `SystemSampler.Timed`.
-38. **贴边隐藏 — the dock is DERIVED from the home, the slide owns the position** — a drop within 8 DIP of the work area's 左/右/上 edge docks and slides out (8-DIP strip; hover peeks; mouse-out re-hides); yaml stores only switch + home; the slide and a held button suspend `FloatingReposition`; a slide never reports `FloatingDragged` nor writes the home; the peek arms only after the cursor demonstrably left.
-39. **全屏时隐藏 — the probe owns VISIBILITY, never the position** — per-tick, on DWM extended-frame bounds (a MAXIMIZED window never counts); `SW_HIDE`/`SW_SHOWNOACTIVATE` transitions only, while tick, heartbeat and sampling keep running; a held button defers the hide; the dodge is suppressed while hidden.
+36. **悬浮模式始终单实例** — no `SetParent`; self-drawn rounded card, no material/frame; the drag moves the pair, the dodge separates it. Home uses independent validity (negative coords valid); ordinary clamp runs only when out-of-bounds is OFF. Read gotchas §36 first.
+37. **A native crash is invisible to managed handlers** — `CrashTrace`'s VEH is the only record; don't add a WndProc handler for one. Crashless stalls → per-thread `CheckOverlayHealth`, trace slots and `SystemSampler.Timed`.
+38. **贴边隐藏 — home owns dock + clip, slide owns position** — ≤8 DIP (左/右/上); home point selects monitor; clip region to home work area, unclip while pressed; re-hide only when the cursor is outside the visible clip. Ordinary clamp depends on out-of-bounds; slides/held buttons suspend reposition; slides never write home.
+39. **全屏时隐藏 — probe owns VISIBILITY, never position** — per-tick, DWM extended-frame bounds (MAXIMIZED never counts); `SW_HIDE`/`SW_SHOWNOACTIVATE` only; tick, heartbeat and sampling keep running; held button defers hiding; dodge suppressed while hidden.
 40. **Win10 的 DetailWindow 没有亚克力** — `MaterialMode=None` + `AllowsTransparency` 分层窗口 + `RootBorder` 自绘圆角卡片；`ShowColumn` 末尾补 `InvalidateVisual` + `SWP_FRAMECHANGED`。
 41. **Prewarm 永不抛出，`_stopping` 时跳过；启动时在 mutex 之后清残留 sentinel**。
 42. **经典任务栏(Win10)下覆盖层自画不透明底色** — 被 `WS_CLIPCHILDREN` 冻住的残影擦不掉、只能遮盖（`CardBrush` alpha 恒 1 全幅填充）；底色每 tick 采样 `SampleTaskbarBackdropColor`（3-tick 稳定期）；Win11 保持全透明。
-43. **窗口死后消息循环不能被晾在空队列上；僵尸卡死要取证+自愈** — 裸 `WM_NCDESTROY` 也走 `TeardownOverlay` + `PostQuitMessage`；对别人窗口的同步调用经 worker 有界等待（`SetParent` 例外）；5s 轻唤醒 + 45s 自愈重启。
+43. **窗口死后消息循环不能被晾在空队列上；僵尸卡死要取证+自愈** — 裸 `WM_NCDESTROY` 也走 `TeardownOverlay` + `PostQuitMessage`；foreign calls use per-calling-thread workers with bounded waits (`SetParent` inline); entry exit removes its worker + CrashTrace slot; watchdog checks sampling + every expected overlay; 5s wake + 45s self-restart.
 
 ## Useful external references
 

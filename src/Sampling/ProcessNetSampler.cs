@@ -75,44 +75,69 @@ namespace task_monitor
         // Kept as a field so the delegate outlives the Register call (the SRU thread invokes
         // it asynchronously for the life of the registration).
         private SrumInterop.SruStatsCallback _callback;
+        private int _callbacksInFlight;
+        private bool _retirePending;
+        private bool _keepRetired;
 
-        // Retired instances — THE FIX for the reported crashes (2026-09-22): a rebuilt overlay
-        // constructs a whole new SystemSampler, hence a new ProcessNetSampler and a NEW SRUM
-        // registration, while the old registration stayed alive inside srumapi holding the old
-        // callback's raw function pointer. The old sampler (and with it `_callback`) became
-        // garbage, the next GC — in particular the forced one in SystemInfo.TrimMemory, which
-        // runs whenever a detail popup closes — collected the delegate and freed its marshalling
-        // stub, and srumapi then called a freed stub: 0xC0000005, no managed frame, `读 0x8` with
-        // a null target, dead in the middle of the message dispatch, ~1s later (the next SRU
-        // frame). Unregistering stops future callbacks; keeping the instance rooted keeps the
-        // stub VALID for a callback that is already in flight. The list is bounded by the number
-        // of overlay rebuilds in one session and holds a few KB each.
+        // Root a retired instance only while an unregister failed or a callback is still
+        // executing. Normal unregistration removes it again, so repeated sampler recovery
+        // cannot grow this list indefinitely while the callback stub remains UAF-safe.
         private static readonly List<ProcessNetSampler> Retired = new List<ProcessNetSampler>();
+        private static IntPtr _sharedSrumModule;
+        private static readonly object _srumModuleSync = new object();
 
-        /// <summary>
-        /// Stop this instance's SRUM session — called when the overlay (and with it the sampler)
-        /// is torn down and rebuilt (悬浮模式 flip, explorer restart, exit). Idempotent and
-        /// never throws: a missing/partial registration just means nothing to release.
-        /// </summary>
-        public void Shutdown()
+        private static IntPtr GetSrumModule()
+        {
+            lock (_srumModuleSync)
+            {
+                // One process-level reference. Native callbacks keep the module in use,
+                // so it is never unloaded while this process is alive.
+                if (_sharedSrumModule == IntPtr.Zero)
+                    _sharedSrumModule = SrumInterop.LoadLibraryW("srumapi.dll");
+                return _sharedSrumModule;
+            }
+        }
+
+        /// <summary>Stop this instance's SRUM session. False means native unregistration
+        /// failed: the original handle is retained for a bounded retry by SamplingController.</summary>
+        public bool Shutdown()
         {
             _available = false;
+            bool unregisterFailed = false;
+            lock (Retired)
+            {
+                if (_registration != IntPtr.Zero && !Retired.Contains(this)) Retired.Add(this);
+            }
             if (_registration != IntPtr.Zero)
             {
                 try
                 {
                     SrumInterop.SruUnregisterRealTimeStats(_registration);
-                    Logger.Info("SRUM 实时 API 已注销（覆盖层重建/退出）——防止旧回调指针被回收后仍被调用");
+                    _registration = IntPtr.Zero;
+                    _keepRetired = false;
+                    Logger.Info("SRUM 实时 API 已注销（采样器退休/进程退出）——防止旧回调指针被回收后仍被调用");
                 }
                 catch (Exception ex)
                 {
-                    Logger.WarnOnce("srum-unregister", "SRUM 注销失败（忽略）", ex);
+                    unregisterFailed = true;
+                    Logger.WarnOnce("srum-unregister", "SRUM 注销失败（保留句柄与回调根，稍后重试）", ex);
                 }
-                _registration = IntPtr.Zero;
             }
             lock (Retired)
             {
-                if (!Retired.Contains(this)) Retired.Add(this);
+                if (unregisterFailed)
+                {
+                    _keepRetired = true;
+                    _retirePending = true;
+                    return false;
+                }
+                if (_callbacksInFlight > 0) _retirePending = true;
+                else
+                {
+                    _retirePending = false;
+                    Retired.Remove(this);
+                }
+                return true;
             }
         }
 
@@ -128,7 +153,7 @@ namespace task_monitor
 
         private void Register()
         {
-            _srumModule = SrumInterop.LoadLibraryW("srumapi.dll");
+            _srumModule = GetSrumModule();
             if (_srumModule == IntPtr.Zero)
             {
                 // srumapi.dll missing (Lite edition?) — per-process net stays disabled
@@ -174,6 +199,7 @@ namespace task_monitor
         // record set is API-managed — read it synchronously, never free it.
         private void OnSruCallback(IntPtr context, IntPtr recordSet)
         {
+            lock (Retired) _callbacksInFlight++;
             try
             {
                 SrumInterop.EnumerateNetworkRecords(recordSet, (pid, down, up) =>
@@ -184,14 +210,25 @@ namespace task_monitor
                             _cur[pid] = (v.Down + down, v.Up + up);
                         else
                             _cur[pid] = (down, up);
-                        _dataVersion++; // per record — a change marks "a new frame arrived"
+                        _dataVersion++;
                     }
                 });
             }
             catch (Exception ex)
             {
-                // Never let an exception out of a native callback — it would tear the app down.
                 Logger.WarnOnce("srum-callback", "SRU 回调内异常（已吞掉，防跨原生边界）——本帧累计丢失", ex);
+            }
+            finally
+            {
+                lock (Retired)
+                {
+                    _callbacksInFlight--;
+                    if (_callbacksInFlight == 0 && _retirePending && !_keepRetired)
+                    {
+                        _retirePending = false;
+                        Retired.Remove(this);
+                    }
+                }
             }
         }
 

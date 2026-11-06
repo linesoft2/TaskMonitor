@@ -6,7 +6,7 @@ area. The **canonical** statement of each rule still lives in a comment at the c
 site named in the heading — when the two disagree, the code comment wins and this file
 (and the index) must be fixed.
 
-Cross-cutting companions: [`architecture.md`](architecture.md) (the two threads, the
+Cross-cutting companions: [`architecture.md`](architecture.md) (thread ownership, the
 cross-thread contract, the detail/pin model, startup/elevation, layout),
 [`settings-plumbing.md`](settings-plumbing.md) (every 设置→sampler chain) and
 [`scroll-stack.md`](scroll-stack.md) (the three-file scrolling implementation).
@@ -62,9 +62,10 @@ area, the reserved band and the overlay rect (WARN when the overlay falls outsid
 monitor) at embed and whenever either rect changes — change-gated, because the tick hits
 it every second.
 
-ANY return from `Start()` (an explorer restart destroyed the `Shell_TrayWnd` parent and
-our child with it, or init threw) → the `App.StartTaskbar` loop re-enters it after 2s
-(`_stopping` gates shutdown). Recreate invariants:
+ANY return from `Start()` (parent death or init failure) → the manager's PER-TARGET loop
+re-resolves the display and re-enters after 2s (`_stopping`/desired gates shutdown and selection
+changes). The wait is cancellable, a deselected entry cannot revive, and overlay teardown never
+creates or destroys the shared sampler. Recreate invariants:
 
 - `RegisterClassW` tolerates `ERROR_CLASS_ALREADY_EXISTS`;
 - the WndProc delegate is a process-lifetime `static readonly` **precisely because** the
@@ -153,7 +154,10 @@ proves the rule: it is a NATIVE DirectComposition window, so FluentWpfCore (a WP
 property) cannot reach it — `WindowBackdropInterop` makes the identical accent call with the
 identical tint constants instead (§36). The right-click menu's invisible host is `Activate()`d,
 closes on `Deactivated`, and gets `WS_EX_TOOLWINDOW` at `SourceInitialized` (without it the host
-shows in Alt+Tab).
+shows in Alt+Tab). Before EVERY open, `ShowTaskbarMenu` moves that host to the physical cursor
+and calls `UpdateLayout`: WPF Popup picks its initial DPI from the PlacementTarget's location,
+not from `Placement=MousePoint`, so an offscreen/stale host gives a secondary-screen menu the
+primary DPI.
 
 ## 9. `NetSampler` never enumerates NICs per tick
 
@@ -236,46 +240,36 @@ recently-retained ones first, the rest at 0 B/s below — so with 合并相同�
 row's count is the number of RUNNING same-path instances, not just the traffic-active ones
 (Idle/System/Memory Compression excluded; SRUM-unavailable still degrades to empty).
 
-**A registration OUTLIVES the sampler it came from — unregister it on every rebuild** (the
-2026-09-22 卡死, and the single worst bug of that investigation). `SruRegisterRealTimeStats`
-hands srumapi a raw pointer to a managed delegate's marshalling stub, so the registration is a
-native reference the GC knows nothing about: the moment the sampler (and with it `_callback`)
-becomes unreachable, the next GC frees the stub and srumapi keeps calling it — `0xC0000005`
-with `读 0x8`, `Rax/Rcx = 0` (a null function pointer inside stub code), NO managed frame and
-therefore NO app-log entry, ~1 s later (the next SRU frame), while WER froze the process for
-20–30 s dumping it. It looked exactly like a 悬浮模式 flip crash, because a flip rebuilds the
-overlay → `new SystemSampler()` → a NEW registration, and the old one was never released; the
-same applies to an explorer restart or any `Start()` re-entry. `TrimMemory`'s forced
-`GC.Collect() + WaitForPendingFinalizers()` on every popup close is what made the collection
-happen *immediately* after the flip, which is how the user's repro (rapid 切换 detail 窗口)
-reproduced it. Fix in place: `ProcessNetSampler.Shutdown()` (unregister + retain the retired
-instance so an in-flight callback's stub stays valid) called from `SystemSampler.Shutdown()`
-from `WM_DESTROY`, before the state turns to garbage. Found with the `CrashTrace` VEH (the
-message ring said `WM_APP_SET_FLOAT_KEEPOUT`, the step marker said `绘制阶段`, the stack scan
-showed `srumapi.dll`, and the record's 距上次内存回收 was 875 ms) — see §37.
+**A registration OUTLIVES its sampler — unregister on every SAMPLER rebuild, never on a mere
+overlay rebuild.** `SruRegisterRealTimeStats` gives srumapi a raw pointer to a managed
+callback stub. If the sampler becomes unreachable while the native registration remains, GC
+frees that stub and the next SRU frame calls freed memory (`0xC0000005`, often no managed
+frame). `ProcessNetSampler.Shutdown()` therefore unregisters AND roots the retired instance
+for any callback already in flight.
 
-**The same teardown also IDLES the two poll threads, and that half is easy to lose.** A
-retired `SystemSampler` owns `NetInfoSampler` + `ClashSampler`, each of which starts a
-`while (true)` thread in its ctor and has no stop flag — so `SystemSampler.Shutdown()` clears
-their inputs (`_netInfo.Adapter = null`, `_clash.SetEndpoint(null, null)`, the documented
-"off" state of both) instead of trying to join them. Without those two lines every rebuild
-left the retired pair polling at ~1 Hz for the rest of the session — gateway + 公网 ICMP/HTTP
-(which must stop when the user switched 公网 IP off, §30) and the Clash endpoint (§31), one
-extra pair per 悬浮模式 flip / explorer restart / §43 self-heal. No Join in the teardown path:
-a poll cycle can block on ICMP/HTTP and teardown runs on the taskbar STA thread (§43).
+The 2026-09-22 incident happened because every floating-mode/Explorer rebuild constructed a
+new `SystemSampler` without releasing the old one. The 2026-10-17 pre-loop failure added the
+same leak through `Start()` retries and once produced ~124 live registrations in four minutes;
+a force-kill then wedged the engine for the rest of the boot session. These were the old
+single-overlay ownership model, not permission to repeat that coupling.
 
-**A `Start()` that THROWS never reaches `WM_DESTROY`, so its sampler is released from App's
-rebuild-loop catch instead** (`TaskbarWindow.AbandonSamplerAfterFailedStart`). Without it a
-persistent pre-loop failure re-REGISTERS once per 2s retry: the 2026-10-17 incident left ~124
-live registrations from a 4-minute crash loop, and force-killing that instance then left the
-stale registrations inside the engine — **which stopped delivering frames to ANYONE for the
-rest of the boot session.** Symptom fingerprint (now logged, once per process, in
-`ProcessNetSampler.Sample`): `SRUM 实时 API 注册成功` followed by `SRUM 注册成功但 30 秒未收到任何帧` —
-a clean app restart does NOT recover it (verified 2026-10-17: fresh process, fresh
-registration, still zero frames), only a reboot clears the engine. Task Manager's per-process
-网络 column shares the engine, so it goes dark in the same incident — a quick way to tell
-"the OS side is wedged" from "our bug". The success side is logged too (`SRUM 首帧已到达`),
-so "engine OK" is provable from the log alone.
+**Current owner (multi-display):** `SamplingController` alone creates and retires the sampler;
+`TeardownOverlay` never unregisters SRUM. `srumapi.dll` has ONE process-level module reference,
+never a per-sampler `LoadLibrary`. Successful retirement unregisters once. A failed unregister
+KEEPS its original handle and retries at most 3 times; if still failing, the controller stops
+rebuilding rather than adding another native registration. `_keepRetired` protects the callback
+stub on that failure path; it is not a license to keep creating samplers.
+
+The same retirement STOPS `NetInfoSampler` and `ClashSampler` with stop + wake + bounded join;
+a stop timeout also BLOCKS reconstruction rather than stacking a fresh poller pair. `GpuSampler.Shutdown()`
+releases its three marshaling buffers and DXCore references.
+`ProcessNetSampler.Retired` holds an instance only while a callback is in flight (or an
+unregister failed); normal completion removes it again. Do not move shutdown back into an HWND
+path or let N displays create N registrations/poller pairs.
+
+The engine-wedge fingerprint remains useful: `SRUM 实时 API 注册成功` followed by
+`SRUM 注册成功但 30 秒未收到任何帧`. A clean app restart does not clear that engine state (only a
+reboot did in the incident); `SRUM 首帧已到达` is the positive proof in the log.
 
 ## 16. Wi-Fi `wlanapi` calls are on-demand, NOT per-tick
 
@@ -393,12 +387,11 @@ time (NetSampler does; CPU/GPU/disk already divide by real deltas — never assu
 `_clickDisabledMask`: unpinning a window must never re-enable a sampling-disabled slot's
 press.
 
-A toggle pushes the mask to the sampler AND posts `WM_APP_SET_METRICS`, which re-lays-out and
-resizes the overlay immediately (hidden slots free their space — `ResizeForLayout` does the
-width-only swap-chain dance; a 0-metric overlay collapses to a 0-width stub since DXGI
-cannot size to 0). App closes the column's open windows on disable. `Start()` re-applies the
-mask to every fresh `SystemSampler` (the explorer-restart recreate path would otherwise
-silently re-enable metrics).
+A toggle pushes the mask ONCE to SamplingController and broadcasts each overlay's local mask
+(the manager replays it to fresh entries). Every overlay re-lays-out/resizes over
+`WM_APP_SET_METRICS`; the controller coalesces immediate re-sampling. App closes the column's
+open windows on disable. Sampler configuration is replayed only when the controller itself
+reconstructs a failed sampler.
 
 A re-enabled metric **PRIMES its delta baselines for one tick** before publishing values — a
 stale baseline would average the whole disabled span into one bogus tick (`SystemSampler.Sample`).
@@ -678,11 +671,11 @@ never-activated `WS_EX_NOREDIRECTIONBITMAP` window (numbers at the code site).
 
 Six things this had to get right, each found by verification rather than reasoning:
 
-1. **The form is creation-time state.** Parent, ex-style and backdrop are fixed when the HWND is
-   created, so a flip does not morph the window: `WM_APP_SET_FLOATING` restores the classical
-   band, destroys the window and lets App's recreate loop build the other form — with
-   `ConsumeQuickRestart()` cutting the backoff from 2s to 150ms (the remaining ~2s of a flip is
-   `Start()`'s pre-existing taskbar-family probe, unchanged).
+1. **The form is creation-time state and floating stays a SINGLETON even with N taskbar
+   overlays.** Parent, ex-style and backdrop are fixed at HWND creation. The manager stops every
+   embedded entry before creating the floating one, and restores the selected embedded set on the
+   way back; it never broadcasts “become floating” to N windows. `ConsumeQuickRestart()` keeps
+   the intentional rebuild backoff short.
 2. **`WS_EX_TOPMOST` is decided at creation.** It rides in `WS_EX_COMPOSITE_EX`, and *demoting*
    on the first tick would show the widget above every window for up to a second — so
    `置顶显示` off clears the bit in the ex-style before `CreateWindowExW`. *Promoting* later is
@@ -754,9 +747,16 @@ Six things this had to get right, each found by verification rather than reasoni
    that must stay true: it is a DRAG-only report (a dodge is the one widget move that must not
    carry them — that move exists to separate the two), and a pinned window's saved pre-pin spot
    (`_prePin*`, restored on unpin) shifts by the same delta, or unpinning would land the flyout
-   back where the widget used to be. Because the widget's own clamp is unchanged, a formation
-   pushed against a screen edge deforms there (the follower sticks, the widget keeps going):
-   the keep-out then settles any overlap after the drop.
+   back where the widget used to be. With out-of-bounds OFF, a formation pushed against an
+   edge deforms there and keep-out settles after the drop; ON removes the widget's ordinary
+   clamp, while detail windows still keep their own work-area clamp.
+
+**Home validity and out-of-bounds (current):** `FloatingX/Y` are a nullable pair with an
+independent `_floatingHomeValid`; negative coordinates are VALID, including left/top monitors.
+Start selects the work area nearest the saved home instead of the primary taskbar. Creation,
+ordinary dragging and ordinary `FloatingReposition` clamp only when
+`FloatingAllowOutOfBounds == false`. Turning the option off clamps live position AND home and
+persists that normalization once; a slide/dodge still never writes home.
 
 **透明度 (设置 → 外观 → 悬浮模式 → 透明度)** is brush-alpha scaling in `ApplyTaskbarTheme`,
 NOT `WS_EX_LAYERED`/`SetLayeredWindowAttributes`: the widget is a DComp-bound flip-model
@@ -848,14 +848,17 @@ it away again. The bottom edge is deliberately not dockable — the taskbar live
 
 The shape to hold onto:
 
-1. **The dock is derived state, never stored.** One rule — "home within `EdgeSnapDip` of an
-   eligible work-area edge" (`FloatEdgeOf`, left/right before top) — evaluated at the three
-   sites that matter: the drag end, the settings/menu toggle, and `Start()` (so a docked home
-   reopens HIDDEN: the creation coords are the hidden position itself — born finished, no
-   flash). settings.yaml keeps only the switch + the home; the drag-end callback persists the
-   DROP position untouched, and the hidden rest is recomputed from the edge every tick
-   (`FloatHiddenPos`), which is why a resize or DPI change self-heals the strip within a tick.
-   A drop away from every edge releases the dock — visible is the default.
+1. **The dock is derived state, never stored.** `FloatEdgeOf` uses ABSOLUTE distance ≤8 DIP
+   (left/right before top), so a far negative out-of-bounds home is not accidentally docked.
+   It is evaluated at drag end, the settings/menu toggle and `Start()` (a docked home reopens
+   hidden). The drag-end callback persists the DROP position untouched; the dock itself is
+   derived, while the separate out-of-bounds setting only controls ordinary clamping. The
+   hidden rest is recomputed from the edge every tick (`FloatHiddenPos`), and a drop away from
+   every edge releases the dock. `FloatingHomeWorkArea` resolves the monitor from the HOME POINT
+   for drop/toggle, hidden rest, peek and dodge — NEVER the live rect. At a shared monitor edge,
+   hiding leaves most of that rect on the neighbour; `MonitorFromWindow` would therefore re-dock
+   to the neighbour's FAR edge on the next tick (2026-10-29: primary right 2560, hidden x 2548 →
+   secondary right 5110). Ordinary dragging and undocked positioning still use the HWND.
 2. **The slide is a first-class owner of the position.** `FloatingReposition` early-returns
    while a slide is in flight AND while a button is held — the press half matters because a
    press on the hidden strip lives OUTSIDE the work area until the drag threshold passes, and
@@ -863,7 +866,13 @@ The shape to hold onto:
    A slide is the widget's OWN move, like the dodge: it never reports `FloatingDragged` (the
    detail windows must not follow a hide/peek) and never writes the home. The animation is a
    10 ms `WM_TIMER` step (`StepFloatSlide`, ease-out: a third of the remaining distance, 2px
-   floor — ~100–150 ms typical), killed on completion/press/destruction.
+   floor — ~100–150 ms typical), killed on completion/press/destruction. At a monitor seam the
+   home work area is also a CLIP: `FloatingVisibleClip` intersects the live rect with it in
+   window-relative coordinates, and `WindowBackdropInterop.SetRoundedRegion` ANDs that rectangle
+   with the rounded region at creation, every slide step and every reposition. Otherwise the
+   hidden body remains plainly VISIBLE on the neighbour even when its coordinates stay stable.
+   A press removes the clip for dragging; `CursorOnFloat` tests only the visible intersection so
+   the clipped-out neighbour rect cannot disarm the peek.
 3. **The hidden rest suppresses the dodge** (`ComputeFloatTarget` is not even consulted): an
    off-screen widget has nothing to keep clear of, and a pinned window parked on the strip
    must not walk it along the edge. A PEEK derives the normal target (dodge included — a
@@ -875,14 +884,15 @@ The shape to hold onto:
    can land exactly on the exposed strip — the first stray mouse move there would pop the
    widget straight back out. So the end of a hide slide arms the peek only when the cursor is
    NOT on the widget (`FloatPeekArmed`); a cursor that docked onto the strip stays disarmed
-   until one `WM_MOUSELEAVE`. (Trace it: a cursor on the strip never leaves the rect while the
-   widget slides out, so the leave that re-arms is always a genuine exit.)
+   until one `WM_MOUSELEAVE`. A region change can ALSO synthesize that message under a stationary
+   cursor (the 2026-10-29 40–90 ms peek cancellations), so re-hide now requires `CursorOnFloat` —
+   the VISIBLE clip — to be false; re-arming on either kind of leave remains safe.
 5. **A press during a slide is not a click.** The press snaps the slide to its target first
    (`FinishFloatSlide` — the grab offset needs a stable position) and flags `FloatSwallowClick`:
    the widget was still moving under the cursor, so the slot the release lands on is not the
-   one the user aimed at. Dragging out of the hidden strip works — the drag clamp pulls the
-   widget into the work area following the grab point, and the drop re-evaluates the dock
-   (pull it past `EdgeSnapDip` inside to release).
+   one the user aimed at. Dragging out of the hidden strip works — with out-of-bounds OFF the
+   drag clamp follows the grab point into the work area (ON leaves the drop position alone),
+   and the drop re-evaluates the dock (pull past `EdgeSnapDip` inside to release).
 6. **Side taskbars (Win10-only, deprioritized)**: the edges are the WORK area's, so docking at
    an edge that the taskbar occupies slides the widget under it; with 置顶显示 on the strip
    then draws over the taskbar. Accepted — Win11 (the supported platform) has no side taskbars.
@@ -926,9 +936,8 @@ The rules that keep it from tangling with everything else that owns the widget:
 2. **A hidden widget is an INVISIBLE running one, not a parked one.** Timers fire on hidden
    windows, so the tick, the watchdog heartbeat (`LastTickTickCount`) and the sampling all
    continue — App's zombie check keys on `IsWindow`, never visibility — and the charts come
-   back with continuous history. `FloatingReposition` keeps maintaining the position (home
-   clamp, docked hidden rest) while hidden, which is what self-heals a resolution the game
-   changed by the time it exits. Do NOT pause the timer or skip the heartbeat stamp while
+   back with continuous history. `FloatingReposition` keeps maintaining the position (home,
+   clamped only when out-of-bounds is OFF, plus docked hidden rest) while hidden. Do NOT pause the timer or skip the heartbeat stamp while
    hidden: that would trip the "覆盖层心跳停滞" watchdog within ~4 s.
 3. **The dodge is suppressed while hidden** — `FloatingReposition`'s `hiddenRest` is
    `dockedRest || FloatFullscreenHidden`, the same rule as the docked rest: an invisible
@@ -1093,16 +1102,15 @@ WER 拉起），任务栏线程随之**永久**卡住：心跳停、覆盖层 HW
 
 最终四层处置：
 
-1. **源头——裸 `WM_NCDESTROY` 也走完整拆除**。`TeardownOverlay`（恢复按钮带 / SRUM
-   注销 / 杀定时器 / 释放设备管线，全部有界）从 WM_DESTROY 提取出来，两条消息都调用
-   并 `PostQuitMessage`（once-guard 幂等）。实测效果：explorer 一死，`Start()` 立即
-   返回、2s 后重建、~5s 内重新嵌入，进程不重启。
+1. **源头——裸 `WM_NCDESTROY` 也走完整拆除**。`TeardownOverlay`（恢复按钮带 / 杀定时器 /
+   释放设备管线，全部有界）从 WM_DESTROY 提取出来，两条消息都调用并 `PostQuitMessage`
+   （once-guard 幂等）。共享 SRUM 由 SamplingController 退休，绝不在这条 HWND 路径注销。
 2. **消息循环不做会同步进别人窗口的调用（硬化，保留）**。按钮带移动、对外部窗口的
-   `GetWindowRect`/`GetClientRect` 等一律经静态 worker 线程（IsBackground）执行，调用
-   方用 `WaitForSingleObject` 有界等待（**不用 CLR 的 STA 泵等待**——那正是消息环里
-   嵌套 WM_TIMER 的重入通道）。**例外：`SetParent` 必须留在消息循环上**——它调用中途
-   要给我们自己的窗口递消息，调用方必须能泵（放 worker 上必死锁，19:31 实机验证）。
-   已知残留洞：悬浮模式的 `SHQueryUserNotificationState`（到 explorer 的 RPC）未守护。
+   `GetWindowRect`/`GetClientRect` 等经每个 CALLING THREAD 独立的 `NativeCallChannel`
+   （后台 worker、队列上限 16）执行，调用方用 `WaitForSingleObject` 有界等待（不用 CLR
+   的 STA 泵等待）。一块屏幕的请求阻塞不能堵住其他屏幕。**例外：`SetParent` 必须留在
+   消息循环上**（worker 会死锁）。已知残留洞：悬浮模式的
+   `SHQueryUserNotificationState`（到 explorer 的 RPC）未守护。
 3. **看门狗 5s 轻唤醒**。窗口消失超 5s：`PostThreadMessage(WM_QUIT)` 到任务栏线程——
    空队列的 `GetMessage` 立即返回 0，`Start()` 返回即重建（~7s）；线程若真卡在调用
    里，quit 在队列里等它返回，无副作用。
@@ -1113,8 +1121,9 @@ WER 拉起），任务栏线程随之**永久**卡住：心跳停、覆盖层 HW
    UAC，也不依赖可能正在重启的 explorer 的 shell 启动）→ `Environment.Exit(0)`（不等
    挂起的前台线程）。每次进程生命只触发一次。
 
-另：重建间隙（拆除→2s 退避→探测→首个 tick）是**合法的** tick 空窗，探测循环和
-App 重建循环里现在都打心跳点，看门狗不再误报（19:40:30 的假停滞）。
+另：重建间隙是**合法的** tick 空窗，探测和 manager 重建循环都打心跳点。看门狗分别观察
+采样线程与每个预期存在的覆盖层，取消/等待副任务栏不算 zombie；`CrashTrace` 的步骤、
+消息环和栈也按 native thread id 读取，不能把甲屏的卡死记到乙屏。
 
 ## 44. 竖直（侧边停靠）任务栏与任务栏族无关；窄条必须走双行条带
 
@@ -1238,4 +1247,84 @@ Shell_TrayWnd）err=87`，覆盖层落在屏幕 **(569,0)** —— 顶层窗口�
   (Classical ? BarHwnd : TaskbarHwnd)` → 自毁重建。一次 `GetAncestor` 的代价，覆盖
   「任务栏活着但我们已不是它的孩子」的一切冷门路径（含经典族 ReBar 被换掉——
   重建会重新探测整条链，比拿着死 hBar 硬撑正确）。
+
+## 46. 多显示器 = 一套采样 + N 个独立覆盖层，绝不能复制采样器
+
+*`src/Sampling/SamplingController.cs`、`src/UI/TaskbarOverlayManager.cs`、
+`src/UI/TaskbarDisplayCatalog.cs`、`src/UI/TaskbarWindow.cs`、`src/App.xaml.cs`*
+
+多选显示器不是给现有 `Start()` 外面套一个 `foreach new TaskbarWindow()`：那会把 SRUM、
+PDH、DXCore、进程枚举和两个后台 poller 全复制一遍。正确边界是 **SamplingController
+独占一套 SystemSampler；每个选中显示器只有自己的 STA + HWND + RenderState + 渲染管线**。
+controller 一次发布，管理器逐 HWND 投递 `WM_APP_SNAPSHOT`，App 的详情/关于只刷新一轮。
+
+不可破坏的约束：
+
+- **身份不是序号。** 设置保存显示器设备接口 ID + 名称；`Shell_TrayWnd` 与
+  `Shell_SecondaryTrayWnd` 通过 `MonitorFromWindow` 关联。HWND/HMONITOR、枚举序号和矩形
+  只用于当次运行，不能写进 YAML。已断开的已选 ID 保留，重连恢复。名称只用于展示：按接口
+  ID 定位注册表 EDID 并读取型号描述（离线项同样），缺失才回退 `DeviceString`；同名时附加
+  GDI 显示器序号，绝不把显示名当身份。
+- **目标不能被偷换。** `Start(target)` 每轮按 ID 重新解析任务栏；某块已选副屏失效只能等，
+  不能嵌到主屏。只有“当前没有任何有效已选目标”才临时回退主屏，且不改写用户选择。
+  设置 UI 禁止取消最后一项，避免没有主窗口的程序失去设置入口。
+- **拓扑不是计数。** 显示器事件只是去抖提示，还要有低频目录重扫，覆盖副任务栏延迟创建、
+  Windows 的“在所有显示器上显示任务栏”开关、主屏切换和 Explorer 重建。比较 ID、任务栏
+  HWND 和 HMONITOR 归属，不能只比较副任务栏数量。
+- **生命周期按实例。** desired/generation 失效后不得复活；等待任务栏可取消，建窗前及
+  消息循环前都检查，退出走统一 DestroyWindow/teardown；每个经典 ReBar 独立恢复。退出先
+  stop/join 全部覆盖层并移除各自 worker/CrashTrace slot，最后停止 controller 和 pollers。
+- **DirectWrite 也必须按窗口隔离。** 每个 HWND 使用 `DWRITE_FACTORY_TYPE_ISOLATED`，
+  factory 存在 `RenderState` 中直到最终销毁（设备丢失恢复保留）；不得共享给多个 STA。
+  `Start()` 任意异常都必须 `AbortStart`：销毁半初始化 HWND、排干消息并释放文本/设备资源，
+  不能留下持续重绘的空 context。
+- **详情分数据与锚点。** controller 提供快照/Wi-Fi，实际被点击的 overlay 负责定位、
+  select/deselect。pin 仍是每列全局一个，点击禁用广播并随全局 mask 应用到 NEW entries；
+  移除锚点关闭 transient，pinned 脱离死锚点但继续收数据。
+- **坐标是虚拟桌面的，不是主屏原点的。** `CalcPosition` 的 screen-X 下界必须是目标
+  `taskbarRect.left`，不能写死 0；左侧/上方显示器及悬浮 home 的负坐标都合法。悬浮模式
+  始终单实例，越界与 home-valid 规则见 §36/§38。
+
+## 47. 每次 overlay resize 都必须同时落到 back buffer、真实 HWND 和悬浮窗 region
+
+*`src/UI/TaskbarWindow.cs`（`RepositionOverlay`、`FloatingReposition`、`HandleDpiChange`、
+`RenderState.LastPlaceW/H`）*
+
+副屏启动时任务栏可能先报告一个临时高度，随后才恢复。旧的重定位节流只比较 X/Y：
+back buffer 已按新高度重建，但锚点没变，于是 `MoveWindow` 被跳过，真实 HWND 保留启动时
+的半高，文字被裁掉。设置里切换显示会强制重定位，所以表面上又能“恢复正常”。
+
+规则：`RepositionOverlay` 只有在 **位置与宽高全部不变** 时才能跳过 `MoveWindow`。记录
+`LastPlaceW/H`，任务栏带高或布局尺寸变化时必须实际移动/缩放 HWND，不能只重建交换链。
+
+悬浮窗在 2026-10-25 的跨 DPI 拖动中暴露了同族的两个错误：高度仍取主屏任务栏（从
+150% 到 300% 时宽度 441→882，高度却保持 72 而非 144）；`FloatingReposition` 又始终带
+`SWP_NOSIZE`，于是交换链已是 882px，真实 HWND 仍是 441px，右侧 GPU/网络被裁在窗口外。
+修复不是给某个截图补一个宽度，而是统一以下约束：
+
+- **WPF 与原生 STA 都按 PerMonitorV2 运行。** 清单声明 `dpiAwareness`，`App` 静态构造函数
+  在首个窗口前设置 `Switch.System.Windows.DoNotScaleForDpiChanges=false`（单 exe 发布没有
+  外部 .config），让设置窗口和每个 DetailWindow 各自跟随所在显示器，主屏设置窗口不再决定
+  副屏 detail 的 DPI。`TaskbarWindow.Start`
+  仍在整个消息循环期间显式调用 `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，
+  返回时恢复原上下文，保证 home DPI 查询和 `GetMonitorInfo` 都使用目标显示器的物理值。
+- **DetailWindow 首次跨屏要定位两次。** HWND 在屏外按旧 DPI 创建，第一次 `SetWindowPos`
+  到目标屏会同步触发 `WM_DPICHANGED` 并改变物理尺寸；`ShowColumn` 必须 `UpdateLayout` 后
+  再跑 `PositionNearTaskbar`，用最终尺寸重算列中心和任务栏间距，不能只定位一次。
+- 悬浮窗没有任务栏 band。初始 DPI 按保存 home 所在显示器选择
+  （`DisplayInterop.TryGetDpiAtPoint`），初始逻辑高度只换算一次并保存为
+  `FloatingHeightDip`；之后 `ComputeFloatingTargetSize` 按当前 DPI 和采样布局独立计算，
+  不再读取主屏 band。全部采样项关闭再开启时也不能把这个自然高度丢成 0。
+- **交界贴边期间 DPI 也属于 home。** Windows 按 LIVE HWND 面积最大的显示器发送
+  `WM_DPICHANGED`，所以主屏向右收起会被切成副屏 DPI。`FloatingEffectiveDpi` 在
+  `WM_DPICHANGED(_AFTERPARENT)` 和 tick 校正两处统一决策：已停靠且未实际拖动时读取 home
+  point 的 DPI，真实拖动/未停靠才跟随 live 显示器；`HandleDpiChange` 对相同 DPI 直接返回。
+  这样 hide/peek 不会在 144↔120 之间反复改变细条宽高、文字和交换链。
+- DPI/布局变化必须同时更新交换链与真实 HWND。`FloatingReposition` 用
+  `LastPlaceW/H` 独立判断尺寸变化；位置不变、正在拖动或贴边滑动都只能暂缓位置重算，
+  不能把 resize 一起跳过。`ApplyFloatingBounds` 应用尺寸并读取真实 rect 记录日志。
+- 同一路径立即更新圆角 region，不能等下一 tick 留下旧尺寸的裁剪帧。尺寸为 0 的
+  全关闭 stub 清 region，恢复采样后再按新尺寸创建。
+- 悬浮几何诊断按悬浮窗自己的 HMONITOR 报告；允许越界或贴边隐藏是用户选择，不能再
+  拿主屏边界误报“部分内容不可见”。
 

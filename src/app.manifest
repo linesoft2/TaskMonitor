@@ -25,13 +25,12 @@
     </application>
   </compatibility>
 
-  <!-- Declare system-DPI-aware explicitly: once a manifest is supplied it fully
-       replaces WPF's default, and a manifest with no DPI entry would bitmap-stretch
-       the taskbar overlay's sharp D2D text. `true` (system DPI aware) matches WPF
-       net48's no-manifest default, so the overlay's own GetDpiForWindow/D3D scaling
-       keeps working unchanged. -->
+  <!-- WPF and the native overlays are both PerMonitorV2: each settings/detail window
+       follows its own monitor instead of inheriting the primary display's system DPI.
+       PerMonitor and dpiAware=true remain fallbacks for older Windows versions. -->
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
     </windowsSettings>
   </application>

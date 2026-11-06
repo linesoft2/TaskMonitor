@@ -225,9 +225,9 @@ namespace task_monitor
 
         // Reusable marshaling buffers (single-threaded sampler). In/out for the scalar
         // queries, plus a name buffer the engine-name property writes into by pointer.
-        private readonly IntPtr _inBuf = Marshal.AllocHGlobal(64);
-        private readonly IntPtr _outBuf = Marshal.AllocHGlobal(64);
-        private readonly IntPtr _nameBuf = Marshal.AllocHGlobal((MaxEngineNameChars + 2) * 2);
+        private IntPtr _inBuf = Marshal.AllocHGlobal(64);
+        private IntPtr _outBuf = Marshal.AllocHGlobal(64);
+        private IntPtr _nameBuf = Marshal.AllocHGlobal((MaxEngineNameChars + 2) * 2);
 
         // 设置 → 采样项目 → GPU → 温度单位 — written by the WPF UI thread (via
         // SystemSampler.SetGpuTempConfig), read on the taskbar thread each tick to format
@@ -238,6 +238,29 @@ namespace task_monitor
         /// default). Applied to <see cref="GpuInfo.TemperatureText"/> on the next tick;
         /// numeric fields stay Celsius.</summary>
         public void SetTempUnit(bool fahrenheit) => _tempFahrenheit = fahrenheit;
+
+        public void Shutdown()
+        {
+            try
+            {
+                foreach (var entry in _adapters.Values)
+                {
+                    if (entry.Adapter != null) Marshal.ReleaseComObject(entry.Adapter);
+                }
+                _adapters.Clear();
+                if (_factory != null)
+                {
+                    Marshal.ReleaseComObject(_factory);
+                    _factory = null;
+                }
+            }
+            finally
+            {
+                if (_inBuf != IntPtr.Zero) { Marshal.FreeHGlobal(_inBuf); _inBuf = IntPtr.Zero; }
+                if (_outBuf != IntPtr.Zero) { Marshal.FreeHGlobal(_outBuf); _outBuf = IntPtr.Zero; }
+                if (_nameBuf != IntPtr.Zero) { Marshal.FreeHGlobal(_nameBuf); _nameBuf = IntPtr.Zero; }
+            }
+        }
 
         private IDXCoreAdapterFactory _factory;
         private long _qpcFreq;

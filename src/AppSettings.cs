@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -23,6 +24,12 @@ namespace task_monitor
     /// temperatures (taskbar row + detail popup) — the snapshot itself always carries Celsius;
     /// the conversion is display-side only. null = Celsius.</summary>
     public enum GpuTempUnit { Celsius, Fahrenheit }
+
+    public sealed class TaskbarDisplaySelection
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+    }
 
     /// <summary>
     /// Persistent settings store — <c>settings.yaml</c> in the exe's own directory (the
@@ -60,6 +67,10 @@ namespace task_monitor
         /// </summary>
         public bool? OverlaySnapToStart { get; set; }
 
+        /// <summary>任务栏窗口同时显示的显示器。null = 跟随当前主显示器（旧配置默认）；
+        /// 非空时保存完整选择，已断开项保留到重连；运行时无有效目标才临时回退主屏。</summary>
+        public List<TaskbarDisplaySelection> TaskbarDisplays { get; set; }
+
         /// <summary>
         /// 紧凑模式 (设置 → 外观): tighten the item pitch of the taskbar overlay and the
         /// floating widget alike — narrower horizontal cells (65/78 vs 70/84 DIP, plus a
@@ -90,6 +101,10 @@ namespace task_monitor
         /// <see cref="TaskbarWindow.SetFloatingTopmost"/>.
         /// </summary>
         public bool? FloatingTopmost { get; set; }
+
+        /// <summary>允许悬浮窗超出屏幕边界（设置 → 外观 → 悬浮模式）。null = off；
+        /// 开启后拖动和常规重定位不再拉回工作区，关闭时立即恢复约束。</summary>
+        public bool? FloatingAllowOutOfBounds { get; set; }
 
         /// <summary>
         /// 透明度 (设置 → 外观 → 悬浮模式), floating form only: the BACKGROUND's opacity,
@@ -128,13 +143,10 @@ namespace task_monitor
         public bool? FloatingFullscreenHide { get; set; }
 
         /// <summary>
-        /// The floating widget's home, as SCREEN coordinates in physical pixels (the overlay
-        /// works in physical px throughout — see TaskbarWindow's DPI handling). null = never
-        /// dragged → the widget opens where the taskbar overlay would have been anchored,
-        /// 8px off the taskbar. Written by App at the end of a drag
-        /// (<see cref="TaskbarWindow.FloatingPositionChanged"/>) and clamped into the
-        /// monitor's work area on every restore, so a monitor change can't strand it
-        /// off-screen.
+        /// The floating widget's home, as SCREEN coordinates in physical pixels. null = never
+        /// dragged; negative coordinates are valid for left/top monitors and out-of-bounds homes.
+        /// Written by App after a drag or when disabling out-of-bounds. Restores clamp only
+        /// when <see cref="FloatingAllowOutOfBounds"/> is off.
         /// </summary>
         public int? FloatingX { get; set; }
         public int? FloatingY { get; set; }

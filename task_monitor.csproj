@@ -24,7 +24,7 @@
     <Platforms>AnyCPU</Platforms>
     <!-- Elevation is self-managed (first-run consent dialog + runas self-relaunch in
          App.RunElevationGate), so the manifest declares asInvoker — see src\app.manifest.
-         dpiAware=true is declared in the manifest itself (it replaces WPF's default). -->
+         PerMonitorV2 is declared there; App's static ctor opts WPF into per-window DPI scaling. -->
     <ApplicationManifest>src\app.manifest</ApplicationManifest>
     <!-- exe icon: assets\logo.ico (multi-size frames rendered from assets\logo.svg). -->
     <ApplicationIcon>assets\logo.ico</ApplicationIcon>

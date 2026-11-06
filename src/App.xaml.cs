@@ -27,8 +27,8 @@ namespace task_monitor
     /// </summary>
     public partial class App : Application
     {
-        private TaskbarWindow _taskbar;
-        private Thread _taskbarThread;
+        private readonly SamplingController _sampling = new SamplingController();
+        private TaskbarOverlayManager _taskbars;
         // The transient (unpinned) flyout — at most one; torn down on every toggle.
         private DetailWindow _detail;
         // Pinned windows — one per column at most; survive focus loss and coexist with
@@ -50,12 +50,15 @@ namespace task_monitor
 
         // Global crash hooks that don't need Application.Current — installed in the
         // static ctor so they exist before Main() runs (even an App.xaml BAML failure
-        // inside InitializeComponent is caught). The file log is initialized FIRST so
-        // even those earliest crashes have somewhere to be written; the Dispatcher hook
-        // needs Application.Current, so it is added at the top of OnStartup. Every
+        // inside InitializeComponent is caught). The file log is initialized before the
+        // hooks so even those earliest crashes have somewhere to be written; the Dispatcher
+        // hook needs Application.Current, so it is added at the top of OnStartup. Every
         // unhandled managed exception funnels into CrashReporter → log file + crash dialog.
         static App()
         {
+            // Releases ship only the exe, not its .config. Opt in before WPF creates any
+            // window so each one scales to its own monitor under the PerMonitorV2 manifest.
+            AppContext.SetSwitch("Switch.System.Windows.DoNotScaleForDpiChanges", false);
             Logger.Init();
             CrashReporter.Install();
         }
@@ -122,7 +125,7 @@ namespace task_monitor
                 foreach (var w in _pinned) w.ApplyTheme();
                 // 悬浮模式的自绘卡片用的是 detail 弹窗那套色调常量，所以它的卡片颜色和文字颜色
                 // 跟 APP 主题走（DetailWindow.ApplyTheme 同源），不是任务栏的系统主题。
-                _taskbar?.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
+                _taskbars?.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
             };
 
             StartTaskbar();
@@ -150,7 +153,7 @@ namespace task_monitor
                 // dialog on a graceful exit). Skip when stopping; Prewarm itself also
                 // never throws (it is a pure optimization).
                 if (_stopping) return;
-                new DetailWindow(_taskbar).Prewarm();
+                new DetailWindow(_sampling).Prewarm();
                 // Collect the throwaway shell and view trees, but keep the warmed JIT/BAML/style/
                 // render pages resident — see ScheduleIdleTrim / SystemInfo.TrimMemory.
                 SystemInfo.TrimMemory();
@@ -171,17 +174,8 @@ namespace task_monitor
                 _configSaveDebounce.Stop();
                 TrySaveConfig();
             }
-            // Classical (Win10) taskbar path: the overlay's WM_DESTROY restores the
-            // shrunk task-buttons band. Ask for that destroy and give the taskbar thread
-            // a bounded moment to run it — it's a background thread, so without the join
-            // process death can skip the restore entirely (the band stays narrow until
-            // explorer's next layout pass).
-            IntPtr overlay = _taskbar?.OverlayHwnd ?? IntPtr.Zero;
-            if (overlay != IntPtr.Zero)
-            {
-                WindowInterop.PostMessageW(overlay, WindowInterop.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-                _taskbarThread?.Join(1000);
-            }
+            _taskbars?.StopAll();
+            _sampling.Stop();
             // We never took ownership of the mutex (initiallyOwned=false), so there's
             // nothing to release — just drop the handle. Done explicitly so the lifetime
             // is unambiguous; process death would close it regardless.
@@ -268,113 +262,50 @@ namespace task_monitor
 
         private void StartTaskbar()
         {
-            _taskbar = new TaskbarWindow();
-            // Clicks arrive on the taskbar STA thread; hop to the UI thread to
-            // drive the WPF detail window. -1 = hide, 0–4 = show that hit slot
-            // (CPU/内存/磁盘/GPU/网络).
-            _taskbar.ToggleCallback = column =>
-                Dispatcher.BeginInvoke(new Action<int>(ToggleDetail), column);
-            _taskbar.RightClickRequested = () =>
+            _taskbars = new TaskbarOverlayManager(_sampling);
+            _taskbars.ToggleCallback = (source, column) =>
+                Dispatcher.BeginInvoke(new Action(() => ToggleDetail(source, column)));
+            _taskbars.RightClickRequested = () =>
                 Dispatcher.BeginInvoke(new Action(ShowTaskbarMenu));
-            // Push: each time the taskbar publishes a fresh snapshot, refresh every open
-            // detail window in lockstep (so they always show the same numbers).
-            _taskbar.SnapshotChanged = () =>
+            _taskbars.AnchorRemoved = OnAnchorRemoved;
+            _taskbars.CatalogChanged = OnTaskbarCatalogChanged;
+            _sampling.SnapshotChanged = snapshot =>
+            {
+                _taskbars.PublishSnapshot(snapshot);
                 Dispatcher.BeginInvoke(new Action(RefreshDetails));
-            // Initial overlay placement + sampling cadence from settings.yaml (the
-            // settings page reports later changes via OnOverlayPlacementChanged /
-            // OnSampleIntervalChanged).
-            _taskbar.SetPlacement(_config.OverlayOnLeft != false, _config.OverlaySnapToStart == true);
-            _taskbar.SetCompactLayout(_config.CompactLayout == true);   // null = off (the default)
-            _taskbar.SetSampleInterval(_config.SampleIntervalMs ?? 1000);
-            _taskbar.SetMetricSamplingMask(SamplingMaskOf(_config));
-            _taskbar.SetMergeSamePathProcesses(_config.MergeSamePathProcesses != false); // null = on (the default)
-            _taskbar.SetDiskDisplay(DiskDisplayModeIndexOf(_config), _config.DiskDisplayIndex ?? 0);
-            _taskbar.SetGpuDisplay(GpuDisplayModeIndexOf(_config), _config.GpuDisplayIndex ?? 0);
-            _taskbar.SetGpuTempDisplay(_config.GpuTaskbarContent ?? GpuTaskbarContent.Usage,
-                _config.GpuTempIndex ?? -1,                       // null = 最高温度
-                _config.GpuTempUnit == GpuTempUnit.Fahrenheit);   // null = 摄氏度
-            _taskbar.SetNetAdapter(_config.NetAdapterId);   // null = 自动 (the default)
-            _taskbar.SetClashApi(_config.ClashEnabled != false, _config.ClashApiAddress, _config.ClashApiSecret); // null = on; null address = the 127.0.0.1:9090 default
-            _taskbar.SetPublicIpLookup(_config.PublicIpEnabled != false); // null = on (the default)
-            // 悬浮模式 (设置 → 外观): the form Start() builds. -1 = no saved home yet → the
-            // widget opens where the taskbar overlay would have been anchored.
-            _taskbar.SetFloatingMode(_config.FloatingMode == true, _config.FloatingX ?? -1, _config.FloatingY ?? -1);
-            _taskbar.SetFloatingTopmost(_config.FloatingTopmost != false);   // null = 置顶 (the default)
-            _taskbar.SetFloatingOpacity(_config.FloatingOpacity ?? 1.0);     // null = 不透明 (the default)
-            _taskbar.SetFloatingEdgeHide(_config.FloatingEdgeHide == true);  // null = off (the default)
-            _taskbar.SetFloatingFullscreenHide(_config.FloatingFullscreenHide != false);  // null = on (the default)
-            // The floating widget's card follows the APP theme (it is painted in the detail
-            // popup's tint), not the taskbar's system theme — resolved here and kept live by the
-            // ActualApplicationThemeChanged hook in OnStartup.
-            _taskbar.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
-            // A drag ends on the taskbar thread; the position is settings, so it comes back
-            // here to be persisted (and only here — pushing it back would fight the drag).
-            _taskbar.FloatingPositionChanged = (x, y) => Dispatcher.BeginInvoke(new Action(() =>
+            };
+
+            _taskbars.SetPlacement(_config.OverlayOnLeft != false, _config.OverlaySnapToStart == true);
+            _taskbars.SetCompactLayout(_config.CompactLayout == true);
+            _taskbars.SetSampleInterval(_config.SampleIntervalMs ?? 1000);
+            _taskbars.SetMetricSamplingMask(SamplingMaskOf(_config));
+            _sampling.SetMergeByPath(_config.MergeSamePathProcesses != false);
+            _sampling.SetDiskDisplay(DiskDisplayModeIndexOf(_config), _config.DiskDisplayIndex ?? 0);
+            _sampling.SetGpuDisplay(GpuDisplayModeIndexOf(_config), _config.GpuDisplayIndex ?? 0);
+            _taskbars.SetGpuTempDisplay(_config.GpuTaskbarContent ?? GpuTaskbarContent.Usage,
+                _config.GpuTempIndex ?? -1, _config.GpuTempUnit == GpuTempUnit.Fahrenheit);
+            _sampling.SetNetAdapter(_config.NetAdapterId);
+            _sampling.SetClashApi(_config.ClashEnabled != false, _config.ClashApiAddress, _config.ClashApiSecret);
+            _sampling.SetPublicIpLookup(_config.PublicIpEnabled != false);
+
+            _taskbars.SetFloatingMode(_config.FloatingMode == true, _config.FloatingX, _config.FloatingY);
+            _taskbars.SetFloatingTopmost(_config.FloatingTopmost != false);
+            _taskbars.SetFloatingAllowOutOfBounds(_config.FloatingAllowOutOfBounds == true);
+            _taskbars.SetFloatingOpacity(_config.FloatingOpacity ?? 1.0);
+            _taskbars.SetFloatingEdgeHide(_config.FloatingEdgeHide == true);
+            _taskbars.SetFloatingFullscreenHide(_config.FloatingFullscreenHide != false);
+            _taskbars.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
+            _taskbars.FloatingPositionChanged = (x, y) => Dispatcher.BeginInvoke(new Action(() =>
             {
                 _config.FloatingX = x;
                 _config.FloatingY = y;
                 TrySaveConfig();
             }));
-            // …and while the drag is in progress every open detail window travels with the
-            // widget (same delta), so the pair never comes apart mid-drag. Live, on the UI
-            // thread: the windows have to move with the mouse, not after it.
-            _taskbar.FloatingDragged = (dx, dy) =>
+            _taskbars.FloatingDragged = (dx, dy) =>
                 Dispatcher.BeginInvoke(new Action<int, int>(FollowFloatingDrag), dx, dy);
 
-            var thread = new Thread(() =>
-            {
-                // Keep an overlay alive for the whole process lifetime. Start() blocks
-                // in its message loop; it only returns when the overlay window is gone —
-                // an explorer.exe restart destroys the Shell_TrayWnd parent and our
-                // child window with it — or when init throws (e.g. the D3D device at
-                // very early boot). Re-enter instead of leaving a running process with
-                // no widget; the _stopping guard keeps shutdown from spawning a fresh
-                // overlay, and the sleep keeps a persistent failure from hot-looping.
-                while (!_stopping)
-                {
-                    try
-                    {
-                        _taskbar.Start();
-                        if (!_stopping)
-                        {
-                            // A 悬浮模式 flip tears the window down on purpose: come straight
-                            // back so the widget reappears in its new form in ~150ms instead of
-                            // blinking out for the whole explorer-restart backoff.
-                            int delay = _taskbar.ConsumeQuickRestart() ? 150 : 2000;
-                            Logger.Warn($"任务栏覆盖层 Start() 已返回（窗口销毁——explorer 重启或初始化失败），{delay}ms 后重建");
-                            // Keep the watchdog's heartbeat fed through the rebuild gap —
-                            // this thread is alive and working, just between ticks (§43).
-                            _taskbar.LastTickTickCount = (long)SystemInfo.GetTickCount64();
-                            Thread.Sleep(delay);
-                            _taskbar.LastTickTickCount = (long)SystemInfo.GetTickCount64();
-                            // Already backed off above. Falling through to the 2s below took
-                            // it TWICE, so a 悬浮模式 flip waited ~2.15s (150+2000) instead of
-                            // the documented ~150ms — exactly the blink this branch exists to
-                            // avoid — and an explorer restart waited ~4s.
-                            continue;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        // The taskbar overlay is non-critical; never let it take the app down.
-                        Logger.Error("任务栏覆盖层 Start() 抛异常，2s 后重建", ex);
-                        // Start() died before its message loop, so the WM_DESTROY teardown
-                        // (which owns the sampler's release) never ran. Release the failed
-                        // round's sampler here, or a persistent failure re-REGISTERS the SRUM
-                        // real-time subscription once per retry and floods srumapi (the
-                        // 2026-10-17 incident: 124 leaked registrations from a 4-minute
-                        // crash loop; after the instance was force-killed the engine stopped
-                        // delivering frames and the per-process network list sat empty).
-                        _taskbar.AbandonSamplerAfterFailedStart();
-                    }
-                    // FAILURE backoff only — the ordinary return already slept its own delay.
-                    if (!_stopping) Thread.Sleep(2000);
-                }
-            })
-            { IsBackground = true, Name = "TaskbarWindow" };
-            thread.SetApartmentState(ApartmentState.STA);
-            _taskbarThread = thread;   // OnExit joins it after closing the overlay (band restore)
-            thread.Start();
+            _sampling.Start();
+            _taskbars.Start(_config.FloatingMode == true, _config.TaskbarDisplays);
         }
 
         private void RefreshDetails()
@@ -385,32 +316,24 @@ namespace task_monitor
         }
 
         /// <summary>UI-thread handler for a taskbar column toggle.</summary>
-        private void ToggleDetail(int column)
+        private void ToggleDetail(TaskbarWindow source, int column)
         {
-            // A brand-new window is created on every open; the previous (transient) one
-            // is torn down. Reusing a hidden-then-reshown window let its acrylic
-            // transition inactive→active and flash, whereas a freshly created window
-            // shown + activated in one go is born active (no flash). Pinned windows are
-            // untouched — they explicitly opted out of the flyout lifecycle.
+            if (source == null || !_taskbars.Contains(source)) return;
             CloseDetail();
             if (column < 0) return;
 
             var existing = _pinned.Find(w => w.Column == column);
             if (existing != null)
             {
+                source.RequestDeselect(column);
                 existing.Activate();
-                // Best-effort foreground steal (the click already gave our process
-                // foreground rights, so this succeeds) — same as ShowColumn does.
                 var existingHwnd = new WindowInteropHelper(existing).Handle;
                 if (existingHwnd != IntPtr.Zero) WindowInterop.SetForegroundWindow(existingHwnd);
                 return;
             }
 
-            _detail = new DetailWindow(_taskbar);
+            _detail = new DetailWindow(source, _sampling);
             _detail.PinStateChanged += OnDetailPinStateChanged;
-            // Any rect change (the popup's placement, the pin band growing the window upward,
-            // content height, a pinned window being dragged) moves the keep-out the floating
-            // widget dodges — republish it.
             _detail.SizeChanged += (s, e) => ScheduleDetailKeepOut();
             _detail.LocationChanged += (s, e) => ScheduleDetailKeepOut();
             _detail.Closed += (s, e) =>
@@ -418,13 +341,18 @@ namespace task_monitor
                 var w = (DetailWindow)s;
                 if (ReferenceEquals(_detail, w)) _detail = null;
                 _pinned.Remove(w);
-                // Free the column's press if this window had it pinned (idempotent).
-                _taskbar.SetColumnClickEnabled(w.Column, true);
+                _taskbars.SetColumnClickEnabled(w.Column, true);
                 ScheduleDetailKeepOut();
                 ScheduleIdleTrim();
             };
             _detail.ShowColumn(column);
             ScheduleDetailKeepOut();
+        }
+
+        private void OnAnchorRemoved(TaskbarWindow source)
+        {
+            if (_detail?.Anchor == source) CloseDetail();
+            foreach (var window in _pinned) window.DetachAnchor(source);
         }
 
         // A window that pins itself leaves the transient slot (so a new popup may open
@@ -439,13 +367,13 @@ namespace task_monitor
             {
                 if (ReferenceEquals(_detail, w)) _detail = null;
                 if (!_pinned.Contains(w)) _pinned.Add(w);
-                _taskbar.SetColumnClickEnabled(w.Column, false);
+                _taskbars.SetColumnClickEnabled(w.Column, false);
             }
             else
             {
                 _pinned.Remove(w);
                 _detail = w;
-                _taskbar.SetColumnClickEnabled(w.Column, true);
+                _taskbars.SetColumnClickEnabled(w.Column, true);
             }
             // Pin/unpin moves the window (the band grows out of the top; unpin restores the
             // pre-pin spot) — a different keep-out for the floating widget either way.
@@ -493,7 +421,7 @@ namespace task_monitor
                 var hwnds = new List<IntPtr>(_pinned.Count + 1);
                 AddKeepOut(_detail, hwnds);
                 foreach (var w in _pinned) AddKeepOut(w, hwnds);
-                _taskbar.SetFloatingKeepOut(hwnds.ToArray());
+                _taskbars.SetFloatingKeepOut(hwnds.ToArray());
             }), System.Windows.Threading.DispatcherPriority.Background);
         }
 
@@ -528,21 +456,21 @@ namespace task_monitor
         }
 
         // ---------- 卡死看门狗 (the reported 「进程卡死了…又恢复了」) ----------
-        // The taskbar thread owns the overlay window, its message loop, the sampler and the
-        // drawing. If a call inside it blocks — a USB disk that went to sleep inside
-        // IOCTL_DISK_PERFORMANCE, an RPC, the compositor — the widget holds its last frame and
-        // ignores clicks for as long as that call takes, and the stalled thread cannot log its
-        // own stall. Reported twice with an empty log, so this watchdog reports from the OTHER
-        // side, where it can always run: the tick heartbeat (TaskbarWindow.LastTickTickCount)
-        // and the overlay HWND, each with the episode's start and end. Healthy = silent.
-        // (The taskbar thread contributes the matching half: per-step and per-phase timings
-        // inside the tick, which name the blocking call when it finally returns.)
+        // SamplingController and every overlay have independent heartbeats. The UI-thread
+        // watchdog checks each one because a stalled thread cannot report itself; waiting
+        // for a selected taskbar or deliberately stopping an instance is not a zombie.
+        private sealed class OverlayHealthState
+        {
+            public long StallLastTick;
+            public long GoneSinceTick;
+            public bool GoneLogged;
+        }
+
         private System.Windows.Threading.DispatcherTimer _overlayWatch;
         private const int WatchIntervalMs = 2000;
-        private long _stallLastTick;    // 0 = no stall in progress; else the last tick before it
-        private long _goneSinceTick;    // 0 = the overlay HWND is there; else when it vanished
-        private bool _goneLogged;
-        private bool _restartedForZombie;   // the 45s zombie self-restart already fired this run
+        private readonly Dictionary<TaskbarWindow, OverlayHealthState> _overlayHealth = new Dictionary<TaskbarWindow, OverlayHealthState>();
+        private readonly OverlayHealthState _samplingHealth = new OverlayHealthState();
+        private bool _restartedForZombie;
 
         private void StartOverlayWatchdog()
         {
@@ -555,123 +483,95 @@ namespace task_monitor
 
         private void CheckOverlayHealth()
         {
-            // The UI queue is still pumped during OnExit's Join (§41), so this tick can fire
-            // mid-teardown. Without the guard, a quit that crossed the 45s zombie threshold
-            // would run the self-heal: spawn a successor process and hard-exit this one —
-            // "退出 didn't stick, the widget came back".
             if (_stopping) return;
-            var tb = _taskbar;
-            if (tb == null) return;
             long now = (long)SystemInfo.GetTickCount64();
+            CheckHeartbeat("采样", _sampling.LastTickTickCount, _sampling.NativeThreadId, _samplingHealth, now);
 
-            // (1) The tick heartbeat. The threshold is deliberately loose: a 悬浮模式 flip
-            //     rebuilds the window and legitimately has a ~2s gap (Start()'s taskbar probe),
-            //     and a slow-but-working sampler must not be reported.
-            long last = tb.LastTickTickCount;
-            if (last != 0)
+            var windows = _taskbars?.GetWatchdogWindows() ?? new List<TaskbarWindow>();
+            var current = new HashSet<TaskbarWindow>(windows);
+            foreach (var window in windows)
             {
-                int interval = _config.SampleIntervalMs ?? 1000;
-                long threshold = Math.Max(4000, interval * 3L);
-                if (_stallLastTick == 0)
+                if (!_overlayHealth.TryGetValue(window, out var state))
                 {
-                    if (now - last > threshold)
-                    {
-                        _stallLastTick = last;
-                        // Forensics FROM THE OTHER SIDE: the blocked thread can never name
-                        // its own blocking call, so dump what it last marked (CrashTrace's
-                        // step + message ring) plus a NATIVE STACK grab of the taskbar
-                        // thread (suspend µs → copy → resume — CaptureStackOf cannot wedge
-                        // behind whatever the thread is blocked in).
-                        Logger.Warn($"覆盖层心跳停滞：已 {now - last}ms 没有采样 tick（设定 {interval}ms，阈值 {threshold}ms）——任务栏线程卡在某个阻塞调用里，恢复时会补记一行；当前步骤={CrashTrace.CurrentStep}，最近消息=[{CrashTrace.RecentMessages()}]，线程栈={CrashTrace.CaptureStackOf(tb.NativeThreadId)}");
-                    }
+                    state = new OverlayHealthState();
+                    _overlayHealth[window] = state;
                 }
-                else if (now - last <= interval * 2L)
+                CheckHeartbeat("覆盖层", window.LastTickTickCount, window.NativeThreadId, state, now);
+                CheckZombie(window, state, now);
+            }
+            var stale = new List<TaskbarWindow>();
+            foreach (var window in _overlayHealth.Keys)
+            {
+                if (!current.Contains(window)) stale.Add(window);
+            }
+            foreach (var window in stale) _overlayHealth.Remove(window);
+        }
+
+        private void CheckHeartbeat(string kind, long last, int nativeThreadId, OverlayHealthState state, long now)
+        {
+            if (last == 0) return;
+            int interval = _config.SampleIntervalMs ?? 1000;
+            long threshold = Math.Max(4000, interval * 3L);
+            if (state.StallLastTick == 0)
+            {
+                if (now - last > threshold)
                 {
-                    Logger.Warn($"覆盖层心跳恢复：本次停滞约 {now - _stallLastTick}ms（从最后一次正常 tick 算起）");
-                    _stallLastTick = 0;
+                    state.StallLastTick = last;
+                    Logger.Warn($"{kind}心跳停滞：已 {now - last}ms 没有 tick（阈值 {threshold}ms，线程 {nativeThreadId}）；当前步骤={CrashTrace.CurrentStepFor(nativeThreadId)}，最近消息=[{CrashTrace.RecentMessagesFor(nativeThreadId)}]，线程栈={CrashTrace.CaptureStackOf(nativeThreadId)}");
                 }
             }
+            else if (now - last <= interval * 2L)
+            {
+                Logger.Warn($"{kind}心跳恢复：本次停滞约 {now - state.StallLastTick}ms");
+                state.StallLastTick = 0;
+            }
+        }
 
-            // (2) The zombie state: the window is gone while Start() never returned, so the
-            //     recreate loop never fires either — and with the window died the 1s timer that
-            //     would have noticed. Nothing in the process can recover from it on its own.
-            //     A 悬浮模式 flip takes the window away on purpose for ~2s, so only a
-            //     disappearance that PERSISTS gets logged (and only then is the recovery line
-            //     worth printing — otherwise every flip would log a phantom "已恢复").
-            IntPtr hwnd = tb.OverlayHwnd;
+        private void CheckZombie(TaskbarWindow window, OverlayHealthState state, long now)
+        {
+            IntPtr hwnd = window.OverlayHwnd;
             bool there = hwnd != IntPtr.Zero && WindowInterop.IsWindow(hwnd);
             if (!there)
             {
-                if (_goneSinceTick == 0) _goneSinceTick = now;
-                else if (!_goneLogged && now - _goneSinceTick > 5000)
+                if (state.GoneSinceTick == 0) state.GoneSinceTick = now;
+                else if (!state.GoneLogged && now - state.GoneSinceTick > 5000)
                 {
-                    _goneLogged = true;
-                    Logger.Error($"覆盖层窗口已消失 {(now - _goneSinceTick) / 1000}s 而 Start() 未返回——重建循环也停了；先唤醒消息循环，45s 后仍无恢复将自动重启进程（当前步骤={CrashTrace.CurrentStep}，最近消息=[{CrashTrace.RecentMessages()}]）");
-                    // The gentle in-process wake BEFORE the process restart: a window gone
-                    // this long usually means the loop is parked in GetMessage on an EMPTY
-                    // queue — the timers died with the window and, the WM_DESTROY that would
-                    // post the quit never having been dispatched (the 2026-09-30 卡死's end
-                    // state: RIP=win32u = NtUserGetMessage), nothing will ever wake it. One
-                    // PostThreadMessage(WM_QUIT) makes GetMessage return 0: Start() returns,
-                    // the recreate loop re-embeds on the new taskbar — ~7s, no restart.
-                    // Harmless when the thread is instead blocked in a call: the quit waits
-                    // in the queue for its return (the 45s restart stays the backstop).
-                    if (tb.NativeThreadId > 0)
-                        WindowInterop.PostThreadMessageW((uint)tb.NativeThreadId, WindowInterop.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+                    state.GoneLogged = true;
+                    Logger.Error($"覆盖层窗口已消失 {(now - state.GoneSinceTick) / 1000}s（线程 {window.NativeThreadId}）——先唤醒消息循环，45s 后仍无恢复将自动重启进程");
+                    if (window.NativeThreadId > 0)
+                        WindowInterop.PostThreadMessageW((uint)window.NativeThreadId, WindowInterop.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
                 }
-                // Self-heal the unrecoverable zombie: the taskbar thread is blocked inside a
-                // call that never returned (the 2026-09-30 卡死 — 20+ minutes, only a manual
-                // kill helped), the window is gone, and the recreate loop is dead with it.
-                // Nothing INSIDE the process can recover that — a foreground thread can't be
-                // killed safely — so respawn the process and hard-exit this one. We are
-                // ELEVATED, and a child of an elevated process is elevated too: a plain
-                // CreateProcess (UseShellExecute=false — no shell to lean on while explorer
-                // may itself be mid-restart) hands the successor full rights SILENTLY, no
-                // UAC at all (the gate's IsElevated passes). The single-instance mutex is
-                // un-owned and dies with us; Environment.Exit does not wait for the hung
-                // foreground thread the way a Main-return would. The log handle goes first —
-                // FileShare.Read would eat the child's first lines (Logger.ReleaseHandle).
-                // Once per process lifetime: a repeat zombie restarts again.
-                if (!_restartedForZombie && now - _goneSinceTick > 45000)
-                {
-                    _restartedForZombie = true;
-                    Logger.Error($"覆盖层窗口消失 {(now - _goneSinceTick) / 1000}s——判定为不可恢复卡死，自动重启进程（父进程已提权，子进程静默接管，无 UAC）");
-                    try
-                    {
-                        var exe = Process.GetCurrentProcess().MainModule.FileName;
-                        // Drop the mutex handle FIRST: the named object is an existence
-                        // test, so it only dies WITH its last handle — the child checks it
-                        // ~0.3s in, while this process still has ~1s of OnExit (the taskbar
-                        // Join) left to live; undisposed, the child takes itself for a
-                        // second instance and exits silently (2026-09-30 PID=368).
-                        _singleInstanceMutex?.Dispose();
-                        _singleInstanceMutex = null;
-                        // And release the log handle (FileShare.Read eats the child's first
-                        // lines) — this process writes NOTHING after this point.
-                        Logger.ReleaseHandle();
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName = exe,
-                            UseShellExecute = false,
-                            WorkingDirectory = Path.GetDirectoryName(exe),
-                        });
-                        // No "spawned OK" line on purpose: logging it would re-open the
-                        // handle ReleaseHandle just freed and eat the child's first lines.
-                    }
-                    catch (Exception ex) { Logger.Error("自动重启：拉起新进程失败", ex); }
-                    Environment.Exit(0);
-                }
-            }
-            else if (_goneLogged)
-            {
-                Logger.Info($"覆盖层窗口已恢复（消失约 {now - _goneSinceTick}ms）");
-                _goneSinceTick = 0;
-                _goneLogged = false;
+                if (!_restartedForZombie && now - state.GoneSinceTick > 45000)
+                    RestartForZombie(now - state.GoneSinceTick);
             }
             else
             {
-                _goneSinceTick = 0;   // back before the threshold: a form flip, not an incident
+                if (state.GoneLogged)
+                    Logger.Info($"覆盖层窗口已恢复（消失约 {now - state.GoneSinceTick}ms）");
+                state.GoneSinceTick = 0;
+                state.GoneLogged = false;
             }
+        }
+
+        private void RestartForZombie(long goneMs)
+        {
+            _restartedForZombie = true;
+            Logger.Error($"覆盖层窗口消失 {goneMs / 1000}s——判定为不可恢复卡死，自动重启进程");
+            try
+            {
+                var exe = Process.GetCurrentProcess().MainModule.FileName;
+                _singleInstanceMutex?.Dispose();
+                _singleInstanceMutex = null;
+                Logger.ReleaseHandle();
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = exe,
+                    UseShellExecute = false,
+                    WorkingDirectory = Path.GetDirectoryName(exe),
+                });
+            }
+            catch (Exception ex) { Logger.Error("自动重启：拉起新进程失败", ex); }
+            Environment.Exit(0);
         }
 
         // ---------- Right-click context menu (悬浮模式 / 置顶显示 / 设置 / Exit) ----------
@@ -688,8 +588,46 @@ namespace task_monitor
         private void ShowTaskbarMenu()
         {
             EnsureTaskbarMenu();
+            // WPF Popup chooses its initial DPI from PlacementTarget's location, even with
+            // Placement=MousePoint. Move the invisible host to the cursor in physical pixels
+            // and flush the resulting WM_DPICHANGED before the menu creates its popup HWND.
+            if (WindowInterop.GetCursorPos(out var cursor))
+            {
+                var hwnd = new WindowInteropHelper(_menuHost).Handle;
+                if (hwnd != IntPtr.Zero)
+                {
+                    WindowInterop.SetWindowPos(hwnd, IntPtr.Zero, cursor.x, cursor.y, 0, 0,
+                        WindowInterop.SWP_NOSIZE | WindowInterop.SWP_NOZORDER | WindowInterop.SWP_NOACTIVATE);
+                    _menuHost.UpdateLayout();
+                }
+            }
             _menuHost.Activate();            // make it the active window so deactivation closes the menu
             _taskbarMenu.IsOpen = true;      // Placement=MousePoint → opens at the cursor
+        }
+
+        private static bool SupportsSnapToStart(IReadOnlyList<TaskbarDisplayInfo> displays,
+            IReadOnlyList<TaskbarDisplaySelection> selection)
+        {
+            bool matched = false;
+            foreach (var display in displays)
+            {
+                bool use = selection == null ? display.IsPrimary : IsDisplaySelected(selection, display.Id);
+                if (!use) continue;
+                matched = true;
+                if (display.HasTaskbar && TaskbarWindow.IsWindows11Taskbar(display.TaskbarHwnd)) return true;
+            }
+            if (matched) return false;
+            var primary = TaskbarDisplayCatalog.GetPrimaryDisplay();
+            return primary != null && primary.HasTaskbar && TaskbarWindow.IsWindows11Taskbar(primary.TaskbarHwnd);
+        }
+
+        private static bool IsDisplaySelected(IReadOnlyList<TaskbarDisplaySelection> selection, string id)
+        {
+            foreach (var display in selection)
+            {
+                if (display != null && string.Equals(display.Id, id, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
         }
 
         private void ShowSettings()
@@ -699,13 +637,16 @@ namespace task_monitor
                 _settings.Activate();
                 return;
             }
+            var displays = TaskbarDisplayCatalog.GetDisplays();
             _settings = new SettingsWindow(
                 _config.OverlayOnLeft != false, _config.OverlaySnapToStart == true, OnOverlayPlacementChanged,
+                SupportsSnapToStart(displays, _config.TaskbarDisplays), displays, _config.TaskbarDisplays, OnTaskbarDisplaysChanged,
                 StartupTask.IsEnabled(), OnAutoStartChanged,
                 ThemeIndexOf(_config.Theme), OnThemeChanged,
                 _config.CompactLayout == true, OnCompactLayoutChanged,
                 _config.FloatingMode == true, OnFloatingModeChanged,
                 _config.FloatingTopmost != false, OnFloatingTopmostChanged,
+                _config.FloatingAllowOutOfBounds == true, OnFloatingAllowOutOfBoundsChanged,
                 _config.FloatingEdgeHide == true, OnFloatingEdgeHideChanged,
                 _config.FloatingFullscreenHide != false, OnFloatingFullscreenHideChanged,
                 _config.FloatingOpacity ?? 1.0, OnFloatingOpacityChanged,
@@ -716,10 +657,10 @@ namespace task_monitor
                 // (empty while disk sampling is off — the picker then keeps only the
                 // stored pick's （未连接） placeholder).
                 DiskDisplayModeIndexOf(_config), _config.DiskDisplayIndex ?? 0,
-                _taskbar.LatestSnapshot?.Disks, OnDiskDisplayChanged,
+                _sampling.LatestSnapshot?.Disks, OnDiskDisplayChanged,
                 // Same for the 特定 GPU picker (empty while GPU sampling is off).
                 GpuDisplayModeIndexOf(_config), _config.GpuDisplayIndex ?? 0,
-                _taskbar.LatestSnapshot?.Gpus, OnGpuDisplayChanged,
+                _sampling.LatestSnapshot?.Gpus, OnGpuDisplayChanged,
                 // 任务栏显示 / 温度来源 / 温度单位 — the 温度来源 picker shares the same
                 // adapter list.
                 GpuTaskbarContentIndexOf(_config), _config.GpuTempIndex ?? -1,
@@ -731,7 +672,7 @@ namespace task_monitor
                 _config.UpdateCheckEnabled != false, OnUpdateCheckChanged,
                 UpdateSourceIndexOf(_config), OnUpdateSourceChanged,
                 // The About page's live waveform reads the same latest snapshot.
-                () => _taskbar.LatestSnapshot);
+                () => _sampling.LatestSnapshot);
             _settings.Closed += (s, e) =>
             {
                 _settings = null;
@@ -739,6 +680,23 @@ namespace task_monitor
             };
             _settings.Show();
             _settings.Activate();
+        }
+
+        private void OnTaskbarCatalogChanged(IReadOnlyList<TaskbarDisplayInfo> displays)
+        {
+            Logger.Info($"显示器目录变化通知设置窗口：在线={displays.Count}，设置打开={_settings != null}");
+            _settings?.RefreshDisplays(displays, _config.TaskbarDisplays);
+        }
+
+        private void OnTaskbarDisplaysChanged(IReadOnlyList<TaskbarDisplaySelection> selection)
+        {
+            var saved = new List<TaskbarDisplaySelection>();
+            foreach (var display in selection)
+                saved.Add(new TaskbarDisplaySelection { Id = display.Id, Name = display.Name });
+            _config.TaskbarDisplays = saved;
+            TrySaveConfig();
+            CloseDetail();
+            _taskbars.SetDisplaySelection(saved);
         }
 
         // 设置 外观 section's placement cards changed: persist, re-anchor the overlay, and
@@ -749,7 +707,7 @@ namespace task_monitor
             _config.OverlayOnLeft = onLeft;
             _config.OverlaySnapToStart = snapToStart;
             TrySaveConfig();
-            _taskbar.SetPlacement(onLeft, snapToStart);
+            _taskbars.SetPlacement(onLeft, snapToStart);
             CloseDetail();
         }
 
@@ -764,7 +722,7 @@ namespace task_monitor
             _config.CompactLayout = on ? true : (bool?)null;
             TrySaveConfig();
             CloseDetail();
-            _taskbar.SetCompactLayout(on);
+            _taskbars.SetCompactLayout(on);
             _settings?.SyncCompactLayout(on);
         }
 
@@ -781,7 +739,7 @@ namespace task_monitor
             _config.FloatingMode = on ? true : (bool?)null;
             TrySaveConfig();
             CloseDetail();
-            _taskbar.SetFloatingMode(on, _config.FloatingX ?? -1, _config.FloatingY ?? -1);
+            _taskbars.SetFloatingMode(on, _config.FloatingX, _config.FloatingY);
             _settings?.SyncFloatingMode(on);
         }
 
@@ -793,8 +751,15 @@ namespace task_monitor
         {
             _config.FloatingTopmost = on ? (bool?)null : false;
             TrySaveConfig();
-            _taskbar.SetFloatingTopmost(on);
+            _taskbars.SetFloatingTopmost(on);
             _settings?.SyncFloatingTopmost(on);
+        }
+
+        private void OnFloatingAllowOutOfBoundsChanged(bool on)
+        {
+            _config.FloatingAllowOutOfBounds = on ? true : (bool?)null;
+            TrySaveConfig();
+            _taskbars.SetFloatingAllowOutOfBounds(on);
         }
 
         // 设置 外观 → 悬浮模式 → 贴边隐藏 (or the right-click menu's checkable item): persist
@@ -807,7 +772,7 @@ namespace task_monitor
         {
             _config.FloatingEdgeHide = on ? true : (bool?)null;
             TrySaveConfig();
-            _taskbar.SetFloatingEdgeHide(on);
+            _taskbars.SetFloatingEdgeHide(on);
             _settings?.SyncFloatingEdgeHide(on);
         }
 
@@ -820,7 +785,7 @@ namespace task_monitor
         {
             _config.FloatingFullscreenHide = on ? (bool?)null : false;
             TrySaveConfig();
-            _taskbar.SetFloatingFullscreenHide(on);
+            _taskbars.SetFloatingFullscreenHide(on);
             _settings?.SyncFloatingFullscreenHide(on);
         }
 
@@ -832,7 +797,7 @@ namespace task_monitor
         // Settings-page only: a percent slider has no right-click-menu shape.
         private void OnFloatingOpacityChanged(double opacity)
         {
-            _taskbar.SetFloatingOpacity(opacity);
+            _taskbars.SetFloatingOpacity(opacity);
             _config.FloatingOpacity = opacity < 0.999 ? opacity : (double?)null;
             if (_configSaveDebounce == null)
             {
@@ -891,7 +856,7 @@ namespace task_monitor
         {
             _config.SampleIntervalMs = ms == 1000 ? (int?)null : ms;
             TrySaveConfig();
-            _taskbar.SetSampleInterval(ms);
+            _taskbars.SetSampleInterval(ms);
         }
 
         // 合并相同程序 toggle: persist (null = on, the default — only the disabled state
@@ -902,7 +867,7 @@ namespace task_monitor
         {
             _config.MergeSamePathProcesses = on ? (bool?)null : false;
             TrySaveConfig();
-            _taskbar.SetMergeSamePathProcesses(on);
+            _taskbars.SetMergeSamePathProcesses(on);
         }
 
         // ---------- 设置 → 采样 → 磁盘: 显示方式 ----------
@@ -923,7 +888,7 @@ namespace task_monitor
                                 : (MetricDisplayMode?)null;
             _config.DiskDisplayIndex = diskIndex;
             TrySaveConfig();
-            _taskbar.SetDiskDisplay(modeIndex, diskIndex);
+            _taskbars.SetDiskDisplay(modeIndex, diskIndex);
         }
 
         // ---------- 设置 → 采样 → GPU: 显示方式 ----------
@@ -942,7 +907,7 @@ namespace task_monitor
                                : (MetricDisplayMode?)null;
             _config.GpuDisplayIndex = gpuIndex;
             TrySaveConfig();
-            _taskbar.SetGpuDisplay(modeIndex, gpuIndex);
+            _taskbars.SetGpuDisplay(modeIndex, gpuIndex);
         }
 
         // ---------- 设置 → 采样 → GPU: 任务栏显示 / 温度来源 / 温度单位 ----------
@@ -971,7 +936,7 @@ namespace task_monitor
             _config.GpuTempIndex = tempIndex >= 0 ? tempIndex : (int?)null;   // -1/absent = 最高温度
             _config.GpuTempUnit = fahrenheit ? GpuTempUnit.Fahrenheit : (GpuTempUnit?)null;
             TrySaveConfig();
-            _taskbar.SetGpuTempDisplay(content, tempIndex, fahrenheit);
+            _taskbars.SetGpuTempDisplay(content, tempIndex, fahrenheit);
         }
 
         // ---------- 设置 → 采样 → 网络: 适配器 ----------
@@ -1006,7 +971,7 @@ namespace task_monitor
             _config.NetAdapterId = string.IsNullOrEmpty(id) ? null : id;
             _config.NetAdapterName = string.IsNullOrEmpty(id) ? null : name;
             TrySaveConfig();
-            _taskbar.SetNetAdapter(_config.NetAdapterId);
+            _taskbars.SetNetAdapter(_config.NetAdapterId);
         }
 
         // Clash/Mihomo integration changed (the switch reports immediately, text edits are
@@ -1022,7 +987,7 @@ namespace task_monitor
             _config.ClashApiSecret = _config.ClashApiAddress == null || string.IsNullOrEmpty(secret)
                 ? null : secret;
             TrySaveConfig();
-            _taskbar.SetClashApi(enabled, _config.ClashApiAddress, _config.ClashApiSecret);
+            _taskbars.SetClashApi(enabled, _config.ClashApiAddress, _config.ClashApiSecret);
         }
 
         // ---------- 设置 → 采样 → 网络: 公网 IP ----------
@@ -1036,7 +1001,7 @@ namespace task_monitor
         {
             _config.PublicIpEnabled = on ? (bool?)null : false;
             TrySaveConfig();
-            _taskbar.SetPublicIpLookup(on);
+            _taskbars.SetPublicIpLookup(on);
         }
 
         // ---------- 设置 → 通用: 检查更新 / 更新源 ----------
@@ -1093,7 +1058,7 @@ namespace task_monitor
                 default: return;
             }
             TrySaveConfig();
-            _taskbar.SetMetricSamplingMask(SamplingMaskOf(_config));
+            _taskbars.SetMetricSamplingMask(SamplingMaskOf(_config));
             if (on) return;
             if (_detail?.Column == slot) CloseDetail();
             foreach (var w in _pinned.FindAll(w => w.Column == slot)) w.Close();

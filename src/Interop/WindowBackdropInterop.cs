@@ -102,7 +102,15 @@ namespace task_monitor
         private static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
 
         [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+
+        [DllImport("gdi32.dll")]
+        private static extern int CombineRgn(IntPtr hrgnDest, IntPtr hrgnSrc1, IntPtr hrgnSrc2, int fnCombineMode);
+
+        [DllImport("gdi32.dll")]
         private static extern bool DeleteObject(IntPtr obj);
+
+        private const int RGN_AND = 1;
 
         /// <summary>
         /// Takes the system's window frame off the widget: no drop shadow, no 1px outline, no
@@ -129,11 +137,14 @@ namespace task_monitor
         /// couple of pixels LARGER than the drawn radius by the caller: the hard-edged region
         /// then lands just outside the antialiased edge instead of shaving it.
         ///
-        /// <para>Called whenever the widget's size or DPI changes (the caller change-gates it).
-        /// On success the SYSTEM owns the region — never delete it; on failure it does not, so
-        /// the handle is released here.</para>
+        /// <para><paramref name="visible"/> is the window-relative rectangle to keep, so a docked
+        /// card crossing a monitor seam can be clipped to its home monitor as well as rounded.
+        /// Called whenever the widget's size, DPI or visible rectangle changes. On success the
+        /// SYSTEM owns the region — never delete it; on failure it does not, so handles are released
+        /// here.</para>
         /// </summary>
-        public static void SetRoundedRegion(IntPtr hwnd, int widthPx, int heightPx, int radiusPx)
+        public static void SetRoundedRegion(IntPtr hwnd, int widthPx, int heightPx, int radiusPx,
+            WindowInterop.RECT visible)
         {
             // CreateRoundRectRgn's last two arguments are the corner ELLIPSE's width/height
             // (i.e. 2 × radius), and its right/bottom edges are exclusive — +1 keeps the last
@@ -144,9 +155,24 @@ namespace task_monitor
                 Logger.Warn($"悬浮模式：CreateRoundRectRgn 失败 err={Marshal.GetLastWin32Error()}——窗口保持直角");
                 return;
             }
+            IntPtr clip = CreateRectRgn(visible.left, visible.top, visible.right, visible.bottom);
+            if (clip == IntPtr.Zero)
+            {
+                Logger.Warn($"悬浮模式：CreateRectRgn 失败 err={Marshal.GetLastWin32Error()}——窗口区域未更新");
+                DeleteObject(rgn);
+                return;
+            }
+            int combined = CombineRgn(rgn, rgn, clip, RGN_AND);
+            DeleteObject(clip);
+            if (combined == 0)
+            {
+                Logger.Warn("悬浮模式：CombineRgn 失败——窗口区域未更新");
+                DeleteObject(rgn);
+                return;
+            }
             if (SetWindowRgn(hwnd, rgn, true) == 0)
             {
-                Logger.Warn($"悬浮模式：SetWindowRgn 失败 err={Marshal.GetLastWin32Error()}——窗口保持直角（控件仍可用）");
+                Logger.Warn($"悬浮模式：SetWindowRgn 失败 err={Marshal.GetLastWin32Error()}——窗口区域未更新");
                 DeleteObject(rgn);
             }
         }

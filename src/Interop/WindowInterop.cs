@@ -161,7 +161,7 @@ namespace task_monitor
         public const uint WM_APP_SET_METRICS = WM_APP + 5;
         // UI → taskbar: 悬浮模式 was turned on/off. The window's form (taskbar child vs
         // top-level card widget) is a CREATION-time property — ex-style, parent, window shell
-        // — so the handler tears the window down and lets App's recreate loop build the other
+        // — so the handler tears the window down and lets the manager's rebuild loop build the other
         // form (fast: TaskbarWindow.ConsumeQuickRestart).
         public const uint WM_APP_SET_FLOATING = WM_APP + 6;
         // UI → taskbar: a live floating-form style changed (置顶显示, or the app theme while
@@ -181,6 +181,10 @@ namespace task_monitor
         // immediately, OFF restores it no matter what is on screen. Visibility only: no
         // position, dock or slide state is touched.
         public const uint WM_APP_SET_FLOAT_FULLSCREEN_HIDE = WM_APP + 10;
+        // Sampling controller → overlay: apply the latest shared snapshot and redraw.
+        public const uint WM_APP_SNAPSHOT = WM_APP + 11;
+        // UI → floating overlay: allow out-of-bounds changed; OFF also normalizes the home.
+        public const uint WM_APP_SET_FLOAT_OUT_OF_BOUNDS = WM_APP + 12;
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
@@ -265,6 +269,11 @@ namespace task_monitor
         [DllImport("user32.dll")]
         public static extern uint GetDpiForWindow(IntPtr hWnd);
 
+        public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
+
+        [DllImport("user32.dll", ExactSpelling = true)]
+        public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
         [DllImport("user32.dll")]
         public static extern IntPtr GetDC(IntPtr hWnd);
 
@@ -346,6 +355,9 @@ namespace task_monitor
 
         [DllImport("user32.dll")]
         public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]

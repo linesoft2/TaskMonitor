@@ -92,6 +92,9 @@ namespace task_monitor
 
         // Written by SystemSampler (taskbar STA thread) every tick; read by the poll thread.
         private volatile NetworkInterface _adapter;
+        private readonly AutoResetEvent _pollWake = new AutoResetEvent(false);
+        private readonly Thread _pollThread;
+        private volatile bool _stopping;
         // 设置 → 采样项目 → 网络 → 公网 IP switch (default on) — written by SystemSampler's
         // per-tick hand-off, read by the poll thread. Off = NOTHING goes to the public
         // internet: neither the what-is-my-ip HTTP lookups nor the 公网延迟 ICMP probe
@@ -130,8 +133,8 @@ namespace task_monitor
 
         public NetInfoSampler()
         {
-            var t = new Thread(PollLoop) { IsBackground = true, Name = "NetInfoSampler" };
-            t.Start();
+            _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "NetInfoSampler" };
+            _pollThread.Start();
         }
 
         /// <summary>The adapter to inspect (NetSampler's current selection), or null.</summary>
@@ -152,6 +155,16 @@ namespace task_monitor
         /// for the per-second SystemSampler tick.</summary>
         public NetInfo Sample() => _latest;
 
+        public bool Shutdown()
+        {
+            _stopping = true;
+            _pollWake.Set();
+            bool stopped = _pollThread.Join(1000);
+            if (!stopped) Logger.Warn("NetInfoSampler 停止等待超时");
+            else Logger.Debug("NetInfoSampler 已停止");
+            return stopped;
+        }
+
         /// <summary>Called from the UI thread when the Network detail panel opens. The next
         /// poll tick refreshes the Wi-Fi cache IF it is stale (wrong adapter / timed out);
         /// a fresh cache is reused without any wlanapi call. Thread-safe (single volatile
@@ -160,17 +173,20 @@ namespace task_monitor
 
         private void PollLoop()
         {
-            while (true)
+            try
             {
-                long started = Stopwatch.GetTimestamp();
-                try { PollOnce(); }
-                catch { /* never die — stale values for one cycle beat an empty band */ }
+                while (!_stopping)
+                {
+                    long started = Stopwatch.GetTimestamp();
+                    try { PollOnce(); }
+                    catch { /* never die — stale values for one cycle beat an empty band */ }
 
-                // ~1 Hz cadence, floored so a fast-failing cycle can't spin.
-                long elapsedMs = (Stopwatch.GetTimestamp() - started) * 1000 / Stopwatch.Frequency;
-                int delay = (int)(1000 - elapsedMs);
-                Thread.Sleep(delay < 250 ? 250 : delay);
+                    long elapsedMs = (Stopwatch.GetTimestamp() - started) * 1000 / Stopwatch.Frequency;
+                    int delay = (int)(1000 - elapsedMs);
+                    _pollWake.WaitOne(delay < 250 ? 250 : delay);
+                }
             }
+            finally { Logger.Debug("NetInfoSampler poll 线程已退出"); }
         }
 
         private void PollOnce()

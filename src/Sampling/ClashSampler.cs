@@ -76,6 +76,9 @@ namespace task_monitor
         // thread. A torn address/secret pair for one poll is harmless (loopback).
         private volatile string _apiAddress;
         private volatile string _apiSecret;
+        private readonly AutoResetEvent _pollWake = new AutoResetEvent(false);
+        private readonly Thread _pollThread;
+        private volatile bool _stopping;
         // The latest published per-path rates (never null). One volatile read per
         // SystemSampler tick.
         private volatile IReadOnlyList<ClashProcessTraffic> _latest = Empty;
@@ -97,8 +100,8 @@ namespace task_monitor
 
         public ClashSampler()
         {
-            var t = new Thread(PollLoop) { IsBackground = true, Name = "ClashSampler" };
-            t.Start();
+            _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "ClashSampler" };
+            _pollThread.Start();
         }
 
         /// <summary>The endpoint to poll — controller address (host:port, with or without
@@ -114,22 +117,32 @@ namespace task_monitor
         /// volatile read — cheap enough for the per-second SystemSampler tick.</summary>
         public IReadOnlyList<ClashProcessTraffic> Latest => _latest;
 
+        public bool Shutdown()
+        {
+            _stopping = true;
+            _pollWake.Set();
+            bool stopped = _pollThread.Join(1000);
+            if (!stopped) Logger.Warn("ClashSampler 停止等待超时");
+            else Logger.Debug("ClashSampler 已停止");
+            return stopped;
+        }
+
         private void PollLoop()
         {
-            while (true)
+            try
             {
-                long started = Stopwatch.GetTimestamp();
-                try { PollOnce(); }
-                catch { /* never die — a bad cycle keeps the previous publication */ }
+                while (!_stopping)
+                {
+                    long started = Stopwatch.GetTimestamp();
+                    try { PollOnce(); }
+                    catch { /* never die — a bad cycle keeps the previous publication */ }
 
-                // ~1 Hz cadence, floored so a fast-failing cycle can't spin. Fixed at 1s
-                // regardless of the 采样间隔 setting: the publication is a RATE, so the
-                // overlay's tick cadence doesn't matter (and the diff divides by the
-                // measured interval anyway).
-                long elapsedMs = (Stopwatch.GetTimestamp() - started) * 1000 / Stopwatch.Frequency;
-                int delay = (int)(1000 - elapsedMs);
-                Thread.Sleep(delay < 250 ? 250 : delay);
+                    long elapsedMs = (Stopwatch.GetTimestamp() - started) * 1000 / Stopwatch.Frequency;
+                    int delay = (int)(1000 - elapsedMs);
+                    _pollWake.WaitOne(delay < 250 ? 250 : delay);
+                }
             }
+            finally { Logger.Debug("ClashSampler poll 线程已退出"); }
         }
 
         private void PollOnce()

@@ -99,7 +99,7 @@ namespace task_monitor
     /// <see cref="NetInfoSampler"/>, the per-disk <see cref="DiskSampler"/>, and the
     /// per-GPU <see cref="GpuSampler"/>), plus the svchost-naming <see cref="ServiceHostMap"/>,
     /// the Clash/Mihomo controller poller <see cref="ClashSampler"/>,
-    /// and assembles one <see cref="SystemSnapshot"/> per call. Lives on the taskbar STA thread
+    /// and assembles one <see cref="SystemSnapshot"/> per call. Lives on SamplingController's STA thread
     /// (single-threaded, except the SRUM callback thread inside ProcessNetSampler and the
     /// ~1 Hz poll thread inside NetInfoSampler); each sub-sampler keeps its own
     /// deltas/baseline internally.
@@ -162,8 +162,8 @@ namespace task_monitor
         private int _lastMask = MaskAll;
 
         /// <summary>Thread-safe: replace the per-metric sampling mask (<see cref="MaskCpu"/>
-        /// …). Applied on the next tick; TaskbarWindow re-applies it to every fresh sampler
-        /// (Start() creates a new one per overlay incarnation).</summary>
+        /// …). Applied on the next tick and re-applied whenever SamplingController
+        /// has to reconstruct the sampler after a failure.</summary>
         public void SetEnabledMask(int mask) => _enabledMask = mask;
 
         // 设置 → 采样项目 → 合并相同程序 — same volatile single-writer contract as
@@ -173,7 +173,7 @@ namespace task_monitor
         private volatile bool _mergeByPath;
 
         /// <summary>Thread-safe: toggle same-path process merging for the five per-process
-        /// detail lists. Applied on the next tick; TaskbarWindow re-applies it to every
+        /// detail lists. Applied on the next tick; SamplingController re-applies it to every
         /// fresh sampler, same as <see cref="SetEnabledMask"/>.</summary>
         public void SetMergeByPath(bool on) => _mergeByPath = on;
 
@@ -186,7 +186,7 @@ namespace task_monitor
 
         /// <summary>Thread-safe: set the disk headline display mode (0=Average 1=Max
         /// 2=Specific) and the specific disk's PhysicalDrive index. Applied on the next
-        /// tick; TaskbarWindow re-applies it to every fresh sampler, like the mask.</summary>
+        /// tick; SamplingController re-applies it to every fresh sampler, like the mask.</summary>
         public void SetDiskDisplay(int mode, int index)
         {
             _diskDisplayMode = mode;
@@ -201,7 +201,7 @@ namespace task_monitor
 
         /// <summary>Thread-safe: set the GPU headline display mode (0=Average 1=Max
         /// 2=Specific) and the specific adapter's "GPU N" number. Applied on the next
-        /// tick; TaskbarWindow re-applies it to every fresh sampler, like the mask.</summary>
+        /// tick; SamplingController re-applies it to every fresh sampler, like the mask.</summary>
         public void SetGpuDisplay(int mode, int index)
         {
             _gpuDisplayMode = mode;
@@ -218,7 +218,7 @@ namespace task_monitor
 
         /// <summary>Thread-safe: set the GPU temperature headline source (-1 = the hottest
         /// adapter, ≥0 = that "GPU N") and its display unit (false = 摄氏度, the default).
-        /// Applied on the next tick; TaskbarWindow re-applies it to every fresh sampler,
+        /// Applied on the next tick; SamplingController re-applies it to every fresh sampler,
         /// like the mask.</summary>
         public void SetGpuTempConfig(int index, bool fahrenheit)
         {
@@ -233,7 +233,7 @@ namespace task_monitor
 
         /// <summary>Thread-safe: pin the sampled network adapter by NetworkInterface.Id
         /// (GUID), or null for 自动. Applied on the next tick (a pinned adapter that's
-        /// gone falls back to 自动 inside NetSampler); TaskbarWindow re-applies it to
+        /// gone falls back to 自动 inside NetSampler); SamplingController re-applies it to
         /// every fresh sampler, like the mask.</summary>
         public void SetNetAdapter(string id) => _netAdapterId = id;
 
@@ -249,7 +249,7 @@ namespace task_monitor
         /// <summary>Thread-safe: switch the Clash/Mihomo integration and set the
         /// external-controller endpoint (host:port — null/empty = the
         /// <see cref="ClashSampler.DefaultAddress"/> default) and API secret
-        /// (null/empty = none). Applied on the next tick; TaskbarWindow re-applies it to
+        /// (null/empty = none). Applied on the next tick; SamplingController re-applies it to
         /// every fresh sampler, like the mask.</summary>
         public void SetClashApi(bool enabled, string address, string secret)
         {
@@ -264,32 +264,22 @@ namespace task_monitor
 
         /// <summary>Thread-safe: switch the public-internet probes (the Network panel's
         /// 公网 IPv4/IPv6 — NetInfoSampler's what-is-my-ip HTTP queries — AND the 公网延迟
-        /// ICMP ping). Applied on the next tick; TaskbarWindow re-applies it
+        /// ICMP ping). Applied on the next tick; SamplingController re-applies it
         /// to every fresh sampler, like the mask.</summary>
         public void SetPublicIpLookup(bool enabled) => _publicIpLookupEnabled = enabled;
 
         /// <summary>
-        /// Release the sampler's NATIVE registrations and idle its background pollers —
-        /// the SRUM real-time session (<see cref="ProcessNetSampler.Shutdown"/>), whose
-        /// callback pointer must not outlive a collected delegate (the reported 卡死 crash),
-        /// plus the two process-lifetime poll threads of <see cref="NetInfoSampler"/> and
-        /// <see cref="ClashSampler"/>. Called when the overlay window is torn down and
-        /// rebuilt, i.e. before this sampler becomes garbage. Safe to call once.
-        ///
-        /// <para>Those two threads have no stop flag (they are process-lifetime by design)
-        /// and every rebuild — 悬浮模式 flip, explorer restart, the §43 self-heal — creates
-        /// a FRESH sampler, so without these two lines each rebuild left the retired pair
-        /// polling at ~1 Hz forever: gateway + 公网 ICMP/HTTP (which must stop when the user
-        /// switches 公网 IP off, §30) and the Clash endpoint (§31). Clearing their inputs is
-        /// exactly the documented "off" state of both, so no behaviour changes. No Join here:
-        /// a poll cycle can block on ICMP/HTTP, and teardown runs on the taskbar STA thread
-        /// (§43's bounded-wait rule).</para>
+        /// Unregister SRUM and stop the NetInfo/Clash pollers, then release GPU buffers/COM.
+        /// False means SRUM unregistration failed or a poller did not stop; the controller
+        /// must not reconstruct another sampler/poller set over those live resources.
         /// </summary>
-        public void Shutdown()
+        public bool Shutdown()
         {
-            _procNet.Shutdown();
-            _netInfo.Adapter = null;
-            _clash.SetEndpoint(null, null);
+            bool released = _procNet.Shutdown();
+            bool netStopped = _netInfo.Shutdown();
+            bool clashStopped = _clash.Shutdown();
+            _gpu.Shutdown();
+            return released && netStopped && clashStopped;
         }
 
         // ---------- slow-step diagnostics (the reported 「卡死几秒后自己恢复」) ----------

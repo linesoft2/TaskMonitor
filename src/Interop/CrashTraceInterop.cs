@@ -78,23 +78,53 @@ namespace task_monitor
         private const uint MemImage = 0x1000000;
         private const uint MemMapped = 0x40000;
 
-        // ---- the recent-message ring (see NoteMessage) ----
+        // ---- per-native-thread step + recent-message ring (see NoteMessage) ----
         private const int RecentCount = 8;   // power of two — the index masks instead of modulo
-        private static readonly uint[] _recentMsg = new uint[RecentCount];
-        private static readonly long[] _recentWParam = new long[RecentCount];
-        private static int _recentNext;
+        private sealed class ThreadTraceSlot
+        {
+            public readonly uint[] RecentMsg = new uint[RecentCount];
+            public readonly long[] RecentWParam = new long[RecentCount];
+            public int RecentNext;
+            public volatile string Step;
+        }
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, ThreadTraceSlot> _traceSlots =
+            new System.Collections.Concurrent.ConcurrentDictionary<int, ThreadTraceSlot>();
+        [ThreadStatic]
+        private static ThreadTraceSlot _currentTraceSlot;
+
+        private static ThreadTraceSlot CurrentTraceSlot
+        {
+            get
+            {
+                var slot = _currentTraceSlot;
+                if (slot != null) return slot;
+                int nativeThreadId = (int)GetCurrentThreadId();
+                slot = _traceSlots.GetOrAdd(nativeThreadId, _ => new ThreadTraceSlot());
+                _currentTraceSlot = slot;
+                return slot;
+            }
+        }
+
+        public static void ClearThreadTrace(int nativeThreadId)
+        {
+            if (nativeThreadId <= 0) return;
+            _traceSlots.TryRemove(nativeThreadId, out _);
+            if ((int)GetCurrentThreadId() == nativeThreadId) _currentTraceSlot = null;
+        }
 
         /// <summary>
         /// Called at the very top of the overlay's WndProc. The 21:43 record showed a fault
         /// inside the DISPATCH path with no managed frame left to walk, so "what was this thread
-        /// doing" cannot come from a stack — it has to be kept as it goes. One array write and
-        /// an index bump per message: no allocation, no lock, safe on the hot path.
+        /// doing" cannot come from a stack — it has to be kept as it goes. After the thread's
+        /// first slot creation this is only an index bump and array writes: no allocation, no
+        /// lock, and no cross-talk with another overlay's native thread.
         /// </summary>
         public static void NoteMessage(uint msg, long wParam)
         {
-            int i = _recentNext++ & (RecentCount - 1);
-            _recentMsg[i] = msg;
-            _recentWParam[i] = wParam;
+            var slot = CurrentTraceSlot;
+            int i = slot.RecentNext++ & (RecentCount - 1);
+            slot.RecentMsg[i] = msg;
+            slot.RecentWParam[i] = wParam;
         }
 
         /// <summary>
@@ -104,32 +134,47 @@ namespace task_monitor
         /// way to name the crashing step is to record it before it runs. Literal strings only:
         /// the assignment allocates nothing.
         /// </summary>
-        public static void NoteStep(string step) => _step = step;
+        public static void NoteStep(string step) => CurrentTraceSlot.Step = step;
 
-        /// <summary>The step last recorded — read by the handlers that log a caught fault.</summary>
-        public static string CurrentStep => _step ?? "(未标记)";
+        /// <summary>The step last recorded by the current calling native thread.</summary>
+        public static string CurrentStep => CurrentStepFor((int)GetCurrentThreadId());
+
+        /// <summary>The step last recorded by the specified native thread.</summary>
+        public static string CurrentStepFor(int nativeThreadId)
+        {
+            ThreadTraceSlot slot;
+            return _traceSlots.TryGetValue(nativeThreadId, out slot) ? slot.Step ?? "(未标记)" : "(未标记)";
+        }
 
         /// <summary>
-        /// Snapshot of the recent-message ring, oldest first ("0x111(w=0)" items, space-joined).
+        /// Snapshot of a recent-message ring, oldest first ("0x111(w=0)" items, space-joined).
         /// Read by App's stall watchdog: a thread blocked inside a call can never run the VEH
         /// dump below, so "what was it doing" has to be pulled from the OTHER side. Lock-free
         /// and best-effort — a mid-bump read just yields one torn slot.
         /// </summary>
-        public static string RecentMessages()
+        public static string RecentMessages() => RecentMessagesFor((int)GetCurrentThreadId());
+
+        /// <summary>Snapshot of the specified native thread's ring; no slot is created for a read.</summary>
+        public static string RecentMessagesFor(int nativeThreadId)
+        {
+            ThreadTraceSlot slot;
+            return _traceSlots.TryGetValue(nativeThreadId, out slot) ? RecentMessages(slot) : "(空)";
+        }
+
+        private static string RecentMessages(ThreadTraceSlot slot)
         {
             var sb = new StringBuilder();
+            int next = slot.RecentNext;
             for (int k = 0; k < RecentCount; k++)
             {
-                int i = (_recentNext + k) & (RecentCount - 1);
-                uint m = _recentMsg[i];
+                int i = (next + k) & (RecentCount - 1);
+                uint m = slot.RecentMsg[i];
                 if (m == 0) continue;
                 if (sb.Length > 0) sb.Append(' ');
-                sb.Append("0x").Append(m.ToString("X")).Append("(w=").Append(_recentWParam[i]).Append(')');
+                sb.Append("0x").Append(m.ToString("X")).Append("(w=").Append(slot.RecentWParam[i]).Append(')');
             }
             return sb.Length == 0 ? "(空)" : sb.ToString();
         }
-
-        private static volatile string _step;
 
         /// <summary>
         /// Called by <see cref="SystemInfo.TrimMemory"/> right before its forced GC. The reported
@@ -263,18 +308,19 @@ namespace task_monitor
                     sb.AppendLine();
                 }
 
-                // What this thread was doing: the ring survives the missing managed frame.
+                // What this thread was doing: its own ring survives the missing managed frame.
+                var slot = CurrentTraceSlot;
                 sb.Append("  最近消息(旧→新)=");
-                int start = _recentNext & (RecentCount - 1);
+                int start = slot.RecentNext & (RecentCount - 1);
                 for (int k = 0; k < RecentCount; k++)
                 {
                     int i = (start + k) & (RecentCount - 1);
                     if (k > 0) sb.Append(" → ");
-                    sb.Append("0x").Append(_recentMsg[i].ToString("X")).Append("(w=").Append(_recentWParam[i]).Append(')');
+                    sb.Append("0x").Append(slot.RecentMsg[i].ToString("X")).Append("(w=").Append(slot.RecentWParam[i]).Append(')');
                 }
                 sb.AppendLine();
 
-                sb.Append("  当前步骤=").Append(_step ?? "(未标记)");
+                sb.Append("  当前步骤=").Append(slot.Step ?? "(未标记)");
                 long sinceTrim = SinceTrimMs;
                 sb.Append("  距上次内存回收(GC)=").Append(sinceTrim < 0 ? "本次运行未发生" : sinceTrim + "ms");
                 sb.AppendLine();

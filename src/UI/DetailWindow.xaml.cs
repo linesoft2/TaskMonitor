@@ -36,14 +36,27 @@ namespace task_monitor
     /// </summary>
     public partial class DetailWindow : Window
     {
-        private readonly TaskbarWindow _owner;
+        private readonly SamplingController _sampling;
+        private TaskbarWindow _owner;
         private bool _dark;
         private int _column = -1;
         private bool _dismissed;
         private IDetailView _current;
 
-        public DetailWindow(TaskbarWindow owner)
+        internal TaskbarWindow Anchor => _owner;
+
+        internal void DetachAnchor(TaskbarWindow anchor)
         {
+            if (!ReferenceEquals(_owner, anchor)) return;
+            _owner = null;
+            PinButton.IsEnabled = false;
+        }
+
+        internal DetailWindow(SamplingController sampling) : this(null, sampling) { }
+
+        internal DetailWindow(TaskbarWindow owner, SamplingController sampling)
+        {
+            _sampling = sampling ?? throw new ArgumentNullException(nameof(sampling));
             InitializeComponent();
             _owner = owner;
 
@@ -150,7 +163,7 @@ namespace task_monitor
 
         private void DetailWindow_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
-            // Updates arrive via the taskbar's push (App.SnapshotChanged → Refresh);
+            // Updates arrive via the shared sampler's push (App.SnapshotChanged → Refresh);
             // just do one immediate refresh on show.
             if (IsVisible) Refresh();
         }
@@ -242,6 +255,7 @@ namespace task_monitor
         // ---------- Column switching ----------
         public void ShowColumn(int column)
         {
+            if (_owner == null) throw new InvalidOperationException("DetailWindow has no taskbar anchor.");
             _column = column;
             _current = column switch
             {
@@ -256,7 +270,7 @@ namespace task_monitor
             // wlanapi is location-sensitive, so this is its sole trigger; the idle sampler path
             // never calls it, which keeps the taskbar location indicator off otherwise. Prewarm
             // builds views directly (not via ShowColumn), so this never fires at startup.
-            if (column == 4) _owner.RequestWifiDetails();
+            if (column == 4) _sampling.RequestWifiDetails();
             ContentHost.Content = _current;
 
             // Park the pin toggle in the fresh view's header slot (right of its title).
@@ -278,6 +292,11 @@ namespace task_monitor
             // process foreground rights, so this succeeds).
             var hwnd = new WindowInteropHelper(this).Handle;
             if (hwnd != IntPtr.Zero) WindowInterop.SetForegroundWindow(hwnd);
+            PositionNearTaskbar(column);
+            // The HWND was born offscreen, so this first move can synchronously deliver
+            // WM_DPICHANGED and rescale it to the clicked monitor. Flush that layout, then
+            // anchor again using the FINAL physical size; the first pass only chooses the DPI.
+            UpdateLayout();
             PositionNearTaskbar(column);
             EnsureTopmost();
             // Win10: force one more present now that the window sits at its final on-screen
@@ -370,7 +389,9 @@ namespace task_monitor
         // ---------- Placement: next to the taskbar's screen edge, aligned to the column ----------
         private void PositionNearTaskbar(int column)
         {
-            IntPtr overlay = _owner.OverlayHwnd;
+            var owner = _owner;
+            if (owner == null) return;
+            IntPtr overlay = owner.OverlayHwnd;
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
             if (overlay == IntPtr.Zero || hwnd == IntPtr.Zero) return;
 
@@ -393,9 +414,9 @@ namespace task_monitor
                 // Columns aren't equal width — centre the popup on the clicked column's
                 // true centre. The overlay's layout follows the sampling switches (hidden
                 // metrics are gone), so both numbers come from the owner's live layout.
-                double logicalWidth = _owner.LogicalWidth;
+                double logicalWidth = owner.LogicalWidth;
                 if (logicalWidth <= 0) return;   // every metric off — nowhere to anchor
-                double ratio = _owner.ColumnCenter(column) / logicalWidth;
+                double ratio = owner.ColumnCenter(column) / logicalWidth;
                 double centerX = orect.left + (orect.right - orect.left) * ratio;
                 left = (int)Math.Round(centerX - w / 2.0);
                 top = edge == 0 ? orect.top - h - 8      // just above a bottom taskbar row
@@ -404,9 +425,9 @@ namespace task_monitor
             else
             {
                 // Side-docked (vertical) taskbar: centre on the column strip's Y centre.
-                double logicalHeight = _owner.LogicalHeight;
+                double logicalHeight = owner.LogicalHeight;
                 if (logicalHeight <= 0) return;
-                double ratio = _owner.ColumnCenterY(column) / logicalHeight;
+                double ratio = owner.ColumnCenterY(column) / logicalHeight;
                 double centerY = orect.top + (orect.bottom - orect.top) * ratio;
                 top = (int)Math.Round(centerY - h / 2.0);
                 left = edge == 2 ? orect.right + 8       // right of a left-docked taskbar
@@ -437,8 +458,8 @@ namespace task_monitor
         // ---------- Live data (refresh the hosted view) ----------
         internal void Refresh()
         {
-            var s = _owner.LatestSnapshot;
-            if (s == null) return; // overlay hasn't sampled yet
+            var s = _sampling.LatestSnapshot;
+            if (s == null) return; // sampler hasn't produced a snapshot yet
             _current?.Refresh(s);
         }
 
@@ -490,8 +511,8 @@ namespace task_monitor
             // unpinned → the flyout is open again, so its column is selected (restores
             // the "flyout open ⟺ column selected" invariant; the next click toggles it
             // closed instead of tearing down + reopening).
-            if (pinned) _owner.RequestDeselect(_column);
-            else _owner.RequestSelect(_column);
+            if (pinned) _owner?.RequestDeselect(_column);
+            else _owner?.RequestSelect(_column);
             PinIcon.Icon = pinned ? FluentSystemIcons.Pin_16_Filled : FluentSystemIcons.Pin_16_Regular;
             PinButton.ToolTip = pinned ? "取消固定" : "固定";
             PinStateChanged?.Invoke(this, pinned);
@@ -543,7 +564,7 @@ namespace task_monitor
             // A pinned window keeps living on focus loss — it closes via its ✕ button.
             if (_dismissed || IsPinned) return;
             _dismissed = true;
-            _owner.RequestDeselect(_column);
+            _owner?.RequestDeselect(_column);
             Close();
         }
 
@@ -552,7 +573,7 @@ namespace task_monitor
             // If the close didn't come from the deactivate path (✕ button, Alt+F4, App
             // teardown), the overlay may still be highlighting our column — clear it.
             // Column-aware, so it's a no-op if the selection has since moved on.
-            if (!_dismissed) _owner.RequestDeselect(_column);
+            if (!_dismissed) _owner?.RequestDeselect(_column);
             // New window per open: allow real destruction. Flag dismissed so a
             // deactivation fired during close is a no-op.
             _dismissed = true;

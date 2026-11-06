@@ -5,11 +5,19 @@ AGENTS.md's gotcha index; this file carries the unwinding behind them, plus the 
 packaging and layout facts that would otherwise sit in the map. When this file and the code
 disagree, the code wins — fix this file.
 
-## Two threads, one process
+## One process: UI + sampling + N overlay threads
 
-- **Taskbar overlay** — a native Win32 window owned by `TaskbarWindow` on a dedicated STA
-  thread with its own message loop, rendered with DirectN, embedded into the taskbar via
-  `SetParent`. 3 visual groups → **5 hit slots** (0=CPU 1=内存 2=磁盘 3=GPU 4=网络); `WndProc`
+- **SamplingController** — a dedicated STA thread owns the only `SystemSampler` and the latest
+  snapshot. It never belongs to an overlay HWND, so display changes and Explorer restarts do not
+  re-register SRUM or reset sampling history. It is retired only after a sampling failure or on exit.
+- **TaskbarOverlayManager** — reconciles the selected displays into one `TaskbarWindow` + STA
+  thread + native HWND per target. `TaskbarDisplayCatalog` maps stable monitor interface IDs to
+  the current `Shell_TrayWnd` / `Shell_SecondaryTrayWnd`; display events plus a low-frequency rescan
+  cover hotplug, primary changes and shell changes. A selected secondary never silently falls back
+  to primary; only an entirely unusable selection gets the temporary primary fallback.
+- **Taskbar overlay** — each target has a native Win32 window rendered with DirectN and embedded
+  into ITS taskbar via `SetParent`. `Start(target)` re-resolves the display's current taskbar on
+  every rebuild. 3 visual groups → **5 hit slots** (0=CPU 1=内存 2=磁盘 3=GPU 4=网络); `WndProc`
   does the 2D hit-test (left-click toggles a popup, right-click the menu). Slot geometry is
   DYNAMIC (`ComputeLayout` from the sampling mask): the visible stacked metrics pack into the
   two-row grid in their fixed order — a hidden metric leaves no hole (空缺补齐; an odd count's
@@ -48,9 +56,10 @@ disagree, the code wins — fix this file.
     the top corner / above Start when 靠左显示) since it has no band to shrink. `DetailWindow`
     anchors its popup to the taskbar's screen edge (`GetTaskbarEdge`), and an orientation flip
     re-docks live at runtime (`ReconfigureOrientation`).
-  - Lifetime: `Start()` first waits for a real taskbar, and ANY return from `Start()` makes App
-    re-enter it after 2s to recreate the overlay (gotchas §2).
-  - **悬浮模式 (设置 → 外观)**: the same window class, layout, drawing, hit-testing and sampler,
+  - Lifetime: `Start()` waits for the target taskbar (cancellable). ANY return makes the manager's
+    per-target loop re-resolve and re-enter after 2s; deselected/superseded entries cannot revive
+    themselves (gotchas §2). Exit stops and joins every overlay before stopping the sampler.
+  - **悬浮模式 (设置 → 外观)**: ONE window class instance, layout, drawing and shared snapshot,
     but NOT reparented — a top-level, draggable, topmost-by-default desktop widget whose body is
     its OWN drawn card (the detail popup's tint, no blur: the accent material could only be
     shaped by the DWM frame that carries the drop shadow), and the taskbar keeps no copy. The
@@ -66,39 +75,39 @@ disagree, the code wins — fix this file.
 
 ## Cross-thread contract
 
-All on `TaskbarWindow`, set by `App`, marshaled to the UI thread via `Dispatcher.BeginInvoke`:
+`App` owns the controller and manager; UI callbacks hop through `Dispatcher.BeginInvoke`:
 
-- Taskbar→UI: `Action<int> ToggleCallback` (slot 0–4 or -1), `RightClickRequested`,
-  `SnapshotChanged`, `LatestSnapshot`, `FloatingPositionChanged(x, y)` (a drag ended; App
-  persists it), `FloatingDragged(dx, dy)` (each drag step — App moves every open detail window by
-  it, so the pair travels together).
-- UI→taskbar: `RequestDeselect(int)` (only if that column is still selected), `RequestSelect(int)`,
-  `SetColumnClickEnabled(int, bool)`, `SetPlacement(onLeft, snapToStart)`, `SetSampleInterval(ms)`,
-  `SetMetricSamplingMask(mask)`, `SetMergeSamePathProcesses(bool)`,
-  `SetDiskDisplay`/`SetGpuDisplay`/`SetNetAdapter`/`SetPublicIpLookup`/`SetClashApi` (all five:
-  [`settings-plumbing.md`](settings-plumbing.md)), `SetFloatingMode(on, x, y)`/
-  `SetFloatingTopmost(bool)`/`SetFloatingEdgeHide(bool)`/`SetFloatingFullscreenHide(bool)`/
-  `SetFloatingDark(bool)`/`SetFloatingOpacity(double)` (悬浮模式: `settings-plumbing.md` §8),
-  `SetFloatingKeepOut(hwnds)` (the open detail windows — the widget steps aside for them;
-  gotchas §36), `OverlayHwnd`.
+- Overlay→UI: `Action<TaskbarWindow,int> ToggleCallback` (the CLICKED source + slot),
+  `RightClickRequested`, floating position/drag callbacks, and `AnchorRemoved`. The source is
+  captured per entry; stale entries are ignored.
+- Sampling→overlays/UI: controller publishes one `SnapshotChanged`. The manager calls
+  `PublishSnapshot` for every overlay (each applies it on its own HWND thread over
+  `WM_APP_SNAPSHOT`), while App refreshes the detail/settings views exactly once.
+- UI→manager: visual/layout settings are broadcast to every overlay; sampler settings go to the
+  controller once. Floating settings go only to the single floating entry. Pin click masks are
+  broadcast, while select/deselect and popup placement use the clicked source.
+- Per-window native state remains in `RenderState` (`GWLP_USERDATA`). Guarded foreign-window
+  calls have per-calling-thread channels; CrashTrace steps/message rings are also per native
+  thread. `SetParent` remains inline on the owning overlay thread (gotchas §43).
 
 ## Single source of truth (push, not poll)
 
-`TaskbarWindow` owns the **only** `SystemSampler` (1s tick by default — configurable 0.5/1/2s via
-设置→采样间隔, re-armed over `WM_APP_SET_INTERVAL`; `volatile` publish, `SnapshotChanged`). Popups
-read `LatestSnapshot` and have no timer. The cadence is stamped onto every snapshot
-(`SampleIntervalMs`) so the "N 秒前" chart tooltips scale correctly. (CPU% also needs an old
-baseline — a fresh sampler reads ~0%.) A metric switched off (设置→采样) skips its samplers
-entirely, HIDES its overlay slot (the group/window reflows to fill the space), suppresses its
-column press, and primes its delta baselines for one tick when re-enabled.
+`SamplingController` owns the **only** `SystemSampler` (1s default, configurable 0.5/1/2s).
+`SystemSnapshot` is published by reference with `SampleIntervalMs` stamped on it; detail windows
+read the controller, never run their own sampling timer. A metric switched off skips its samplers,
+hides every overlay's corresponding slot and primes baselines when re-enabled. Initial overlays
+render a safe empty snapshot if the first sample has not arrived; they never sample on their own.
 
-**The tick also carries the stall diagnostics** (reported 卡死 with an empty log): it stamps
-`LastTickTickCount`, which App's UI-thread watchdog reads (`CheckOverlayHealth` — reports a
-stalled tick and a vanished overlay HWND, the two states this thread cannot report itself), and
-`SystemSampler.Timed` logs any sampler step ≥150 ms by name (a USB disk that slept inside
-`IOCTL_DISK_PERFORMANCE` is the known suspect). Don't drop either as dead code.
+Sampling and every overlay have independent `LastTickTickCount` heartbeats. App's watchdog checks
+each expected thread, excluding cancelled entries and those legitimately waiting for a taskbar.
+`SystemSampler.Timed` still names slow sampler steps; `CrashTrace` and native stacks identify the
+specific stalled thread. SRUM unregistration belongs to sampler retirement, never HWND teardown.
 
 ## DetailWindow = shell + per-metric view
+
+Each window gets a `SamplingController` for data/Wi-Fi and an optional `TaskbarWindow` anchor for
+placement and selection. Prewarm has no anchor. Removing a display closes its transient flyout;
+a pinned window remains live on controller data but detaches the dead anchor and disables pinning.
 
 A borderless acrylic shell (FluentWpfCore `WindowMaterial`, `UseWindowComposition=True`) hosting
 one `IDetailView` (Cpu/Ram/Disk/Gpu/Net). Fresh window+view per open, destroyed on dismiss (never
@@ -120,9 +129,10 @@ Implementation in `DetailWindow`, comments at the sites:
 - Pinning grows a `TitleBarBand` out of the top (composed from `TitleBarButton`, NOT iNKORE's
   `TitleBarControl` — standalone it NREs; the ✕ works only because DetailWindow's ctor registers
   the `SystemCommands.CloseWindowCommand` binding). Unpin restores the saved pre-pin position.
-- While pinned, the overlay column is **press-disabled** (re-enabled on unpin AND close) and
-  **deselected**; unpin re-selects ("flyout open ⟺ column selected"). `Window_Closing` requests
-  the column-aware deselect so a newer selection is never wiped.
+- While pinned, that column is **press-disabled on every overlay** (re-enabled on unpin AND close)
+  and deselected on the anchor; unpin re-selects it. `Window_Closing` requests a column-aware
+  deselect so a newer selection is never wiped. There is still at most one pinned window per column
+  globally, not one per display.
 
 ## Startup: elevation gate → mutex
 
@@ -133,8 +143,12 @@ instance. Unelevated + consented → `runas` self-relaunch; never asked → `Con
 persists `elevationConsent: true`); 不允许/UAC-cancel exits — the process never runs degraded
 (SRUM per-process net needs admin). Consent persists to **`settings.yaml` in the exe directory**
 (`AppSettings`, YamlDotNet — the single store for ALL settings; the file + `.tmp`/`.bad` siblings
-are runtime artifacts). The manifest's `dpiAware=true` keeps the overlay's D2D text sharp — don't
-drop it. Exercising the consent dialog needs an unelevated launch (`explorer.exe
+are runtime artifacts). The manifest declares PerMonitorV2 and `App`'s static constructor
+enables WPF's per-window DPI scaling before any window exists (the release ships no `.config`),
+so `SettingsWindow` and every `DetailWindow` follow their own monitor.
+Each native overlay STA also explicitly opts into PerMonitorV2 for its `TaskbarWindow.Start`
+lifetime, keeping D2D text, monitor rects and physical-pixel coordinates correct on mixed-DPI
+displays. Exercising the consent dialog needs an unelevated launch (`explorer.exe
 "...task_monitor.exe"`); the UAC prompt lives on the secure desktop and cannot be automated.
 
 **Single-instance:** a named `Global\` mutex right after the gate
@@ -170,16 +184,18 @@ physical only, so XAML `x:Class`/`xmlns:local` never reference a folder.
 ```
 docs/            gotchas.md · architecture.md · settings-plumbing.md · scroll-stack.md
 src/
-  App.xaml(.cs)    entry: elevation gate → mutex → taskbar thread; prewarm; menu host; idle GC
+  App.xaml(.cs)    entry: elevation gate → mutex → controller/manager; prewarm; menu host; idle GC
   Logger.cs        file log — logs/task_monitor-yyyy-MM-dd.log next to the exe (gotchas §5)
   AppSettings.cs   settings.yaml store — every key documented per-property in the file
   VersionInfo.cs   版本号读取口（读 SDK 按 csproj `<Version>` 生成的 AssemblyInformationalVersion）
   UpdateChecker.cs 启动时检查更新（gotchas §33）
   StartupTask.cs   开机自启动 logon task (schtasks /XML) — the task itself is the state (gotchas §21)
-  Sampling/        per-metric samplers + the SystemSampler facade (its header lists the 12) + ServiceHostMap
+  Sampling/        per-metric samplers + SystemSampler facade + SamplingController (unique owner) + ServiceHostMap
   Interop/         P/Invoke boundary per native API (each file's header says what it covers)
   UI/
-    TaskbarWindow.cs        overlay + WndProc; owns the SystemSampler
+    TaskbarWindow.cs        one overlay + WndProc + per-HWND RenderState (no sampler ownership)
+    TaskbarOverlayManager.cs selected-display entries, rebuild, settings broadcast, exit joins
+    TaskbarDisplayCatalog.cs monitor IDs ↔ current taskbar HWNDs
     DetailWindow.xaml(.cs)  acrylic shell hosting one IDetailView
     ConsentDialog           first-run UAC-consent prompt (iNKORE modern window, unelevated)
     UpdateAvailableDialog   发现新版本提醒 (iNKORE modern window — 立即更新/不再提醒/稍后)
