@@ -1,0 +1,416 @@
+<Window x:Class="task_monitor.StartupGuideWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+        Title="TaskMonitor 初始设置"
+        Width="720"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+        ui:WindowHelper.UseModernWindowStyle="True"
+        ui:WindowHelper.SystemBackdropType="Mica"
+        ui:TitleBar.ExtendViewIntoTitleBar="True"
+        ui:TitleBar.Height="32">
+    <Window.Resources>
+        <Style x:Key="GuideCardStyle" TargetType="{x:Type RadioButton}">
+            <Setter Property="Background" Value="{DynamicResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="Padding" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type RadioButton}">
+                        <Border x:Name="Card"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <Grid>
+                                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                <Border x:Name="SelectionBadge"
+                                        Width="22" Height="22"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Top"
+                                        Background="{DynamicResource AccentFillColorDefaultBrush}"
+                                        CornerRadius="11"
+                                        Visibility="Collapsed">
+                                    <TextBlock Text="✓"
+                                               Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"
+                                               FontSize="12"
+                                               FontWeight="SemiBold"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                                </Border>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Card" Property="Background"
+                                        Value="{DynamicResource CardBackgroundFillColorSecondaryBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Card" Property="Background"
+                                        Value="{DynamicResource ControlFillColorTertiaryBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Card" Property="BorderBrush"
+                                        Value="{DynamicResource AccentFillColorDefaultBrush}" />
+                                <Setter TargetName="Card" Property="BorderThickness" Value="2" />
+                                <Setter TargetName="SelectionBadge" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Card" Property="BorderBrush"
+                                        Value="{DynamicResource FocusStrokeColorOuterBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Card" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="DiagramFrameStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource LayerFillColorAltBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="WindowsLogoStyle" TargetType="Path">
+            <Setter Property="Data" Value="M0 14v14h28V0H0zm30 0v14h28V0H30zM0 44v14h28V30H0zm30 0v14h28V30H30z" />
+            <Setter Property="Fill" Value="#0078D4" />
+            <Setter Property="Stretch" Value="Uniform" />
+            <Setter Property="Width" Value="12" />
+            <Setter Property="Height" Value="12" />
+        </Style>
+        <Style x:Key="OptionTitleStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,14,0,5" />
+        </Style>
+        <Style x:Key="OptionDescriptionStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+            <Setter Property="TextAlignment" Value="Center" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="LineHeight" Value="18" />
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid Margin="32,48,32,24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <StackPanel x:Name="ModePage" Grid.Row="0">
+                <TextBlock Text="欢迎使用 TaskMonitor"
+                           Style="{DynamicResource TitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="先选择你喜欢的显示方式"
+                           Style="{DynamicResource BodyTextBlockStyle}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           HorizontalAlignment="Center"
+                           Margin="0,8,0,24" />
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                    <RadioButton x:Name="FloatingOption"
+                                 GroupName="DisplayMode"
+                                 Style="{StaticResource GuideCardStyle}"
+                                 Width="300" Height="268"
+                                 Margin="0,0,12,0">
+                        <StackPanel>
+                            <Border Style="{StaticResource DiagramFrameStyle}" Width="254" Height="140">
+                                <Canvas Width="232" Height="118">
+                                    <Border Width="232" Height="96"
+                                            Background="{DynamicResource AccentFillColorTertiaryBrush}" />
+                                    <Border Canvas.Left="18" Canvas.Top="12" Width="126" Height="66"
+                                            Background="{DynamicResource LayerFillColorDefaultBrush}"
+                                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                            BorderThickness="1" CornerRadius="4">
+                                        <StackPanel Margin="10,8">
+                                            <Border Width="54" Height="5" HorizontalAlignment="Left"
+                                                    Background="{DynamicResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Border Width="88" Height="4" HorizontalAlignment="Left" Margin="0,10,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                            <Border Width="72" Height="4" HorizontalAlignment="Left" Margin="0,6,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Canvas.Left="100" Canvas.Top="46" Width="124" Height="48"
+                                            Background="{DynamicResource LayerFillColorAltBrush}"
+                                            BorderBrush="{DynamicResource AccentFillColorDefaultBrush}"
+                                            BorderThickness="1.5" CornerRadius="6">
+                                        <StackPanel VerticalAlignment="Center">
+                                            <TextBlock Text="CPU 24%   内存 58%"
+                                                       FontSize="8" TextAlignment="Center" />
+                                            <TextBlock Text="网络  ↑1.2M  ↓356K"
+                                                       FontSize="8" TextAlignment="Center" Margin="0,5,0,0" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Canvas.Top="96" Width="232" Height="22"
+                                            Background="{DynamicResource LayerFillColorAltBrush}"
+                                            BorderBrush="{DynamicResource ControlStrokeColorSecondaryBrush}"
+                                            BorderThickness="0,1,0,0" />
+                                    <Path Canvas.Left="103" Canvas.Top="100"
+                                          Style="{StaticResource WindowsLogoStyle}" />
+                                    <TextBlock Canvas.Left="204" Canvas.Top="101" Text="⌃"
+                                               FontFamily="Segoe UI Symbol" FontSize="11"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                </Canvas>
+                            </Border>
+                            <TextBlock Text="悬浮窗" Style="{StaticResource OptionTitleStyle}" />
+                            <TextBlock Text="自由拖动到桌面任意位置，支持置顶、贴边隐藏和透明度调节。"
+                                       Style="{StaticResource OptionDescriptionStyle}" />
+                        </StackPanel>
+                    </RadioButton>
+
+                    <RadioButton x:Name="TaskbarOption"
+                                 GroupName="DisplayMode"
+                                 Style="{StaticResource GuideCardStyle}"
+                                 Width="300" Height="268"
+                                 IsChecked="True">
+                        <StackPanel>
+                            <Border Style="{StaticResource DiagramFrameStyle}" Width="254" Height="140">
+                                <Canvas Width="232" Height="118">
+                                    <Border Width="232" Height="96"
+                                            Background="{DynamicResource AccentFillColorTertiaryBrush}" />
+                                    <Border Canvas.Left="28" Canvas.Top="14" Width="176" Height="66"
+                                            Background="{DynamicResource LayerFillColorDefaultBrush}"
+                                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                            BorderThickness="1" CornerRadius="4">
+                                        <StackPanel Margin="12,9">
+                                            <Border Width="66" Height="5" HorizontalAlignment="Left"
+                                                    Background="{DynamicResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Border Width="126" Height="4" HorizontalAlignment="Left" Margin="0,10,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                            <Border Width="102" Height="4" HorizontalAlignment="Left" Margin="0,6,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Canvas.Top="96" Width="232" Height="22"
+                                            Background="{DynamicResource LayerFillColorAltBrush}"
+                                            BorderBrush="{DynamicResource ControlStrokeColorSecondaryBrush}"
+                                            BorderThickness="0,1,0,0" />
+                                    <Path Canvas.Left="102" Canvas.Top="100"
+                                          Style="{StaticResource WindowsLogoStyle}" />
+                                    <Border Canvas.Left="126" Canvas.Top="98" Width="84" Height="18"
+                                            Background="{DynamicResource AccentFillColorDefaultBrush}"
+                                            CornerRadius="3">
+                                        <TextBlock Text="CPU 24%  内存 58%  网络"
+                                                   Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"
+                                                   FontSize="7" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <TextBlock Canvas.Left="214" Canvas.Top="101" Text="⌃"
+                                               FontFamily="Segoe UI Symbol" FontSize="11"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                </Canvas>
+                            </Border>
+                            <TextBlock Text="任务栏窗口" Style="{StaticResource OptionTitleStyle}" />
+                            <TextBlock Text="嵌入任务栏固定显示，不额外占用桌面空间，点击即可查看详情。"
+                                       Style="{StaticResource OptionDescriptionStyle}" />
+                        </StackPanel>
+                    </RadioButton>
+                </StackPanel>
+
+                <ui:InfoBar x:Name="TaskbarWarning"
+                            Title="兼容性提示"
+                            Message="安装第三方任务栏扩展（如 ExplorerPatcher、StartAllBack）可能与本软件冲突，导致窗口位置异常或无法正常显示。"
+                            Severity="Warning"
+                            IsOpen="True"
+                            IsClosable="False"
+                            Width="612"
+                            HorizontalAlignment="Center"
+                            Margin="0,16,0,0" />
+            </StackPanel>
+
+            <StackPanel x:Name="PlacementPage" Grid.Row="0" Visibility="Collapsed">
+                <TextBlock Text="放在任务栏的哪个位置？"
+                           Style="{DynamicResource TitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="蓝色区域表示任务栏窗口"
+                           Style="{DynamicResource BodyTextBlockStyle}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           HorizontalAlignment="Center"
+                           Margin="0,8,0,24" />
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                    <RadioButton x:Name="LeftOption"
+                                 GroupName="TaskbarPlacement"
+                                 Style="{StaticResource GuideCardStyle}"
+                                 Width="196" Height="250"
+                                 Margin="0,0,12,0"
+                                 IsChecked="True">
+                        <StackPanel>
+                            <Border Style="{StaticResource DiagramFrameStyle}" Width="164" Height="116">
+                                <Canvas Width="148" Height="94">
+                                    <Border Width="148" Height="70"
+                                            Background="{DynamicResource AccentFillColorTertiaryBrush}" />
+                                    <Border Canvas.Left="30" Canvas.Top="10" Width="88" Height="44"
+                                            Background="{DynamicResource LayerFillColorDefaultBrush}"
+                                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                            BorderThickness="1" CornerRadius="4">
+                                        <StackPanel Margin="8,6">
+                                            <Border Width="34" Height="4" HorizontalAlignment="Left"
+                                                    Background="{DynamicResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Border Width="58" Height="3" HorizontalAlignment="Left" Margin="0,7,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                            <Border Width="48" Height="3" HorizontalAlignment="Left" Margin="0,5,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Canvas.Top="70" Width="148" Height="24"
+                                            Background="{DynamicResource LayerFillColorAltBrush}"
+                                            BorderBrush="{DynamicResource ControlStrokeColorSecondaryBrush}"
+                                            BorderThickness="0,1,0,0" />
+                                    <Border Canvas.Left="4" Canvas.Top="73" Width="50" Height="18"
+                                            Background="{DynamicResource AccentFillColorDefaultBrush}" CornerRadius="3">
+                                        <TextBlock Text="CPU  内存" FontSize="7"
+                                                   Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <Path Canvas.Left="79" Canvas.Top="74"
+                                          Style="{StaticResource WindowsLogoStyle}" />
+                                    <TextBlock Canvas.Left="130" Canvas.Top="75" Text="⌃"
+                                               FontFamily="Segoe UI Symbol" FontSize="11"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                </Canvas>
+                            </Border>
+                            <TextBlock Text="任务栏最左端" Style="{StaticResource OptionTitleStyle}" />
+                            <TextBlock Text="靠近任务栏左边缘；竖直任务栏则显示在顶部。"
+                                       Style="{StaticResource OptionDescriptionStyle}" />
+                        </StackPanel>
+                    </RadioButton>
+
+                    <RadioButton x:Name="StartOption"
+                                 GroupName="TaskbarPlacement"
+                                 Style="{StaticResource GuideCardStyle}"
+                                 Width="196" Height="250"
+                                 Margin="0,0,12,0">
+                        <StackPanel>
+                            <Border Style="{StaticResource DiagramFrameStyle}" Width="164" Height="116">
+                                <Canvas Width="148" Height="94">
+                                    <Border Width="148" Height="70"
+                                            Background="{DynamicResource AccentFillColorTertiaryBrush}" />
+                                    <Border Canvas.Left="30" Canvas.Top="10" Width="88" Height="44"
+                                            Background="{DynamicResource LayerFillColorDefaultBrush}"
+                                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                            BorderThickness="1" CornerRadius="4">
+                                        <StackPanel Margin="8,6">
+                                            <Border Width="34" Height="4" HorizontalAlignment="Left"
+                                                    Background="{DynamicResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Border Width="58" Height="3" HorizontalAlignment="Left" Margin="0,7,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                            <Border Width="48" Height="3" HorizontalAlignment="Left" Margin="0,5,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Canvas.Top="70" Width="148" Height="24"
+                                            Background="{DynamicResource LayerFillColorAltBrush}"
+                                            BorderBrush="{DynamicResource ControlStrokeColorSecondaryBrush}"
+                                            BorderThickness="0,1,0,0" />
+                                    <Border Canvas.Left="25" Canvas.Top="73" Width="46" Height="18"
+                                            Background="{DynamicResource AccentFillColorDefaultBrush}" CornerRadius="3">
+                                        <TextBlock Text="CPU  内存" FontSize="7"
+                                                   Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <Path Canvas.Left="76" Canvas.Top="74"
+                                          Style="{StaticResource WindowsLogoStyle}" />
+                                    <Border Canvas.Left="94" Canvas.Top="78" Width="7" Height="7"
+                                            Background="{DynamicResource TextFillColorTertiaryBrush}" CornerRadius="2" />
+                                    <Border Canvas.Left="106" Canvas.Top="78" Width="7" Height="7"
+                                            Background="{DynamicResource TextFillColorTertiaryBrush}" CornerRadius="2" />
+                                    <TextBlock Canvas.Left="130" Canvas.Top="75" Text="⌃"
+                                               FontFamily="Segoe UI Symbol" FontSize="11"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                </Canvas>
+                            </Border>
+                            <TextBlock Text="开始按钮旁" Style="{StaticResource OptionTitleStyle}" />
+                            <TextBlock Text="显示在开始按钮左侧，仅适用于 Windows 11 居中任务栏。"
+                                       Style="{StaticResource OptionDescriptionStyle}" />
+                        </StackPanel>
+                    </RadioButton>
+
+                    <RadioButton x:Name="TrayOption"
+                                 GroupName="TaskbarPlacement"
+                                 Style="{StaticResource GuideCardStyle}"
+                                 Width="196" Height="250">
+                        <StackPanel>
+                            <Border Style="{StaticResource DiagramFrameStyle}" Width="164" Height="116">
+                                <Canvas Width="148" Height="94">
+                                    <Border Width="148" Height="70"
+                                            Background="{DynamicResource AccentFillColorTertiaryBrush}" />
+                                    <Border Canvas.Left="30" Canvas.Top="10" Width="88" Height="44"
+                                            Background="{DynamicResource LayerFillColorDefaultBrush}"
+                                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                            BorderThickness="1" CornerRadius="4">
+                                        <StackPanel Margin="8,6">
+                                            <Border Width="34" Height="4" HorizontalAlignment="Left"
+                                                    Background="{DynamicResource ControlStrongStrokeColorDefaultBrush}" />
+                                            <Border Width="58" Height="3" HorizontalAlignment="Left" Margin="0,7,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                            <Border Width="48" Height="3" HorizontalAlignment="Left" Margin="0,5,0,0"
+                                                    Background="{DynamicResource ControlStrokeColorSecondaryBrush}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Canvas.Top="70" Width="148" Height="24"
+                                            Background="{DynamicResource LayerFillColorAltBrush}"
+                                            BorderBrush="{DynamicResource ControlStrokeColorSecondaryBrush}"
+                                            BorderThickness="0,1,0,0" />
+                                    <Path Canvas.Left="53" Canvas.Top="74"
+                                          Style="{StaticResource WindowsLogoStyle}" />
+                                    <Border Canvas.Left="80" Canvas.Top="73" Width="46" Height="18"
+                                            Background="{DynamicResource AccentFillColorDefaultBrush}" CornerRadius="3">
+                                        <TextBlock Text="CPU  内存" FontSize="7"
+                                                   Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <TextBlock Canvas.Left="132" Canvas.Top="75" Text="⌃"
+                                               FontFamily="Segoe UI Symbol" FontSize="11"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                </Canvas>
+                            </Border>
+                            <TextBlock Text="靠近系统托盘" Style="{StaticResource OptionTitleStyle}" />
+                            <TextBlock Text="显示在通知区域左侧，方便配合托盘图标查看。"
+                                       Style="{StaticResource OptionDescriptionStyle}" />
+                        </StackPanel>
+                    </RadioButton>
+                </StackPanel>
+            </StackPanel>
+
+            <Grid Grid.Row="1" Margin="0,24,0,0">
+                <TextBlock Text="之后可在“设置 → 外观”中修改"
+                           Style="{DynamicResource CaptionTextBlockStyle}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="BackButton" Content="上一步"
+                            MinWidth="88" Margin="0,0,8,0"
+                            Visibility="Collapsed" Click="Back_Click" />
+                    <Button Content="跳过" MinWidth="88" Margin="0,0,8,0" IsCancel="True" />
+                    <Button x:Name="PrimaryButton" Content="下一步"
+                            MinWidth="96" Style="{DynamicResource AccentButtonStyle}"
+                            IsDefault="True" Click="Primary_Click" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <Border Height="32" VerticalAlignment="Top" Background="Transparent">
+            <TextBlock Text="TaskMonitor 初始设置"
+                       Style="{DynamicResource CaptionTextBlockStyle}"
+                       Margin="16,0,0,0"
+                       VerticalAlignment="Center"
+                       IsHitTestVisible="False" />
+        </Border>
+    </Grid>
+</Window>

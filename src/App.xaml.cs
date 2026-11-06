@@ -128,6 +128,7 @@ namespace task_monitor
                 _taskbars?.SetFloatingDark(ThemeManager.Current.ActualApplicationTheme == ApplicationTheme.Dark);
             };
 
+            if (ShouldShowStartupGuide()) ShowStartupGuide();
             StartTaskbar();
 
             // 卡死看门狗 — see CheckOverlayHealth. A freeze that heals itself leaves NOTHING
@@ -216,6 +217,7 @@ namespace task_monitor
                 consented = true;
                 Logger.Info("提权门：用户首次同意, 持久化后 runas 自我重启提升权限");
                 _config.ElevationConsent = true;
+                if (_config.IsNewInstall) _config.StartupGuideCompleted = false;
                 TrySaveConfig();        // best effort — a read-only install dir degrades to "ask again"
                 TryRelaunchElevated();
             }
@@ -258,6 +260,35 @@ namespace task_monitor
         {
             try { _config.Save(); }
             catch (Exception ex) { Logger.Warn("settings.yaml 保存失败（下次启动将再询问）", ex); }
+        }
+
+        private bool ShouldShowStartupGuide() =>
+            _config.StartupGuideCompleted == false ||
+            (_config.StartupGuideCompleted == null && _config.IsNewInstall);
+
+        private void ShowStartupGuide()
+        {
+            var displays = TaskbarDisplayCatalog.GetDisplays();
+            var guide = new StartupGuideWindow(SupportsSnapToStart(displays, _config.TaskbarDisplays));
+            if (guide.ShowDialog() == true)
+            {
+                _config.FloatingMode = guide.UseFloatingMode ? true : (bool?)null;
+                if (!guide.UseFloatingMode)
+                {
+                    _config.OverlayOnLeft = guide.OverlayOnLeft ? (bool?)null : false;
+                    _config.OverlaySnapToStart = guide.OverlaySnapToStart ? true : (bool?)null;
+                }
+                string placement = guide.UseFloatingMode ? "悬浮窗"
+                    : guide.OverlaySnapToStart ? "任务栏·开始按钮旁"
+                    : guide.OverlayOnLeft ? "任务栏·最左端" : "任务栏·靠近系统托盘";
+                Logger.Info($"首次启动引导完成：{placement}");
+            }
+            else
+            {
+                Logger.Info("首次启动引导已跳过——使用默认显示方式");
+            }
+            _config.StartupGuideCompleted = true;
+            TrySaveConfig();
         }
 
         private void StartTaskbar()

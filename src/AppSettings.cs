@@ -49,6 +49,16 @@ namespace task_monitor
         public bool? ElevationConsent { get; set; }
 
         /// <summary>
+        /// 首次启动引导状态。null = 旧版配置（不补弹）或尚未标记；false = 新安装已完成提权同意、
+        /// 等待提升后的进程显示向导；true = 已完成或跳过。<see cref="IsNewInstall"/> 区分全新安装与旧配置。
+        /// </summary>
+        public bool? StartupGuideCompleted { get; set; }
+
+        /// <summary>本次启动时 settings.yaml 不存在（或为空）；仅用于首次启动判定，不写入配置文件。</summary>
+        [YamlIgnore]
+        public bool IsNewInstall { get; private set; }
+
+        /// <summary>
         /// Show the taskbar overlay on the LEFT side of the taskbar instead of right of
         /// it. null/true = left (the default); only an explicit false is right. Which spot
         /// "left" means per taskbar family — and Win11's fallback to the right side on a
@@ -337,13 +347,13 @@ namespace task_monitor
         {
             try
             {
-                if (!File.Exists(FilePath)) return new AppSettings();
+                if (!File.Exists(FilePath)) return new AppSettings { IsNewInstall = true };
                 var deserializer = new DeserializerBuilder()
                     .WithNamingConvention(CamelCaseNamingConvention.Instance)
                     .IgnoreUnmatchedProperties()   // tolerate keys from newer builds
                     .Build();
                 return deserializer.Deserialize<AppSettings>(File.ReadAllText(FilePath))
-                       ?? new AppSettings();       // header-only / empty file
+                       ?? new AppSettings { IsNewInstall = true };  // header-only / empty file
             }
             catch (Exception ex)
             {

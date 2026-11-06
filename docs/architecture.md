@@ -134,7 +134,7 @@ Implementation in `DetailWindow`, comments at the sites:
   deselect so a newer selection is never wiped. There is still at most one pinned window per column
   globally, not one per display.
 
-## Startup: elevation gate → mutex
+## Startup: elevation gate → mutex → first-run guide
 
 **The app always runs elevated, self-managed** (manifest `asInvoker`): `App.RunElevationGate`
 (src/App.xaml.cs) runs at the top of `OnStartup`, BEFORE the single-instance mutex — an exiting
@@ -156,6 +156,17 @@ displays. Exercising the consent dialog needs an unelevated launch (`explorer.ex
 across sessions — reachable only elevated, so `SeCreateGlobalPrivilege` is in hand). A second
 instance exits **silently** (the overlay is always visible anyway); a consented second launch still
 UAC-prompts first — inherent to the design.
+
+**First-run guide:** after the mutex/sentinel guard and BEFORE `StartTaskbar`,
+`StartupGuideWindow` (iNKORE modern window + Mica) lets a new user choose 悬浮窗 or 任务栏窗口,
+then the taskbar's 最左端 / 开始按钮旁 / 靠近系统托盘 anchor. The cards' diagrams are XAML
+vector shapes and follow the app theme; 开始按钮旁 is disabled when `SupportsSnapToStart` finds
+no compatible Win11 taskbar. Completing writes the existing `floatingMode` / `overlayOnLeft` /
+`overlaySnapToStart` keys before the first overlay is created; skipping keeps the defaults, and
+both paths write `startupGuideCompleted: true`. `AppSettings.IsNewInstall` is runtime-only and
+true when no/empty settings file existed at load. A fresh unelevated consent writes
+`startupGuideCompleted: false` so the elevated relaunch still shows the guide; an existing
+(legacy) config with no such key never gets a surprise guide after an upgrade.
 
 **The sentinel** is the default way to stop a running instance: this agent shell may be unelevated
 while the app is elevated, and then `taskkill` fails with Access denied (UIPI) — file I/O is not
@@ -184,7 +195,7 @@ physical only, so XAML `x:Class`/`xmlns:local` never reference a folder.
 ```
 docs/            gotchas.md · architecture.md · settings-plumbing.md · scroll-stack.md
 src/
-  App.xaml(.cs)    entry: elevation gate → mutex → controller/manager; prewarm; menu host; idle GC
+  App.xaml(.cs)    entry: elevation gate → mutex → first-run guide → controller/manager; prewarm; menu host; idle GC
   Logger.cs        file log — logs/task_monitor-yyyy-MM-dd.log next to the exe (gotchas §5)
   AppSettings.cs   settings.yaml store — every key documented per-property in the file
   VersionInfo.cs   版本号读取口（读 SDK 按 csproj `<Version>` 生成的 AssemblyInformationalVersion）
@@ -198,6 +209,7 @@ src/
     TaskbarDisplayCatalog.cs monitor IDs ↔ current taskbar HWNDs
     DetailWindow.xaml(.cs)  acrylic shell hosting one IDetailView
     ConsentDialog           first-run UAC-consent prompt (iNKORE modern window, unelevated)
+    StartupGuideWindow      first-run display-mode/placement cards with vector diagrams (iNKORE + Mica)
     UpdateAvailableDialog   发现新版本提醒 (iNKORE modern window — 立即更新/不再提醒/稍后)
     Common/                 formatters · ProcessListTip · ProcessKillMenu (the process lists' right-click 结束进程: list-level menu + confirm card, same rebind-proof pattern as ProcessListTip) · ProcessIconCache (the shared per-exe icon cache) · ChartTipHost/ChartPalette (the shared chart hover tip + colors) · PivotNavButtonFix · FollowTagPanel · the scroll stack
     Details/                the five IDetailViews
