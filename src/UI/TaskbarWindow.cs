@@ -2581,10 +2581,9 @@ namespace task_monitor
         // is where it is. 靠左显示 OFF (the default, and the same "next to the notification
         // area" end as the horizontal one): just ABOVE the tray. ON: the taskbar's far
         // corner — its TOP on a side bar — or, with 贴靠开始按钮, just above the Start button.
-        // The top-corner request is honoured only while the icon cluster demonstrably starts
-        // below us (ClusterTop), which is the same shape as CalcPosition's "no room left of
-        // Start → fall back to the tray side"; the fallback here is the tray end. A
-        // side taskbar's Widgets button does not exist, so the 160px reserve has no analogue.
+        // The user's top anchor is NOT withdrawn when icons occupy that space: overlapping
+        // them is visible and can be corrected in 设置, whereas silently moving to the tray
+        // end makes the selected placement appear broken. Widgets have no vertical reserve.
         // Returns SCREEN y and the parent-relative (y, x); x centres the column grid in the
         // band, whose left edge is already bandX inside the taskbar window.
         private static (int screenY, int relativeY, int relativeX) CalcPositionVertical(
@@ -2598,25 +2597,13 @@ namespace task_monitor
 
             if (onLeft && IsTaskbarCenterAligned())
             {
-                int yrel = -1;
+                int yrel = spacing;
                 if (snapToStart)
                 {
-                    // Snap just above the Start button (the cluster's first item on a side
-                    // taskbar) — follows the centred icon group as it resizes.
-                    IntPtr start = FindClassChild(taskbar, "Start");
-                    if (start != IntPtr.Zero && TryGetWindowRectGuarded(start, 300, out var startRect))
-                        yrel = startRect.top - bandTop - windowH - spacing;
-                }
-                else
-                {
-                    // Far corner. The room check keeps us off a TOP-aligned taskbar's icon
-                    // cluster: without it the widget would land on the Start button.
-                    yrel = spacing;
                     int clusterTop = ClusterTop(taskbar, bandTop, bandH);
-                    if (clusterTop - bandTop < yrel + windowH + spacing) yrel = -1;
+                    yrel = Math.Max(spacing, clusterTop - bandTop - windowH - spacing);
                 }
-                if (yrel >= 0 && yrel + windowH <= bandH)
-                    return (bandTop + yrel, yrel, xrel);
+                return (bandTop + yrel, yrel, xrel);
             }
             // Tray end: our bottom edge just above the notification area (a missing tray
             // falls back to a fixed reserve from the band's end, like CalcPosition's 88 DIP).
@@ -2630,12 +2617,11 @@ namespace task_monitor
             return (bandTop + y, y, xrel);
         }
 
-        // The top edge of a side taskbar's icon cluster — the taskbar's own skeleton windows
-        // (Start, the app-buttons ReBar, the search host), whichever exist and are laid out;
-        // the band's bottom end when none does (the cluster then counts as the whole bar,
-        // which sends a 靠左 request to the tray-end fallback rather than onto the icons).
-        // The Win11 XAML content itself has no window of its own, so this is the best floor
-        // available — it covers Start, which is the cluster's first item on a side bar.
+        // The top edge of a side taskbar's VISIBLE icon cluster — Start, the app-buttons
+        // ReBar and the search host, whichever are visible and have a non-empty rect; the
+        // band's bottom end when none does. Hidden legacy skeleton HWNDs (notably Start on
+        // 26H2) and zero-sized search placeholders are not visual obstacles and must not
+        // participate. GetWindowRect stays guarded like every other foreign-window read.
         private static readonly string[] _clusterClasses = { "Start", "ReBarWindow32", "TrayDummySearchControl" };
 
         private static int ClusterTop(IntPtr taskbar, int bandTop, int bandH)
@@ -2644,7 +2630,7 @@ namespace task_monitor
             foreach (string cls in _clusterClasses)
             {
                 IntPtr h = FindClassChild(taskbar, cls);
-                if (h == IntPtr.Zero) continue;
+                if (h == IntPtr.Zero || !WindowInterop.IsWindowVisible(h)) continue;
                 if (TryGetWindowRectGuarded(h, 300, out var r) && r.bottom > r.top && r.right > r.left)
                     top = Math.Min(top, r.top);
             }
@@ -3697,6 +3683,19 @@ namespace task_monitor
                     int crossW = TaskbarBandCross(taskbar, tr, out int bandX);
                     if (crossW != tr.right - tr.left || bandX != 0)
                         msg += $"。系统保留带=宽{crossW}px x偏移{bandX}（覆盖层按此带宽居中）";
+                    foreach (string cls in _clusterClasses)
+                    {
+                        IntPtr child = FindClassChild(taskbar, cls);
+                        string childState = "缺失";
+                        if (child != IntPtr.Zero)
+                        {
+                            childState = $"可见={WindowInterop.IsWindowVisible(child)}";
+                            childState += TryGetWindowRectGuarded(child, 300, out var childRect)
+                                ? $" 矩形=({childRect.left},{childRect.top})-({childRect.right},{childRect.bottom})"
+                                : " 矩形读取失败";
+                        }
+                        msg += $"。{cls}: {childState}";
+                    }
                 }
                 else
                 {
