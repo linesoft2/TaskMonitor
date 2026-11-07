@@ -37,6 +37,7 @@ namespace task_monitor
         private bool _onLeft;
         private bool _snapToStart;
         private bool _compactLayout;
+        private bool _showSeparators = true;
         private int[] _itemOrder = TaskbarWindow.NormalizeItemOrder(null);
         private int _sampleIntervalMs = 1000;
         private int _samplingMask = SystemSampler.MaskAll;
@@ -232,6 +233,12 @@ namespace task_monitor
         {
             _compactLayout = on;
             foreach (var window in _windows) window.SetCompactLayout(on);
+        }
+
+        public void SetShowSeparators(bool on)
+        {
+            _showSeparators = on;
+            foreach (var window in _windows) window.SetShowSeparators(on);
         }
 
         public void SetItemOrder(IEnumerable<int> order)
@@ -481,6 +488,7 @@ namespace task_monitor
             window.RightClickRequested = () => RightClickRequested?.Invoke();
             window.SetPlacement(_onLeft, _snapToStart);
             window.SetCompactLayout(_compactLayout);
+            window.SetShowSeparators(_showSeparators);
             window.SetItemOrder(_itemOrder);
             window.SetSampleInterval(_sampleIntervalMs);
             window.SetOverlayMetricSamplingMask(_samplingMask);

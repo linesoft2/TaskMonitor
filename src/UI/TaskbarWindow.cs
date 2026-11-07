@@ -653,6 +653,15 @@ namespace task_monitor
                 WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SET_METRICS, IntPtr.Zero, IntPtr.Zero);
         }
 
+        private volatile bool _showSeparators = true;
+
+        internal void SetShowSeparators(bool on)
+        {
+            _showSeparators = on;
+            if (OverlayHwnd != IntPtr.Zero)
+                WindowInterop.PostMessageW(OverlayHwnd, WindowInterop.WM_APP_SNAPSHOT, IntPtr.Zero, IntPtr.Zero);
+        }
+
         // An immutable array is swapped as one reference; Draw/HitTest never copy it.
         private volatile int[] _itemOrder = StandardItemOrder;
 
@@ -1107,7 +1116,7 @@ namespace task_monitor
             var startupLayout = ComputeLayout(_samplingEnabledMask, _gpuTaskbarContent, vertical, verticalAvail, _compactLayout, _itemOrder);
             Logger.Info($"显示器={displayName} 任务栏族={(classical ? "经典(Win10/ExplorerPatcher)" : "Win11")} 竖直={vertical}"
                 + (vertical ? $"（任务栏 {taskbarRect.right - taskbarRect.left}x{taskbarRect.bottom - taskbarRect.top}px，条带宽 {taskbarBandW}px，{VerticalFormName(startupLayout)}）" : "")
-                + $" DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms 紧凑={_compactLayout}{AnchorDiag(dpi)}");
+                + $" DPI={dpi} 覆盖层={physicalWidth}x{physicalHeight}px 采样掩码=0x{_samplingEnabledMask:X2} 间隔={_sampleIntervalMs}ms 紧凑={_compactLayout} 分割线={_showSeparators}{AnchorDiag(dpi)}");
             // DXGI can't create 0-sized buffers — a 1px stub draws nothing (Draw skips
             // an empty layout) and resizes out the moment a metric comes back.
             physicalWidth = Math.Max(1, physicalWidth);
@@ -1657,23 +1666,26 @@ namespace task_monitor
             // item occupies whole — 网络's column and 两者's GPU block are single two-row
             // items, no divider cuts them (the 2026-10-17 request); a shared stacked cell
             // keeps the line (a trailing hole is still a row).
-            const float lineHalf = 0.5f;
-            // SlotVisible guard: GPU's sampling can be off while the content setting stays
-            // 两者 — PositionOf would then be -1, and -1/2 truncates to 0 (group 0!).
-            int gpuBlockGroup = layout.GpuContent == GpuTaskbarContent.Both && layout.SlotVisible(3)
-                ? layout.PositionOf(3) / 2 : -1;
-            int netBlockGroup = layout.NetVisible ? layout.NetPos / 2 : -1;
-            bool boundaryBefore = false;
-            for (int g = 0; g < GroupCount; g++)
+            if (s.Owner._showSeparators)
             {
-                if (!layout.GroupVisible(g)) continue;
-                float gx0 = layout.GroupLeft(g);
-                float gx1 = gx0 + layout.GroupW(g);
-                if (boundaryBefore)
-                    ctx.FillRectangle(new D2D_RECT_F { left = gx0 - lineHalf, top = top, right = gx0 + lineHalf, bottom = bottom }, s.SeparatorBrush);
-                if (g != netBlockGroup && g != gpuBlockGroup)
-                    ctx.FillRectangle(new D2D_RECT_F { left = gx0, top = mid - lineHalf, right = gx1, bottom = mid + lineHalf }, s.SeparatorBrush);
-                boundaryBefore = true;
+                const float lineHalf = 0.5f;
+                // SlotVisible guard: GPU's sampling can be off while the content setting stays
+                // 两者 — PositionOf would then be -1, and -1/2 truncates to 0 (group 0!).
+                int gpuBlockGroup = layout.GpuContent == GpuTaskbarContent.Both && layout.SlotVisible(3)
+                    ? layout.PositionOf(3) / 2 : -1;
+                int netBlockGroup = layout.NetVisible ? layout.NetPos / 2 : -1;
+                bool boundaryBefore = false;
+                for (int g = 0; g < GroupCount; g++)
+                {
+                    if (!layout.GroupVisible(g)) continue;
+                    float gx0 = layout.GroupLeft(g);
+                    float gx1 = gx0 + layout.GroupW(g);
+                    if (boundaryBefore)
+                        ctx.FillRectangle(new D2D_RECT_F { left = gx0 - lineHalf, top = top, right = gx0 + lineHalf, bottom = bottom }, s.SeparatorBrush);
+                    if (g != netBlockGroup && g != gpuBlockGroup)
+                        ctx.FillRectangle(new D2D_RECT_F { left = gx0, top = mid - lineHalf, right = gx1, bottom = mid + lineHalf }, s.SeparatorBrush);
+                    boundaryBefore = true;
+                }
             }
 
             // One row per visible slot. GPU falls back to "--" when no adapter exists at
@@ -1779,42 +1791,45 @@ namespace task_monitor
             // strip, or a whole two-line block — so no line ever cuts a metric's label off
             // its own value. Columns can end at different heights; the column separator
             // runs the full grid height, a column's last row simply has no line under it.
-            const float lineHalf = 0.5f;
-            if (layout.TwoLine)
+            if (s.Owner._showSeparators)
             {
-                // Item boundaries only; the second position of a two-row block has zero height.
-                for (int p = 1; p < PackedPositionCount && layout.SlotAt(p) >= 0; p++)
+                const float lineHalf = 0.5f;
+                if (layout.TwoLine)
                 {
-                    if (layout.GpuContent == GpuTaskbarContent.Both && p == layout.TempPos) continue;
-                    if (layout.NetVisible && p == layout.NetPos + 1) continue;
-                    float y = StripPosTop(layout, p);
-                    ctx.FillRectangle(
-                        new D2D_RECT_F { left = 0f, top = y - lineHalf, right = layout.Width, bottom = y + lineHalf },
-                        s.SeparatorBrush);
-                }
-            }
-            else
-            {
-                int tempCol = layout.TempPos >= 0 ? layout.PosCol(layout.TempPos) : -1;
-                int tempRow = layout.TempPos >= 0 ? layout.PosRow(layout.TempPos) : -1;
-                bool gpuPair = layout.GpuContent == GpuTaskbarContent.Both;
-                for (int c = 0; c < layout.Columns; c++)
-                {
-                    float x0 = layout.ColumnLeft(c);
-                    float x1 = x0 + layout.ColumnWidth(c);
-                    if (c > 0)
-                        ctx.FillRectangle(
-                            new D2D_RECT_F { left = x0 - lineHalf, top = 0f, right = x0 + lineHalf, bottom = layout.Height },
-                            s.SeparatorBrush);
-                    for (int r = 1; r < layout.ColRows(c); r++)
+                    // Item boundaries only; the second position of a two-row block has zero height.
+                    for (int p = 1; p < PackedPositionCount && layout.SlotAt(p) >= 0; p++)
                     {
-                        bool insideNet = layout.NetCol == c && layout.NetRow == r - 1;
-                        bool insideGpuPair = gpuPair && tempCol == c && tempRow == r;
-                        if (insideNet || insideGpuPair) continue;
-                        float y = r * layout.RowH;
+                        if (layout.GpuContent == GpuTaskbarContent.Both && p == layout.TempPos) continue;
+                        if (layout.NetVisible && p == layout.NetPos + 1) continue;
+                        float y = StripPosTop(layout, p);
                         ctx.FillRectangle(
-                            new D2D_RECT_F { left = x0, top = y - lineHalf, right = x1, bottom = y + lineHalf },
+                            new D2D_RECT_F { left = 0f, top = y - lineHalf, right = layout.Width, bottom = y + lineHalf },
                             s.SeparatorBrush);
+                    }
+                }
+                else
+                {
+                    int tempCol = layout.TempPos >= 0 ? layout.PosCol(layout.TempPos) : -1;
+                    int tempRow = layout.TempPos >= 0 ? layout.PosRow(layout.TempPos) : -1;
+                    bool gpuPair = layout.GpuContent == GpuTaskbarContent.Both;
+                    for (int c = 0; c < layout.Columns; c++)
+                    {
+                        float x0 = layout.ColumnLeft(c);
+                        float x1 = x0 + layout.ColumnWidth(c);
+                        if (c > 0)
+                            ctx.FillRectangle(
+                                new D2D_RECT_F { left = x0 - lineHalf, top = 0f, right = x0 + lineHalf, bottom = layout.Height },
+                                s.SeparatorBrush);
+                        for (int r = 1; r < layout.ColRows(c); r++)
+                        {
+                            bool insideNet = layout.NetCol == c && layout.NetRow == r - 1;
+                            bool insideGpuPair = gpuPair && tempCol == c && tempRow == r;
+                            if (insideNet || insideGpuPair) continue;
+                            float y = r * layout.RowH;
+                            ctx.FillRectangle(
+                                new D2D_RECT_F { left = x0, top = y - lineHalf, right = x1, bottom = y + lineHalf },
+                                s.SeparatorBrush);
+                        }
                     }
                 }
             }

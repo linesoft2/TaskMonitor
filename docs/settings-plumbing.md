@@ -24,8 +24,8 @@ Conventions that hold for all of them:
   rebuilds no longer construct a fresh `SystemSampler`.
 - **`WM_APP_SET_METRICS` only when the OVERLAY LAYOUT changes** — i.e. the sampling mask
   (§2) and the GPU 任务栏显示 content (§4: its row count, and so the width, changes with
-  it). Everything else takes effect on the next tick — posting a WM_APP for a
-  non-layout setting is pointless churn.
+  it). Sampler-only settings take effect on the next tick. A pure rendering change may instead
+  reuse `WM_APP_SNAPSHOT` for an immediate redraw (§13), but must not invoke the layout/re-sample path.
 - Each sampler's calibration/derivation lives at its own code site; this file only
   records the wiring. Field-by-field yaml semantics are in `src/AppSettings.cs`.
 
@@ -252,6 +252,22 @@ A TaskbarWindow-layout chain shared by the taskbar and floating forms; no sample
 - **Runtime:** App saves, closes the transient detail popup and broadcasts to every current overlay;
   `ConfigureWindow` gives rebuilt/new overlays the same order. 网络 and GPU 两者 remain atomic two-row
   items in every orientation (geometry: architecture's overlay-layout section).
+
+## 13. 显示分割线 — `ShowSeparators` (null = on)
+
+A pure TaskbarWindow-rendering chain shared by the horizontal/vertical taskbar forms and the
+floating widget; no sampler state and no geometry change.
+
+| | |
+|---|---|
+| Setter | `App.OnShowSeparatorsChanged` → `TaskbarOverlayManager.SetShowSeparators` → `TaskbarWindow.SetShowSeparators` |
+| Window state | `_showSeparators` (volatile, default true) |
+| WM_APP | **`WM_APP_SNAPSHOT`** — reuses the existing redraw path immediately; no resize or re-sample |
+
+Off skips only the horizontal/vertical separator passes; text, hover/selection fills, card outline,
+layout and hit-testing are unchanged. App writes only the off state (`showSeparators: false`) and
+logs the change. `ConfigureWindow` replays the setting to every new/rebuilt overlay, and the startup
+geometry log includes `分割线=True/False`.
 
 ## Not in settings.yaml at all
 

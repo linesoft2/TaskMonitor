@@ -238,6 +238,15 @@
                             <ui:ToggleSwitch x:Name="CompactSwitch" Toggled="CompactSwitch_Toggled" />
                         </ui:SettingsCard>
 
+                        <ui:SettingsCard Header="显示分割线"
+                                         Description="在任务栏窗口与悬浮窗的各采样项目之间显示分割线。"
+                                         Margin="0,0,0,4">
+                            <ui:SettingsCard.HeaderIcon>
+                                <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.DividerTall_20_Regular}" />
+                            </ui:SettingsCard.HeaderIcon>
+                            <ui:ToggleSwitch x:Name="ShowSeparatorsSwitch" Toggled="ShowSeparatorsSwitch_Toggled" />
+                        </ui:SettingsCard>
+
                         <ui:SettingsExpander x:Name="ItemOrderExpander" Header="项目顺序"
                                              IsExpanded="True"
                                              Description="拖动下方项目，调整任务栏窗口与悬浮窗的显示顺序；关闭采样的项目也会保留。"

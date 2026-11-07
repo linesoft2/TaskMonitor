@@ -17,8 +17,8 @@ namespace task_monitor
     /// style; PaneDisplayMode Auto — labeled ≥1008 DIP, icon-compact 641–1007, minimal
     /// hamburger below): 通用 (开机自启动 / 采样间隔 / 检查更新 / 更新源), 外观 (主题 / 靠左显示 — an
     /// expander whose item is 靠左位置, or a plain card where that item does not exist,
-    /// i.e. on the classical Win10 taskbar — plus 紧凑模式, 项目顺序 (the shared taskbar/floating
-    /// drag-to-reorder list), and 悬浮模式 with its five sub-cards), 采样项目 (one expander per metric, the toggle in
+    /// i.e. on the classical Win10 taskbar — plus 紧凑模式, 显示分割线, 项目顺序 (the shared
+    /// taskbar/floating drag-to-reorder list), and 悬浮模式 with its five sub-cards), 采样项目 (one expander per metric, the toggle in
     /// its content area enabling/disabling that metric's sampling; 磁盘's and GPU's
     /// expanders also hold 显示方式 + the specific-device picker, GPU's additionally the
     /// 任务栏显示 (使用率/温度/两者) trio with 温度来源 and 温度单位, 网络's the 适配器
@@ -45,6 +45,7 @@ namespace task_monitor
         private readonly Action<bool> _autoStartChanged;
         private readonly Action<int> _themeChanged;           // 0=跟随系统 1=浅色 2=深色
         private readonly Action<bool> _compactChanged;        // 紧凑模式 (the item pitch)
+        private readonly Action<bool> _showSeparatorsChanged; // 显示分割线 (taskbar + floating)
         private readonly Action<IReadOnlyList<int>> _itemOrderChanged;
         private readonly List<MetricOrderItem> _itemOrderItems = new List<MetricOrderItem>();
         private MetricOrderItem _dragItem;
@@ -95,6 +96,9 @@ namespace task_monitor
         /// <param name="compactLayout">Current 紧凑模式 state (yaml null = the off default).</param>
         /// <param name="compactLayoutChanged">Reported with the requested on/off — applied
         /// live (the overlay re-lays out and resizes at once; both forms follow).</param>
+        /// <param name="showSeparators">Current 显示分割线 state (yaml null = the on default).</param>
+        /// <param name="showSeparatorsChanged">Reported with the requested on/off — redraws
+        /// both overlay forms without changing their layout.</param>
         /// <param name="itemOrder">Current slot order, shared by the taskbar and floating forms.</param>
         /// <param name="itemOrderChanged">Reported once after a drag is dropped or the order is reset.</param>
         /// <param name="floatingMode">Current 悬浮模式 state (yaml null = the off default).</param>
@@ -182,6 +186,7 @@ namespace task_monitor
             bool autoStartOn, Action<bool> autoStartChanged,
             int themeIndex, Action<int> themeChanged,
             bool compactLayout, Action<bool> compactLayoutChanged,
+            bool showSeparators, Action<bool> showSeparatorsChanged,
             IReadOnlyList<int> itemOrder, Action<IReadOnlyList<int>> itemOrderChanged,
             bool floatingMode, Action<bool> floatingChanged,
             bool floatingTopmost, Action<bool> floatingTopmostChanged,
@@ -214,6 +219,7 @@ namespace task_monitor
             _autoStartChanged = autoStartChanged;
             _themeChanged = themeChanged;
             _compactChanged = compactLayoutChanged;
+            _showSeparatorsChanged = showSeparatorsChanged;
             _itemOrderChanged = itemOrderChanged;
             _floatingChanged = floatingChanged;
             _floatingTopmostChanged = floatingTopmostChanged;
@@ -260,6 +266,7 @@ namespace task_monitor
             AutoStartSwitch.IsOn = autoStartOn;
             ThemeCombo.SelectedIndex = themeIndex < 0 || themeIndex > 2 ? 0 : themeIndex;
             CompactSwitch.IsOn = compactLayout;
+            ShowSeparatorsSwitch.IsOn = showSeparators;
             PopulateItemOrder(itemOrder);
             FloatingSwitch.IsOn = floatingMode;
             FloatingTopmostSwitch.IsOn = floatingTopmost;
@@ -758,6 +765,12 @@ namespace task_monitor
         {
             if (!_loaded) return;
             _compactChanged?.Invoke(CompactSwitch.IsOn);
+        }
+
+        private void ShowSeparatorsSwitch_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_loaded) return;
+            _showSeparatorsChanged?.Invoke(ShowSeparatorsSwitch.IsOn);
         }
 
         private void OnLeftSwitch_Toggled(object sender, RoutedEventArgs e)

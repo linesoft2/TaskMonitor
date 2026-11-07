@@ -95,6 +95,13 @@ namespace task_monitor
         public bool? CompactLayout { get; set; }
 
         /// <summary>
+        /// 显示分割线（设置 → 外观）：任务栏窗口与悬浮窗口中各采样项目之间的分割线。
+        /// null = 显示（默认，仅关闭时写入 false）。只影响绘制，不改变布局或点击区域，
+        /// 通过 <see cref="TaskbarWindow.SetShowSeparators"/> 即时重绘。
+        /// </summary>
+        public bool? ShowSeparators { get; set; }
+
+        /// <summary>
         /// 任务栏窗口与悬浮窗口的采样项目顺序（设置 → 外观 → 项目顺序）。值为点击槽位
         /// 0=CPU、1=内存、2=磁盘、3=GPU、4=网络；null = CPU/内存/磁盘/GPU/网络。
         /// 读取时会去除重复、非法项并补齐缺项，关闭采样的项目仍保留在顺序中。

@@ -370,6 +370,7 @@ namespace task_monitor
 
             _taskbars.SetPlacement(_config.OverlayOnLeft != false, _config.OverlaySnapToStart == true);
             _taskbars.SetCompactLayout(_config.CompactLayout == true);
+            _taskbars.SetShowSeparators(_config.ShowSeparators != false);
             _taskbars.SetItemOrder(_config.ItemOrder);
             _taskbars.SetSampleInterval(_config.SampleIntervalMs ?? 1000);
             _taskbars.SetMetricSamplingMask(SamplingMaskOf(_config));
@@ -738,6 +739,7 @@ namespace task_monitor
                 StartupTask.IsEnabled(), OnAutoStartChanged,
                 ThemeIndexOf(_config.Theme), OnThemeChanged,
                 _config.CompactLayout == true, OnCompactLayoutChanged,
+                _config.ShowSeparators != false, OnShowSeparatorsChanged,
                 _config.ItemOrder, OnItemOrderChanged,
                 _config.FloatingMode == true, OnFloatingModeChanged,
                 _config.FloatingTopmost != false, OnFloatingTopmostChanged,
@@ -819,6 +821,14 @@ namespace task_monitor
             CloseDetail();
             _taskbars.SetCompactLayout(on);
             _settings?.SyncCompactLayout(on);
+        }
+
+        private void OnShowSeparatorsChanged(bool on)
+        {
+            _config.ShowSeparators = on ? (bool?)null : false;
+            TrySaveConfig();
+            _taskbars.SetShowSeparators(on);
+            Logger.Info($"显示分割线{(on ? "开启" : "关闭")}——重绘所有覆盖层");
         }
 
         private void OnItemOrderChanged(IReadOnlyList<int> order)
