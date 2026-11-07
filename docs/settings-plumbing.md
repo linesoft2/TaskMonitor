@@ -233,6 +233,24 @@ Not a sampler setting. `TaskbarDisplayCatalog` enumerates every active monitor w
   stable ID and current HWND/HMONITOR association, cancelled entries cannot restart, and every
   fresh entry inherits the manager's complete visual configuration.
 
+## 12. 项目顺序 — `ItemOrder` (null = CPU/内存/磁盘/GPU/网络)
+
+A TaskbarWindow-layout chain shared by the taskbar and floating forms; no sampler state.
+
+| | |
+|---|---|
+| Setter | `App.OnItemOrderChanged` → `TaskbarOverlayManager.SetItemOrder` → `TaskbarWindow.SetItemOrder` |
+| Window state | `_itemOrder`, an immutable normalized `int[]` of slots 0=CPU 1=内存 2=磁盘 3=GPU 4=网络 |
+| WM_APP | **YES — `WM_APP_SET_METRICS`**: drawing, hit-testing, popup anchors and target size all recompute at once |
+
+- **UI:** 设置 → 外观 → 项目顺序 is a five-row drag/drop list plus 恢复默认. It includes sampling-disabled
+  metrics and reports once on a valid drop, not on every mouse move.
+- **Yaml:** a list of slot numbers, or null for the default order. Normalization removes invalid/duplicate
+  entries and appends missing ones in default order; restoring the default writes null.
+- **Runtime:** App saves, closes the transient detail popup and broadcasts to every current overlay;
+  `ConfigureWindow` gives rebuilt/new overlays the same order. 网络 and GPU 两者 remain atomic two-row
+  items in every orientation (geometry: architecture's overlay-layout section).
+
 ## Not in settings.yaml at all
 
 **开机自启动** — the scheduled task itself is the state (`src/StartupTask.cs`). Never add a

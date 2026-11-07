@@ -37,6 +37,7 @@ namespace task_monitor
         private bool _onLeft;
         private bool _snapToStart;
         private bool _compactLayout;
+        private int[] _itemOrder = TaskbarWindow.NormalizeItemOrder(null);
         private int _sampleIntervalMs = 1000;
         private int _samplingMask = SystemSampler.MaskAll;
         private int _clickDisabledMask;
@@ -231,6 +232,12 @@ namespace task_monitor
         {
             _compactLayout = on;
             foreach (var window in _windows) window.SetCompactLayout(on);
+        }
+
+        public void SetItemOrder(IEnumerable<int> order)
+        {
+            _itemOrder = TaskbarWindow.NormalizeItemOrder(order);
+            foreach (var window in _windows) window.SetItemOrder(_itemOrder);
         }
 
         public void SetSampleInterval(int ms)
@@ -474,6 +481,7 @@ namespace task_monitor
             window.RightClickRequested = () => RightClickRequested?.Invoke();
             window.SetPlacement(_onLeft, _snapToStart);
             window.SetCompactLayout(_compactLayout);
+            window.SetItemOrder(_itemOrder);
             window.SetSampleInterval(_sampleIntervalMs);
             window.SetOverlayMetricSamplingMask(_samplingMask);
             window.SetOverlayGpuTempDisplay(_gpuContent, _gpuTempFahrenheit);

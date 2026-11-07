@@ -52,8 +52,8 @@ Both off-the-shelf routes are unusable, each for a measured reason:
 The adopted flow:
 
 1. `TouchDown` only **observes** — no handling, no capture, so a tap promotes to a click
-   normally. A gesture starting on the ScrollBar is not tracked at all; the bar keeps its
-   native promotion/drag.
+   normally. Gestures starting on the ScrollBar or a child marked with the attached
+   `TouchDragScrollViewer.TouchDragExcluded` property are not tracked; that child owns its drag.
 2. Past the threshold, capture the touch point — and balance the `MouseLeftButtonDown` the
    first `TouchDown` already promoted with `Mouse.Capture(null)` (losing capture drops the
    pressed state and suppresses the Click) — then feed the move deltas straight to physics
@@ -61,6 +61,11 @@ The adopted flow:
    accumulated error.
 3. On release, if the sampled velocity is high enough, run the inertia decay loop
    (`v *= e^(-k·dt)`); it stops at a boundary, at low speed, or on a new press.
+
+The appearance page's 项目顺序 rows use this arbitration: a touch starting on the left reorder
+handle (`TouchDragExcluded=true`) enters drag/drop; a touch on the item name or blank area scrolls
+normally. Mouse users can still drag the whole row. The property excludes only the outer scroller —
+it does not disable the child's own input.
 
 ## Known tradeoffs (do not treat as bugs)
 

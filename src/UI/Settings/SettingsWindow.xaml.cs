@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using iNKORE.UI.WPF.Modern.Common.IconKeys;
 using iNKORE.UI.WPF.Modern.Controls;
 
 namespace task_monitor
@@ -15,8 +17,8 @@ namespace task_monitor
     /// style; PaneDisplayMode Auto — labeled ≥1008 DIP, icon-compact 641–1007, minimal
     /// hamburger below): 通用 (开机自启动 / 采样间隔 / 检查更新 / 更新源), 外观 (主题 / 靠左显示 — an
     /// expander whose item is 靠左位置, or a plain card where that item does not exist,
-    /// i.e. on the classical Win10 taskbar — plus 紧凑模式, the item-pitch switch, and
-    /// 悬浮模式 with its five sub-cards), 采样项目 (one expander per metric, the toggle in
+    /// i.e. on the classical Win10 taskbar — plus 紧凑模式, 项目顺序 (the shared taskbar/floating
+    /// drag-to-reorder list), and 悬浮模式 with its five sub-cards), 采样项目 (one expander per metric, the toggle in
     /// its content area enabling/disabling that metric's sampling; 磁盘's and GPU's
     /// expanders also hold 显示方式 + the specific-device picker, GPU's additionally the
     /// 任务栏显示 (使用率/温度/两者) trio with 温度来源 and 温度单位, 网络's the 适配器
@@ -43,6 +45,10 @@ namespace task_monitor
         private readonly Action<bool> _autoStartChanged;
         private readonly Action<int> _themeChanged;           // 0=跟随系统 1=浅色 2=深色
         private readonly Action<bool> _compactChanged;        // 紧凑模式 (the item pitch)
+        private readonly Action<IReadOnlyList<int>> _itemOrderChanged;
+        private readonly List<MetricOrderItem> _itemOrderItems = new List<MetricOrderItem>();
+        private MetricOrderItem _dragItem;
+        private Point _dragStart;
         private readonly Action<bool> _floatingChanged;       // 悬浮模式 (the whole form flips)
         private readonly Action<bool> _floatingTopmostChanged; // 悬浮模式 → 置顶显示
         private readonly Action<bool> _floatingOutOfBoundsChanged; // 悬浮模式 → 允许超出屏幕边界
@@ -73,6 +79,12 @@ namespace task_monitor
         // taskbar (see the ctor) — only the one actually shown gets enabled/disabled.
         private readonly Control _onLeftHost;
 
+        private sealed class MetricOrderItem
+        {
+            public int Slot { get; set; }
+            public string Name { get; set; }
+        }
+
         /// <param name="overlayOnLeft">Effective 靠左显示 state (yaml null = the left default).</param>
         /// <param name="snapToStart">Current overlaySnapToStart value (left-side anchor).</param>
         /// <param name="placementChanged">(onLeft, snapToStart) reported on every user change.</param>
@@ -83,6 +95,8 @@ namespace task_monitor
         /// <param name="compactLayout">Current 紧凑模式 state (yaml null = the off default).</param>
         /// <param name="compactLayoutChanged">Reported with the requested on/off — applied
         /// live (the overlay re-lays out and resizes at once; both forms follow).</param>
+        /// <param name="itemOrder">Current slot order, shared by the taskbar and floating forms.</param>
+        /// <param name="itemOrderChanged">Reported once after a drag is dropped or the order is reset.</param>
         /// <param name="floatingMode">Current 悬浮模式 state (yaml null = the off default).</param>
         /// <param name="floatingChanged">Reported with the requested on/off — App rebuilds the
         /// overlay window in its other form (taskbar child ⟷ desktop widget).</param>
@@ -168,6 +182,7 @@ namespace task_monitor
             bool autoStartOn, Action<bool> autoStartChanged,
             int themeIndex, Action<int> themeChanged,
             bool compactLayout, Action<bool> compactLayoutChanged,
+            IReadOnlyList<int> itemOrder, Action<IReadOnlyList<int>> itemOrderChanged,
             bool floatingMode, Action<bool> floatingChanged,
             bool floatingTopmost, Action<bool> floatingTopmostChanged,
             bool floatingAllowOutOfBounds, Action<bool> floatingAllowOutOfBoundsChanged,
@@ -199,6 +214,7 @@ namespace task_monitor
             _autoStartChanged = autoStartChanged;
             _themeChanged = themeChanged;
             _compactChanged = compactLayoutChanged;
+            _itemOrderChanged = itemOrderChanged;
             _floatingChanged = floatingChanged;
             _floatingTopmostChanged = floatingTopmostChanged;
             _floatingOutOfBoundsChanged = floatingAllowOutOfBoundsChanged;
@@ -244,6 +260,7 @@ namespace task_monitor
             AutoStartSwitch.IsOn = autoStartOn;
             ThemeCombo.SelectedIndex = themeIndex < 0 || themeIndex > 2 ? 0 : themeIndex;
             CompactSwitch.IsOn = compactLayout;
+            PopulateItemOrder(itemOrder);
             FloatingSwitch.IsOn = floatingMode;
             FloatingTopmostSwitch.IsOn = floatingTopmost;
             // 置顶显示 only means anything in the floating form (the embedded overlay inherits
@@ -300,6 +317,130 @@ namespace task_monitor
             UpdateSourceCombo.IsEnabled = updateCheckOn;   // the source only matters while 检查更新 is on
             VersionText.Text = $"版本 {VersionInfo.Current}";   // AssemblyInformationalVersion — 与发版 tag 一致
             _loaded = true;
+        }
+
+        private void PopulateItemOrder(IReadOnlyList<int> order)
+        {
+            _itemOrderItems.Clear();
+            var cards = new List<object>();
+            foreach (int slot in TaskbarWindow.NormalizeItemOrder(order))
+            {
+                var item = new MetricOrderItem { Slot = slot, Name = ItemOrderName(slot) };
+                _itemOrderItems.Add(item);
+                var handle = new FontIcon { Icon = FluentSystemIcons.ReOrderDotsVertical_20_Regular, FontSize = 16 };
+                TouchDragScrollViewer.SetTouchDragExcluded(handle, true);
+                var card = new SettingsCard
+                {
+                    Header = item.Name,
+                    HeaderIcon = handle,
+                    DataContext = item,
+                    AllowDrop = true,
+                    Cursor = Cursors.Hand,
+                };
+                card.PreviewMouseLeftButtonDown += ItemOrderCard_PreviewMouseLeftButtonDown;
+                card.PreviewMouseMove += ItemOrderCard_PreviewMouseMove;
+                card.DragEnter += ItemOrderCard_DragEnter;
+                card.DragOver += ItemOrderCard_DragOver;
+                card.Drop += ItemOrderCard_Drop;
+                cards.Add(card);
+            }
+            // SettingsExpander's ItemsRepeater observes replacement, not mutations of the old list.
+            ItemOrderExpander.Items = cards;
+        }
+
+        private static string ItemOrderName(int slot)
+        {
+            switch (slot)
+            {
+                case 0: return "CPU";
+                case 1: return "内存";
+                case 2: return "磁盘";
+                case 3: return "GPU";
+                case 4: return "网络";
+                default: return string.Empty;
+            }
+        }
+
+        private int[] CurrentItemOrder()
+        {
+            var order = new int[_itemOrderItems.Count];
+            for (int i = 0; i < order.Length; i++) order[i] = _itemOrderItems[i].Slot;
+            return order;
+        }
+
+        private void ReportItemOrder() => _itemOrderChanged?.Invoke(CurrentItemOrder());
+
+        private void ResetItemOrder_Click(object sender, RoutedEventArgs e)
+        {
+            PopulateItemOrder(null);
+            ReportItemOrder();
+        }
+
+        private static SettingsCard ItemOrderCardFrom(DependencyObject source)
+        {
+            while (source != null)
+            {
+                if (source is SettingsCard card) return card;
+                source = VisualTreeHelper.GetParent(source);
+            }
+            return null;
+        }
+
+        private static bool IsItemOrderTouchHandle(DependencyObject source)
+        {
+            while (source != null && !(source is SettingsCard))
+            {
+                if (TouchDragScrollViewer.GetTouchDragExcluded(source)) return true;
+                source = VisualTreeHelper.GetParent(source);
+            }
+            return false;
+        }
+
+        private void ItemOrderCard_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var source = e.OriginalSource as DependencyObject;
+            _dragItem = e.StylusDevice != null && !IsItemOrderTouchHandle(source)
+                ? null
+                : ItemOrderCardFrom(source)?.DataContext as MetricOrderItem;
+            _dragStart = e.GetPosition(ItemOrderExpander);
+        }
+
+        private void ItemOrderCard_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (_dragItem == null) return;
+            if (e.LeftButton != MouseButtonState.Pressed) { _dragItem = null; return; }
+            Vector delta = e.GetPosition(ItemOrderExpander) - _dragStart;
+            if (Math.Abs(delta.X) < SystemParameters.MinimumHorizontalDragDistance
+                && Math.Abs(delta.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+            var data = new DataObject(typeof(MetricOrderItem), _dragItem);
+            try { DragDrop.DoDragDrop(ItemOrderExpander, data, DragDropEffects.Move); }
+            finally { _dragItem = null; }
+        }
+
+        private void ItemOrderCard_DragEnter(object sender, DragEventArgs e)
+            => ItemOrderCard_DragOver(sender, e);
+
+        private void ItemOrderCard_DragOver(object sender, DragEventArgs e)
+        {
+            bool reorder = e.Data.GetDataPresent(typeof(MetricOrderItem));
+            e.Effects = reorder ? DragDropEffects.Move : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        private void ItemOrderCard_Drop(object sender, DragEventArgs e)
+        {
+            var source = e.Data.GetData(typeof(MetricOrderItem)) as MetricOrderItem;
+            var target = ItemOrderCardFrom(e.OriginalSource as DependencyObject)?.DataContext as MetricOrderItem;
+            if (source == null || target == null || ReferenceEquals(source, target)) return;
+            int oldIndex = _itemOrderItems.IndexOf(source);
+            int newIndex = _itemOrderItems.IndexOf(target);
+            if (oldIndex < 0 || newIndex < 0 || oldIndex == newIndex) return;
+            _itemOrderItems.RemoveAt(oldIndex);
+            _itemOrderItems.Insert(newIndex, source);
+            int[] order = CurrentItemOrder();
+            PopulateItemOrder(order);
+            _itemOrderChanged?.Invoke(order);
+            e.Handled = true;
         }
 
         private void PopulateDisplayPicker(IReadOnlyList<TaskbarDisplayInfo> displays,

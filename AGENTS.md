@@ -19,10 +19,9 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## What this is
 
-A Windows taskbar widget: a self-drawn overlay embedded in the taskbar (three stacked groups —
-CPU/内存, 磁盘/GPU, 网络 ↑/↓; 设置 → GPU → 任务栏显示 swaps in a 温度 row, or in 两者 packs one
-网络-style two-row GPU block with a single vertically-centred "GPU" label) that pops
-up a fluent acrylic detail window on click. WPF on .NET
+A Windows taskbar widget: a self-drawn taskbar overlay (default CPU/内存, 磁盘/GPU, 网络 ↑/↓;
+外观 → 项目顺序 reorders; GPU 任务栏显示 = 使用率/温度/两者) that pops up a fluent acrylic detail
+window on click. WPF on .NET
 Framework 4.8. **No main window**; the only persistent UI is that overlay — optionally detached
 into a free-floating card widget (设置 → 外观 → 悬浮模式, gotchas §36). The process stays alive via
 `ShutdownMode="OnExplicitShutdown"`; exit is via the overlay's right-click menu.

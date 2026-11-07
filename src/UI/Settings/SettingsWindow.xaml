@@ -238,6 +238,16 @@
                             <ui:ToggleSwitch x:Name="CompactSwitch" Toggled="CompactSwitch_Toggled" />
                         </ui:SettingsCard>
 
+                        <ui:SettingsExpander x:Name="ItemOrderExpander" Header="项目顺序"
+                                             IsExpanded="True"
+                                             Description="拖动下方项目，调整任务栏窗口与悬浮窗的显示顺序；关闭采样的项目也会保留。"
+                                             Margin="0,0,0,4">
+                            <ui:SettingsExpander.HeaderIcon>
+                                <ui:FontIcon Icon="{x:Static ui:FluentSystemIcons.ReOrder_20_Regular}" />
+                            </ui:SettingsExpander.HeaderIcon>
+                            <Button Content="恢复默认" Click="ResetItemOrder_Click" />
+                        </ui:SettingsExpander>
+
                         <!-- 悬浮模式: the overlay leaves the taskbar entirely and lives on the
                              desktop as a draggable acrylic widget (the detail popup's material).
                              Its five sub-settings (置顶显示 / 允许越界 / 贴边隐藏 / 全屏时隐藏 / 透明度) are items

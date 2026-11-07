@@ -21,8 +21,8 @@ namespace task_monitor
     /// 为什么不要库的 manipulation（IsEnableSmoothManipulating）：IsManipulationEnabled=true
     /// 在 TouchDown 即捕获触摸点，tap 不再晋升鼠标点击，页面内开关/按钮触屏全失灵。
     /// 这里的做法：
-    ///   TouchDown 只观察（不处理不捕获 → tap 正常晋升 Click；起点落在 ScrollBar 上
-    ///   的手势直接不跟踪，滚动条保持原生晋升拖拽）；位移过阈值才 Capture 触摸点
+    ///   TouchDown 只观察（不处理不捕获 → tap 正常晋升 Click；起点落在 ScrollBar 或
+    ///   TouchDragExcluded 拖动柄上的手势不跟踪，由子控件自己处理）；位移过阈值才 Capture 触摸点
     ///   开始拖拽 —— 此刻首个 TouchDown 已晋升出的 MouseLeftButtonDown 用
     ///   Mouse.Capture(null) 平衡（ButtonBase 失捕获即解除按下态、不触发 Click），
     ///   拖拽中的 move/up 全部 e.Handled 吞掉，晋升流就此掐断，松手不会补出 Click。
@@ -38,6 +38,15 @@ namespace task_monitor
     /// </summary>
     public class TouchDragScrollViewer : FluentWpfCore.Controls.SmoothScrollViewer
     {
+        // A child that owns its own touch-drag gesture (for example a reorder handle) can
+        // opt out without disabling delayed-capture scrolling for the rest of the row.
+        public static readonly DependencyProperty TouchDragExcludedProperty = DependencyProperty.RegisterAttached(
+            "TouchDragExcluded", typeof(bool), typeof(TouchDragScrollViewer), new PropertyMetadata(false));
+        public static void SetTouchDragExcluded(DependencyObject element, bool value)
+            => element.SetValue(TouchDragExcludedProperty, value);
+        public static bool GetTouchDragExcluded(DependencyObject element)
+            => (bool)element.GetValue(TouchDragExcludedProperty);
+
         private const double DragThresholdDip = 8.0;
         private const double FlingMinVelocity = 240.0;  // DIP/s，低于此值不甩惯性
         private const double FlingDecayRate = 3.5;      // 1/s，v *= e^(-k·dt)
@@ -72,9 +81,8 @@ namespace task_monitor
         {
             base.OnTouchDown(e);
             if (_device != null) return;
-            // 起点在滚动条上的手势不跟踪 —— 滚动条的拖拽走它自己的晋升鼠标路径，
-            // 我们抢过来会和 Thumb 拖拽冲突（方向映射还相反）。
-            if (IsOnScrollBar(e.OriginalSource as DependencyObject)) return;
+            // 滚动条与显式排除的拖动柄各自拥有触摸手势；其余内容仍走延迟捕获滚动。
+            if (IsTouchDragExcluded(e.OriginalSource as DependencyObject)) return;
 
             StopFling();                 // 惯性滑行中重新按下 = 抓住内容
             _device = e.TouchDevice;
@@ -148,12 +156,12 @@ namespace task_monitor
             if (e.TouchDevice == _device) _device = null;
         }
 
-        private static bool IsOnScrollBar(DependencyObject src)
+        private static bool IsTouchDragExcluded(DependencyObject src)
         {
             for (DependencyObject d = src; d != null; d = VisualTreeHelper.GetParent(d))
             {
-                if (d is ScrollBar) return true;
-                if (d is TouchDragScrollViewer) return false;  // 到自己为止
+                if (d is ScrollBar || GetTouchDragExcluded(d)) return true;
+                if (d is TouchDragScrollViewer) return false;
             }
             return false;
         }

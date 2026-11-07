@@ -95,6 +95,13 @@ namespace task_monitor
         public bool? CompactLayout { get; set; }
 
         /// <summary>
+        /// 任务栏窗口与悬浮窗口的采样项目顺序（设置 → 外观 → 项目顺序）。值为点击槽位
+        /// 0=CPU、1=内存、2=磁盘、3=GPU、4=网络；null = CPU/内存/磁盘/GPU/网络。
+        /// 读取时会去除重复、非法项并补齐缺项，关闭采样的项目仍保留在顺序中。
+        /// </summary>
+        public List<int> ItemOrder { get; set; }
+
+        /// <summary>
         /// 悬浮模式 (设置 → 外观): true = the overlay DETACHES from the taskbar (从任务栏脱离开来
         /// — the taskbar keeps no copy; mechanism + rules: gotchas §36) and lives on the desktop
         /// as a free-floating card widget; null = off (the default — only the enabled state is
@@ -239,9 +246,8 @@ namespace task_monitor
         /// (two stacked rows: the utilization row plus a temperature row). Orthogonal to
         /// <see cref="GpuSamplingEnabled"/> (采样 gates the data, this gates the row) and to
         /// <see cref="GpuDisplay"/> (显示方式 still picks WHICH adapters feed the utilization
-        /// headline). Pushed live via <see cref="TaskbarWindow.SetGpuTempDisplay"/> — the only
-        /// 显示设置 that posts WM_APP_SET_METRICS, because the row count (and so the layout
-        /// width) changes with it.
+        /// headline). Pushed live via <see cref="TaskbarWindow.SetGpuTempDisplay"/> and posts
+        /// WM_APP_SET_METRICS because the row count (and so the layout width) changes with it.
         /// </summary>
         public GpuTaskbarContent? GpuTaskbarContent { get; set; }
 

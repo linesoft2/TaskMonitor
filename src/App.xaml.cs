@@ -370,6 +370,7 @@ namespace task_monitor
 
             _taskbars.SetPlacement(_config.OverlayOnLeft != false, _config.OverlaySnapToStart == true);
             _taskbars.SetCompactLayout(_config.CompactLayout == true);
+            _taskbars.SetItemOrder(_config.ItemOrder);
             _taskbars.SetSampleInterval(_config.SampleIntervalMs ?? 1000);
             _taskbars.SetMetricSamplingMask(SamplingMaskOf(_config));
             _sampling.SetMergeByPath(_config.MergeSamePathProcesses != false);
@@ -737,6 +738,7 @@ namespace task_monitor
                 StartupTask.IsEnabled(), OnAutoStartChanged,
                 ThemeIndexOf(_config.Theme), OnThemeChanged,
                 _config.CompactLayout == true, OnCompactLayoutChanged,
+                _config.ItemOrder, OnItemOrderChanged,
                 _config.FloatingMode == true, OnFloatingModeChanged,
                 _config.FloatingTopmost != false, OnFloatingTopmostChanged,
                 _config.FloatingAllowOutOfBounds == true, OnFloatingAllowOutOfBoundsChanged,
@@ -817,6 +819,15 @@ namespace task_monitor
             CloseDetail();
             _taskbars.SetCompactLayout(on);
             _settings?.SyncCompactLayout(on);
+        }
+
+        private void OnItemOrderChanged(IReadOnlyList<int> order)
+        {
+            var normalized = TaskbarWindow.NormalizeItemOrder(order);
+            _config.ItemOrder = TaskbarWindow.IsDefaultItemOrder(normalized) ? null : new List<int>(normalized);
+            TrySaveConfig();
+            CloseDetail();
+            _taskbars.SetItemOrder(normalized);
         }
 
         // 设置 外观 → 悬浮模式 (or the right-click menu's checkable item): persist (null =
