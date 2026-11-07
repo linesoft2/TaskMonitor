@@ -1133,7 +1133,9 @@ namespace task_monitor
         // ---------- 设置 → 采样: per-metric sampling switches ----------
 
         // 设置 → 采样 toggles ↔ the SystemSampler mask (one bit per overlay hit slot;
-        // a null yaml value means enabled, so only "off" is ever written).
+        // a null yaml value means enabled, so only "off" is ever written). The settings
+        // page keeps at least one metric on; CPU is the fallback for a hand-edited all-off
+        // config, so neither the sampler nor the overlay can receive an empty mask.
         private static int SamplingMaskOf(AppSettings c)
         {
             int mask = 0;
@@ -1142,7 +1144,7 @@ namespace task_monitor
             if (c.DiskSamplingEnabled != false) mask |= SystemSampler.MaskDisk;
             if (c.GpuSamplingEnabled != false) mask |= SystemSampler.MaskGpu;
             if (c.NetSamplingEnabled != false) mask |= SystemSampler.MaskNet;
-            return mask;
+            return mask == 0 ? SystemSampler.MaskCpu : mask;
         }
 
         // A metric expander's toggle flipped: persist (null = enabled), push the new mask

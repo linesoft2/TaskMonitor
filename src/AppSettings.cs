@@ -184,8 +184,9 @@ namespace task_monitor
 
         /// <summary>
         /// Per-metric sampling switches (设置 → 采样, one toggle per metric). null = enabled
-        /// (the default — only the disabled state is ever written). A disabled metric's
-        /// samplers are skipped entirely (<see cref="TaskbarWindow.SetMetricSamplingMask"/>
+        /// (the default — only the disabled state is ever written). At least one metric stays
+        /// enabled; a hand-edited all-off config falls back to CPU at runtime. A disabled
+        /// metric's samplers are skipped entirely (<see cref="TaskbarWindow.SetMetricSamplingMask"/>
         /// → <see cref="SystemSampler.SetEnabledMask"/>), its
         /// overlay slot is hidden (the remaining slots reflow to fill the space) and its
         /// column press is suppressed. App converts these to/from the SystemSampler mask

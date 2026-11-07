@@ -854,12 +854,23 @@ namespace task_monitor
         }
 
         // One handler for all five 采样 toggles — the switch's Tag carries the overlay
-        // hit slot (0=CPU 1=内存 2=磁盘 3=GPU 4=网络).
+        // hit slot (0=CPU 1=内存 2=磁盘 3=GPU 4=网络). The last enabled metric cannot
+        // be turned off; restore it without re-firing this handler.
         private void MetricSwitch_Toggled(object sender, RoutedEventArgs e)
         {
             if (!_loaded) return;
             if (sender is ToggleSwitch sw && int.TryParse(sw.Tag as string, out int slot))
+            {
+                if (!sw.IsOn && !CpuSwitch.IsOn && !RamSwitch.IsOn && !DiskSwitch.IsOn
+                    && !GpuSwitch.IsOn && !NetSwitch.IsOn)
+                {
+                    _loaded = false;
+                    sw.IsOn = true;
+                    _loaded = true;
+                    return;
+                }
                 _samplingChanged?.Invoke(slot, sw.IsOn);
+            }
         }
 
         private void MergeSwitch_Toggled(object sender, RoutedEventArgs e)

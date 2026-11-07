@@ -52,10 +52,12 @@ exemption: [`gotchas.md` §26](gotchas.md#26-合并相同程序-merges-before-th
 | WM_APP | **YES — `WM_APP_SET_METRICS`**: the slot is hidden and the overlay re-lays-out/resizes |
 
 App converts the five nullable booleans to/from one int mask (`SamplingMaskOf`), bit order
-= overlay hit-slot order (`SystemSampler.MaskCpu` … `MaskNet`). This mask is **separate**
-from `TaskbarWindow._clickDisabledMask` (pinned-window press suppression) — unpinning must
-never re-enable a sampling-disabled slot. Details, including the re-enable baseline
-priming: [`gotchas.md` §25](gotchas.md#25-per-metric-sampling-switches-use-a-mask-separate-from-the-pinned-window-click-mask).
+= overlay hit-slot order (`SystemSampler.MaskCpu` … `MaskNet`). At least one metric must stay
+enabled: the settings page restores the last switch when its close is attempted, and a
+hand-edited all-off config falls back to CPU so the runtime mask is never zero. This mask is
+**separate** from `TaskbarWindow._clickDisabledMask` (pinned-window press suppression) —
+unpinning must never re-enable a sampling-disabled slot. Details, including the re-enable
+baseline priming: [`gotchas.md` §25](gotchas.md#25-per-metric-sampling-switches-use-a-mask-separate-from-the-pinned-window-click-mask).
 
 ## 3. 磁盘 / GPU 显示方式 — `DiskDisplay` + `DiskDisplayIndex`, `GpuDisplay` + `GpuDisplayIndex`
 
