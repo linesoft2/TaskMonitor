@@ -112,7 +112,22 @@ namespace task_monitor
         // needs so a click can raise it above the foreground window.
         public const int MA_ACTIVATE = 1;
 
+        public const uint WM_RBUTTONDOWN = 0x0204;
         public const uint WM_RBUTTONUP = 0x0205;
+
+        public const int WH_MOUSE_LL = 14;
+        public delegate IntPtr LowLevelMouseProc(int code, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true, ExactSpelling = true)]
+        public static extern IntPtr SetWindowsHookExW(int idHook, LowLevelMouseProc callback,
+            IntPtr module, uint threadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
 
         // SetWindowPos insertion-after handles / flags.
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);

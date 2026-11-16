@@ -179,6 +179,7 @@ namespace task_monitor
         {
             Logger.Info("退出");
             _stopping = true;
+            _menuRightClickDismiss?.Dispose();
             _secondInstanceWait?.Unregister(null);
             _secondInstanceWait = null;
             _secondInstanceEvent?.Dispose();
@@ -359,7 +360,7 @@ namespace task_monitor
             _taskbars.ToggleCallback = (source, column) =>
                 Dispatcher.BeginInvoke(new Action(() => ToggleDetail(source, column)));
             _taskbars.RightClickRequested = () =>
-                Dispatcher.BeginInvoke(new Action(ShowTaskbarMenu));
+                Dispatcher.BeginInvoke(new Action(ToggleTaskbarMenu));
             _taskbars.AnchorRemoved = OnAnchorRemoved;
             _taskbars.CatalogChanged = OnTaskbarCatalogChanged;
             _sampling.SnapshotChanged = snapshot =>
@@ -671,6 +672,7 @@ namespace task_monitor
 
         // ---------- Right-click context menu (悬浮模式 / 置顶显示 / 设置 / Exit) ----------
         private ContextMenu _taskbarMenu;
+        private ContextMenuRightClickDismiss _menuRightClickDismiss;
         private MenuItem _menuFloating;
         private MenuItem _menuFloatingTopmost;
         private MenuItem _menuFloatingEdgeHide;
@@ -680,9 +682,16 @@ namespace task_monitor
         // The settings window — at most one; a second menu click re-activates it.
         private SettingsWindow _settings;
 
-        private void ShowTaskbarMenu()
+        private void ToggleTaskbarMenu()
         {
             EnsureTaskbarMenu();
+            Logger.Info($"右键菜单：收到覆盖层松开请求，当前打开={_taskbarMenu.IsOpen}");
+            if (_taskbarMenu.IsOpen)
+            {
+                _taskbarMenu.IsOpen = false;
+                return;
+            }
+
             // WPF Popup chooses its initial DPI from PlacementTarget's location, even with
             // Placement=MousePoint. Move the invisible host to the cursor in physical pixels
             // and flush the resulting WM_DPICHANGED before the menu creates its popup HWND.
@@ -1282,6 +1291,7 @@ namespace task_monitor
 
             _taskbarMenu = new ContextMenu();
             _taskbarMenu.SetResourceReference(FrameworkElement.StyleProperty, "DefaultContextMenuStyle");
+            _menuRightClickDismiss = new ContextMenuRightClickDismiss(_taskbarMenu);
             _taskbarMenu.Items.Add(_menuFloating);
             _taskbarMenu.Items.Add(_menuFloatingTopmost);
             _taskbarMenu.Items.Add(_menuFloatingEdgeHide);

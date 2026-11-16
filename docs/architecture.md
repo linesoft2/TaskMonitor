@@ -78,7 +78,7 @@ disagree, the code wins — fix this file.
 `App` owns the controller and manager; UI callbacks hop through `Dispatcher.BeginInvoke`:
 
 - Overlay→UI: `Action<TaskbarWindow,int> ToggleCallback` (the CLICKED source + slot),
-  `RightClickRequested`, floating position/drag callbacks, and `AnchorRemoved`. The source is
+  `RightClickRequested` (right-button up), floating position/drag callbacks, and `AnchorRemoved`. The source is
   captured per entry; stale entries are ignored.
 - Sampling→overlays/UI: controller publishes one `SnapshotChanged`. The manager calls
   `PublishSnapshot` for every overlay (each applies it on its own HWND thread over
