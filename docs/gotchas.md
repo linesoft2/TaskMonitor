@@ -154,10 +154,24 @@ proves the rule: it is a NATIVE DirectComposition window, so FluentWpfCore (a WP
 property) cannot reach it — `WindowBackdropInterop` makes the identical accent call with the
 identical tint constants instead (§36). The right-click menu's invisible host is `Activate()`d,
 closes on `Deactivated`, and gets `WS_EX_TOOLWINDOW` at `SourceInitialized` (without it the host
-shows in Alt+Tab). Before EVERY open, `ShowTaskbarMenu` moves that host to the physical cursor
+shows in Alt+Tab). Before EVERY open, `ToggleTaskbarMenu` moves that host to the physical cursor
 and calls `UpdateLayout`: WPF Popup picks its initial DPI from the PlacementTarget's location,
 not from `Placement=MousePoint`, so an offscreen/stale host gives a secondary-screen menu the
 primary DPI.
+
+Right-click dismissal belongs to `src/UI/Common/ContextMenuRightClickDismiss.cs`. The overlay
+opens on `WM_RBUTTONUP`; opening on DOWN was unreliable across the native/WPF input queues
+(the first release could dismiss the popup). Checking `IsOpen` only in the dispatched toggle
+also races with WPF capture/deactivation closing the popup before that callback runs.
+
+While open, a scoped `WH_MOUSE_LL` hook consumes the next right DOWN and its matching UP before
+either input queue receives them, and posts the close to the UI dispatcher. This covers both
+inside and outside right clicks without activating an item or opening a replacement menu. Hook
+callbacks do no layout or logging. Closing normally removes the hook; a swallowed DOWN retains
+it until its UP is consumed, and App disposes it on exit. The delegate stays rooted throughout
+registration; failed unhook retains the handle for retry. Left clicks, keyboard input and all
+input while the menu is closed retain their normal paths. Event-point logs record installation,
+close and consumed release so user-driven UI acceptance can be checked without synthetic input.
 
 ## 9. `NetSampler` never enumerates NICs per tick
 

@@ -4565,11 +4565,15 @@ namespace task_monitor
                     return IntPtr.Zero;
                 }
 
+                case WindowInterop.WM_RBUTTONDOWN:
+                    return IntPtr.Zero;
+
                 case WindowInterop.WM_RBUTTONUP:
-                {
+                    // Open after release so the cross-thread WPF popup never sees the
+                    // opening button still pressed. ContextMenuRightClickDismiss owns
+                    // BOTH halves of a subsequent closing click before queue dispatch.
                     StateOf(hwnd)?.RightClickRequested?.Invoke();
                     return IntPtr.Zero;
-                }
 
                 case WindowInterop.WM_APP_DESELECT:
                 {
