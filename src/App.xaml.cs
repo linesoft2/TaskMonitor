@@ -698,6 +698,16 @@ namespace task_monitor
             }
             _menuHost.Activate();            // make it the active window so deactivation closes the menu
             _taskbarMenu.IsOpen = true;      // Placement=MousePoint → opens at the cursor
+            ParkMenuHost();                  // 宿主只借光标处刷 DPI; 留在屏上时它的窗壳/焦点提示框会显形在光标处
+        }
+
+        // 激活与位置无关: 停回屏外不影响"点外部 → Deactivated → 关菜单"。
+        private void ParkMenuHost()
+        {
+            var hwnd = new WindowInteropHelper(_menuHost).Handle;
+            if (hwnd != IntPtr.Zero)
+                WindowInterop.SetWindowPos(hwnd, IntPtr.Zero, -10000, -10000, 0, 0,
+                    WindowInterop.SWP_NOSIZE | WindowInterop.SWP_NOZORDER | WindowInterop.SWP_NOACTIVATE);
         }
 
         private static bool SupportsSnapToStart(IReadOnlyList<TaskbarDisplayInfo> displays,
